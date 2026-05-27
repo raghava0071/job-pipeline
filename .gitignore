@@ -1,3 +1,4 @@
+raghav_profile.py
 data/raw_jobs.csv
 data/filtered_jobs.csv
 data/apply_log.json
@@ -7,4 +8,5 @@ resumes/
 cover_letters/
 __pycache__/
 *.pyc
-raghav_profile.py
+.env
+*.log
