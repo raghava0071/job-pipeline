@@ -1,0 +1,9 @@
+data/raw_jobs.csv
+data/filtered_jobs.csv
+data/apply_log.json
+data/Application_Tracker.xlsx
+data/screenshots/
+resumes/
+cover_letters/
+__pycache__/
+*.pyc
