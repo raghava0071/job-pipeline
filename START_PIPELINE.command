@@ -1,117 +1,259 @@
 #!/bin/bash
 # ====================================================================
-#  RAGHAVENDRA KARANAM — PRO JOB APPLICATION PIPELINE LAUNCHER
-#  Double-click in Finder to run. Choose a mode from the menu.
+#  RAGHAVENDRA KARANAM — JOB APPLICATION PIPELINE
+#  Double-click in Finder to run.
+#
+#  STRICT RULES (hardcoded, never change):
+#    ✅ LinkedIn  → Easy Apply ONLY (never external redirect)
+#    ✅ Indeed    → In-Portal ONLY  (never "Apply on Company Site")
+#    ❌ All other portals  → SKIP
+#    ✅ Claude fit gate    → Only score ≥ 65% gets a resume + apply
 # ====================================================================
 
-PIPELINE_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$PIPELINE_DIR"
+# Remove macOS quarantine flag so script runs without Gatekeeper block
+xattr -d com.apple.quarantine "$0" 2>/dev/null
 
+PIPELINE_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$PIPELINE_DIR" || exit 1
+
+# ── Python binary (prefer conda) ─────────────────────────────────────────────
+PY="/opt/anaconda3/bin/python3"
+if ! command -v "$PY" &>/dev/null; then
+    PY="$(command -v python3 || command -v python)"
+fi
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+hr() { echo "  ──────────────────────────────────────────────────────────"; }
+ok() { echo "  ✅  $1"; }
+info() { echo "  ℹ️   $1"; }
+warn() { echo "  ⚠️   $1"; }
+
+# ── Banner ────────────────────────────────────────────────────────────────────
+clear
 echo ""
 echo "╔══════════════════════════════════════════════════════════════════╗"
-echo "║      RAGHAVENDRA KARANAM — PRO JOB APPLICATION PIPELINE          ║"
-echo "║        Data Engineer  |  98%+ ATS  |  Auto-Apply Engine           ║"
+echo "║      RAGHAVENDRA KARANAM  —  PRO JOB APPLICATION PIPELINE        ║"
+echo "║   LinkedIn Easy Apply  +  Indeed In-Portal  •  Claude AI Scoring  ║"
 echo "╚══════════════════════════════════════════════════════════════════╝"
 echo ""
+echo "  Python: $PY"
+echo "  Dir   : $PIPELINE_DIR"
+hr
+echo ""
 
-# ── STEP 0: Load RapidAPI key ─────────────────────────────────────────────────
-OLD_PIPELINE="$HOME/Desktop/job-pipeline-project/pipeline.py"
-RAPIDAPI_KEY=""
-
-if [ -f "$OLD_PIPELINE" ]; then
-    RAPIDAPI_KEY=$(grep -o '"[A-Za-z0-9]\{40,\}"' "$OLD_PIPELINE" | head -1 | tr -d '"')
-    if [ -z "$RAPIDAPI_KEY" ]; then
-        RAPIDAPI_KEY=$(grep -o "'[A-Za-z0-9]\{40,\}'" "$OLD_PIPELINE" | head -1 | tr -d "'")
-    fi
+# ── Step 0: Quick dependency check ───────────────────────────────────────────
+echo "  📦  Checking dependencies..."
+"$PY" -c "import anthropic, pandas, playwright, docx, openpyxl, rich" 2>/dev/null
+if [ $? -ne 0 ]; then
+    echo "  Installing missing packages..."
+    "$PY" -m pip install anthropic rich pandas openpyxl playwright python-docx \
+        --quiet --break-system-packages 2>/dev/null \
+      || "$PY" -m pip install anthropic rich pandas openpyxl playwright python-docx --quiet 2>/dev/null
+    "$PY" -m playwright install chromium 2>/dev/null
 fi
-
-if [ -n "$RAPIDAPI_KEY" ]; then
-    echo "  ✅  RapidAPI key loaded"
-    export RAPIDAPI_KEY
-else
-    echo "  Enter your RapidAPI key:"
-    read -r RAPIDAPI_KEY
-    export RAPIDAPI_KEY
-fi
+ok "Dependencies ready"
 echo ""
 
-# ── STEP 1: Install all dependencies ─────────────────────────────────────────
-echo "  📦  Installing Python dependencies..."
-pip install python-docx openpyxl pandas requests playwright \
-    --quiet --break-system-packages 2>/dev/null \
-  || pip install python-docx openpyxl pandas requests playwright --quiet 2>/dev/null \
-  || pip3 install python-docx openpyxl pandas requests playwright --quiet
-
-echo "  🌐  Installing Playwright browser (for auto-apply)..."
-python -m playwright install chromium 2>/dev/null \
-  || python3 -m playwright install chromium 2>/dev/null
-
-echo "  ✅  All dependencies ready"
+# ── Mode menu ────────────────────────────────────────────────────────────────
+echo "  ┌──────────────────────────────────────────────────────────────┐"
+echo "  │  Choose what to do:                                           │"
+echo "  │                                                               │"
+echo "  │  1) 🔄  Full run  (scrape → score → build resumes → apply)   │"
+echo "  │         Scrapes LinkedIn + Indeed → Claude scores all jobs    │"
+echo "  │         Builds custom resumes → confirms → auto-applies       │"
+echo "  │                                                               │"
+echo "  │  2) 🔵  LinkedIn Easy Apply only                              │"
+echo "  │         Scrape LinkedIn → score → build resumes → apply       │"
+echo "  │                                                               │"
+echo "  │  3) 🟡  Indeed In-Portal only                                 │"
+echo "  │         Scrape Indeed → score → build resumes → apply         │"
+echo "  │                                                               │"
+echo "  │  4) 📊  Score + build resumes  (skip scraping)               │"
+echo "  │         Uses existing linkedin_jobs.csv / indeed_jobs.csv     │"
+echo "  │                                                               │"
+echo "  │  5) 👀  Preview apply queue  (dry run, no submissions)        │"
+echo "  │                                                               │"
+echo "  │  6) 🚀  Apply NOW  (resumes already built, just apply)        │"
+echo "  │                                                               │"
+echo "  └──────────────────────────────────────────────────────────────┘"
 echo ""
-
-# ── STEP 2: Choose mode ───────────────────────────────────────────────────────
-echo "  ┌──────────────────────────────────────────────────────────┐"
-echo "  │  Choose pipeline mode:                                    │"
-echo "  │                                                           │"
-echo "  │  1) Full pipeline  — Fetch jobs + build resumes           │"
-echo "  │     (fetches fresh jobs, builds 98%+ ATS resumes)         │"
-echo "  │                                                           │"
-echo "  │  2) Full pipeline + AUTO-APPLY                            │"
-echo "  │     (same as 1, then auto-applies via LinkedIn/browser)   │"
-echo "  │                                                           │"
-echo "  │  3) Use existing jobs + rebuild resumes                   │"
-echo "  │     (skips API fetch, reuses raw_jobs.csv)                │"
-echo "  │                                                           │"
-echo "  │  4) Auto-apply ONLY (resumes already built)               │"
-echo "  │                                                           │"
-echo "  │  5) Preview auto-apply (dry run — no real applications)   │"
-echo "  └──────────────────────────────────────────────────────────┘"
-echo ""
-echo -n "  Enter choice [1-5]: "
+echo -n "  Enter choice [1-6]: "
 read -r CHOICE
-
 echo ""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SUB-FUNCTIONS
+# ═════════════════════════════════════════════════════════════════════════════
+
+run_linkedin_scrape() {
+    echo ""
+    echo "  🔵  Step 1/3 — Scraping LinkedIn Easy Apply jobs..."
+    hr
+    "$PY" linkedin_scraper.py
+    LINKEDIN_COUNT=$([ -f data/linkedin_jobs.csv ] && tail -n +2 data/linkedin_jobs.csv | wc -l | tr -d ' ' || echo 0)
+    echo ""
+    ok "LinkedIn: $LINKEDIN_COUNT Easy Apply jobs collected → data/linkedin_jobs.csv"
+}
+
+run_indeed_scrape() {
+    echo ""
+    echo "  🟡  Step 2/3 — Scraping Indeed In-Portal jobs..."
+    hr
+    "$PY" indeed_scraper.py
+    INDEED_COUNT=$([ -f data/indeed_jobs.csv ] && tail -n +2 data/indeed_jobs.csv | wc -l | tr -d ' ' || echo 0)
+    echo ""
+    ok "Indeed: $INDEED_COUNT In-Portal jobs collected → data/indeed_jobs.csv"
+}
+
+run_score_and_build() {
+    local label="${1:-Step}"
+    echo ""
+    echo "  🤖  $label — Claude AI scoring + custom resume build..."
+    hr
+    echo "  This scores every job (0-100%) and builds a tailored resume for each."
+    echo "  Only jobs scoring ≥ 65% will get a resume and appear in the apply queue."
+    echo ""
+    "$PY" master_run.py --skip-fetch
+}
+
+run_dry_run() {
+    echo ""
+    echo "  👀  Dry-run preview — showing apply queue (no submissions)..."
+    hr
+    "$PY" auto_apply.py --dry-run
+}
+
+run_apply() {
+    local source_flag="${1:---source all}"
+    echo ""
+    echo "  ──────────────────────────────────────────────────────────────"
+    echo "  ⚡  About to ACTUALLY APPLY to jobs on LinkedIn & Indeed."
+    echo "  ──────────────────────────────────────────────────────────────"
+    echo ""
+    echo "  Rules enforced automatically:"
+    echo "    • LinkedIn  → Easy Apply button ONLY (skips external)"
+    echo "    • Indeed    → In-Portal ONLY (skips 'Apply on Company Site')"
+    echo "    • Fit gate  → Only ≥ 65% Claude score"
+    echo "    • Custom resume attached to every application"
+    echo ""
+    echo -n "  Type YES to apply, or press Enter to cancel: "
+    read -r CONFIRM
+    echo ""
+
+    if [ "$CONFIRM" = "YES" ]; then
+        "$PY" auto_apply.py --execute $source_flag
+    else
+        warn "Cancelled — no applications submitted."
+        info "Run option 5 to preview the queue, or 6 when ready to apply."
+    fi
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DISPATCH
+# ═════════════════════════════════════════════════════════════════════════════
 
 case "$CHOICE" in
-    1)
-        echo "  🚀  Running full pipeline (fetch + resume build)..."
-        python master_run.py 2>&1 || python3 master_run.py 2>&1
-        ;;
-    2)
-        echo "  🚀  Running full pipeline + AUTO-APPLY..."
-        echo "  📧  LinkedIn credentials will be prompted during auto-apply."
+
+    1)  # Full run: both scrapers → score → apply
+        echo "  🔄  FULL RUN — LinkedIn + Indeed → Score → Build → Apply"
+        hr
+
+        run_linkedin_scrape
+        run_indeed_scrape
+        run_score_and_build "Step 3/3"
+
         echo ""
-        python master_run.py --auto-apply 2>&1 || python3 master_run.py --auto-apply 2>&1
+        hr
+        echo "  📋  APPLY QUEUE PREVIEW (jobs qualifying at ≥65% fit score):"
+        hr
+        "$PY" auto_apply.py --dry-run
+        hr
+
+        run_apply "--source all"
         ;;
-    3)
-        echo "  🚀  Rebuilding resumes from existing jobs..."
-        python master_run.py --skip-fetch 2>&1 || python3 master_run.py --skip-fetch 2>&1
+
+    2)  # LinkedIn only
+        echo "  🔵  LINKEDIN ONLY — Easy Apply jobs"
+        hr
+
+        run_linkedin_scrape
+        run_score_and_build "Step 2/2"
+
+        echo ""
+        hr
+        echo "  📋  LINKEDIN APPLY QUEUE PREVIEW:"
+        hr
+        "$PY" auto_apply.py --dry-run --source linkedin
+        hr
+
+        run_apply "--source linkedin"
         ;;
-    4)
-        echo "  🤖  Running auto-apply engine only..."
-        echo "  📧  Enter your LinkedIn email (for Easy Apply automation):"
-        read -r LINKEDIN_EMAIL
-        export LINKEDIN_EMAIL
-        python auto_apply.py --execute 2>&1 || python3 auto_apply.py --execute 2>&1
+
+    3)  # Indeed only
+        echo "  🟡  INDEED ONLY — In-Portal jobs"
+        hr
+
+        run_indeed_scrape
+        run_score_and_build "Step 2/2"
+
+        echo ""
+        hr
+        echo "  📋  INDEED APPLY QUEUE PREVIEW:"
+        hr
+        "$PY" auto_apply.py --dry-run --source indeed
+        hr
+
+        run_apply "--source indeed"
         ;;
-    5)
-        echo "  👀  Dry-run preview (no real applications submitted)..."
-        python auto_apply.py --execute --dry-run 2>&1 || python3 auto_apply.py --execute --dry-run 2>&1
+
+    4)  # Score and build only (already have CSVs)
+        echo "  📊  SCORE + BUILD — using existing scraped job files"
+        hr
+
+        # Show what we have
+        LI=$([ -f data/linkedin_jobs.csv ] && tail -n +2 data/linkedin_jobs.csv | wc -l | tr -d ' ' || echo 0)
+        IND=$([ -f data/indeed_jobs.csv ] && tail -n +2 data/indeed_jobs.csv | wc -l | tr -d ' ' || echo 0)
+        info "linkedin_jobs.csv : $LI jobs"
+        info "indeed_jobs.csv   : $IND jobs"
+
+        if [ "$LI" -eq 0 ] && [ "$IND" -eq 0 ]; then
+            warn "No job files found. Run option 1, 2, or 3 first to scrape jobs."
+            echo ""
+        else
+            run_score_and_build "Scoring + building resumes"
+        fi
         ;;
+
+    5)  # Preview dry run
+        echo "  👀  PREVIEW — Apply queue (no applications submitted)"
+        hr
+        "$PY" auto_apply.py --dry-run
+        ;;
+
+    6)  # Apply now (resumes already built)
+        echo "  🚀  APPLY NOW — resumes already built"
+        hr
+        run_dry_run
+        run_apply "--source all"
+        ;;
+
     *)
-        echo "  Running full pipeline..."
-        python master_run.py 2>&1 || python3 master_run.py 2>&1
+        warn "Invalid choice. Running dry-run preview instead..."
+        "$PY" auto_apply.py --dry-run
         ;;
 esac
 
+# ── Final summary ─────────────────────────────────────────────────────────────
 echo ""
-echo "  ═══════════════════════════════════════════════════════════"
-echo "  📁  Your files are saved in:"
-echo "      Resumes:        $(pwd)/output/resumes/"
-echo "      Cover Letters:  $(pwd)/output/cover_letters/"
-echo "      Tracker:        $(pwd)/data/Application_Tracker.xlsx"
-echo "      Apply Log:      $(pwd)/data/apply_log.json"
-echo "  ═══════════════════════════════════════════════════════════"
+hr
+echo "  📁  Files:"
+echo "      LinkedIn jobs : $PIPELINE_DIR/data/linkedin_jobs.csv"
+echo "      Indeed jobs   : $PIPELINE_DIR/data/indeed_jobs.csv"
+echo "      Resumes       : $PIPELINE_DIR/resumes/"
+echo "      Cover letters : $PIPELINE_DIR/cover_letters/"
+echo "      Apply log     : $PIPELINE_DIR/data/apply_log.json"
+echo "      Tracker       : $PIPELINE_DIR/data/Application_Tracker.xlsx"
+hr
 echo ""
 echo "  Press any key to close..."
 read -n 1 -s
