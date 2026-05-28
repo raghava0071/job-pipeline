@@ -1,277 +1,523 @@
-#!/usr/bin/env python3
+#!/opt/anaconda3/bin/python3
 # =============================================================================
-# MASTER_RUN.PY — Pro Job Application Pipeline Orchestrator (PRO v3)
-#
-# WHAT THIS DOES:
-#   Step 1 — Fetch live jobs from JSearch / RapidAPI
-#   Step 2 — Parse JDs, score ATS (shows BEFORE → AFTER per job)
-#   Step 3 — Build tailored Word resumes (verified 98%+ ATS coverage)
-#   Step 4 — Generate personalised cover letters
-#   Step 5 — Create / update Excel application tracker
-#   Step 6 — (Optional) Auto-apply via Playwright
+# MASTER_RUN.PY — Job Pipeline Orchestrator with Live Dashboard
+# Powered by Claude claude-sonnet-4-6
 #
 # USAGE:
-#   python master_run.py                          # Full pipeline
-#   python master_run.py --skip-fetch             # Use existing raw_jobs.csv
-#   python master_run.py --role "Azure Data Engineer"
-#   python master_run.py --auto-apply             # Run + auto-apply at the end
-#   python master_run.py --auto-apply --dry-run   # Preview auto-apply
-#   python master_run.py --skip-fetch --auto-apply --limit 5
+#   python master_run.py                  # Full run: fetch + score + resume + track
+#   python master_run.py --apply          # Full run + auto-apply LinkedIn/Indeed
+#   python master_run.py --skip-fetch     # Use existing jobs, rebuild resumes
+#   python master_run.py --dry-run        # Score + preview, no apply
+#   python master_run.py --limit 20       # Process first 20 jobs only
 # =============================================================================
 
-import os
 import sys
 import time
 import argparse
+from pathlib import Path
 from datetime import datetime
 
-sys.path.insert(0, os.path.dirname(__file__))
+# ── Install Rich if needed ────────────────────────────────────────────────────
+try:
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+    from rich import box
+    from rich.rule import Rule
+    HAS_RICH = True
+except ImportError:
+    import subprocess
+    subprocess.run([sys.executable, "-m", "pip", "install", "rich", "--quiet",
+                   "--break-system-packages"], capture_output=True)
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+        from rich import box
+        from rich.rule import Rule
+        HAS_RICH = True
+    except ImportError:
+        HAS_RICH = False
 
-BANNER = """
-╔══════════════════════════════════════════════════════════════════╗
-║       RAGHAVENDRA KARANAM — PRO JOB APPLICATION PIPELINE         ║
-║            Data Engineer  |  Delray Beach, FL                    ║
-║   98%+ ATS Resume Tailoring  •  Auto-Apply via Playwright         ║
-╚══════════════════════════════════════════════════════════════════╝
-"""
+try:
+    import pandas as pd
+except ImportError:
+    sys.exit("Run: pip install pandas")
 
+PIPELINE_DIR = Path(__file__).parent
+sys.path.insert(0, str(PIPELINE_DIR))
 
-# =============================================================================
-# API KEY CHECK
-# =============================================================================
+console = Console() if HAS_RICH else None
 
-def check_api_key() -> str:
-    key = os.environ.get("RAPIDAPI_KEY", "")
-    if not key or key == "REPLACE_WITH_YOUR_KEY":
-        pipeline_path = os.path.join(os.path.dirname(__file__), "pipeline.py")
-        if os.path.exists(pipeline_path):
-            with open(pipeline_path) as f:
-                for line in f:
-                    if "RAPIDAPI_KEY" in line and "=" in line and "environ" not in line:
-                        val = line.split("=")[-1].strip().strip('"').strip("'")
-                        if val and val != "REPLACE_WITH_YOUR_KEY":
-                            return val
-        print("\n❌ RAPIDAPI_KEY not set!")
-        print("   Open pipeline.py and replace REPLACE_WITH_YOUR_KEY with your key.")
-        print("   Or: export RAPIDAPI_KEY='your_key_here'")
-        sys.exit(1)
-    return key
+# ── DESCRIPTION EXTRACTOR ─────────────────────────────────────────────────────
+def _find_desc_col(df):
+    """
+    Robustly find the job description column.
+    Priority: explicit names → keyword match → highlights/skills fallback.
+    Returns (col_name_or_None, fallback_cols_list)
+    """
+    # 1. Explicit exact names (from JSearch / common APIs)
+    for exact in ["job_description", "description", "jobDescription",
+                  "job_details", "full_description"]:
+        if exact in df.columns:
+            return exact, []
 
+    # 2. Substring match
+    for c in df.columns:
+        cl = c.lower()
+        if any(k in cl for k in ["description", "desc", "requirement", "detail", "summary"]):
+            return c, []
 
-# =============================================================================
-# SCORE IMPROVEMENT TABLE PRINTER
-# =============================================================================
+    # 3. Fallback — combine highlights + skills (better than nothing)
+    fallbacks = [c for c in df.columns
+                 if any(k in c.lower() for k in ["highlight", "skill", "qualif"])]
+    return None, fallbacks
 
-def print_score_table(filtered_df, resume_results=None):
-    """Print a clear BEFORE → AFTER ATS score table."""
-    print("\n" + "═" * 72)
-    print("  ATS SCORE RESULTS — BEFORE vs AFTER RESUME TAILORING")
-    print("═" * 72)
-    print(f"  {'Job Title':<28}  {'Company':<18}  Before  After   Delta  Rating")
-    print(f"  {'─'*28}  {'─'*18}  {'─'*6}  {'─'*6}  {'─'*5}  {'─'*6}")
+def _get_jd_text(row, desc_col, fallback_cols):
+    """
+    Return the best available job description text from a row.
+    Never returns empty string if any text source exists.
+    """
+    if desc_col:
+        val = str(row.get(desc_col, "") or "").strip()
+        if val and val.lower() not in ("nan", "none", ""):
+            return val
 
-    for i, (_, row) in enumerate(filtered_df.iterrows()):
-        # Prefer actual scores (from resume builder), fall back to estimated
-        before = float(row.get("actual_initial_score",   row.get("initial_score",   0)))
-        after  = float(row.get("actual_optimized_score", row.get("optimized_score", 0)))
+    # Try fallback columns
+    parts = []
+    for c in fallback_cols:
+        v = str(row.get(c, "") or "").strip()
+        if v and v.lower() not in ("nan", "none", ""):
+            parts.append(v)
+    return " | ".join(parts)
 
-        # If resume_results available, use those actual scores
-        if resume_results and i < len(resume_results):
-            _, actual_ini, actual_opt = resume_results[i]
-            before = actual_ini
-            after  = actual_opt
+def log(msg, style=""):
+    if console:
+        console.print(msg, style=style)
+    else:
+        print(msg)
 
-        delta  = after - before
-        rating = "🟢 GREAT" if after >= 95 else ("🟡 GOOD" if after >= 80 else "🔴 LOW")
-        print(
-            f"  {str(row.get('title',''))[:28]:<28}  "
-            f"{str(row.get('company',''))[:18]:<18}  "
-            f"{before:>5.0f}%  {after:>5.1f}%  +{delta:>3.0f}%  {rating}"
+def step(emoji, title):
+    if HAS_RICH:
+        console.print(f"\n[bold white]{emoji}  {title}[/bold white]")
+        console.print(Rule(style="dim"))
+    else:
+        print(f"\n{'─'*50}\n{emoji}  {title}")
+
+def ok(msg):   log(f"  [green]✓[/green]  {msg}" if HAS_RICH else f"  ✓  {msg}")
+def warn(msg): log(f"  [yellow]⚠[/yellow]  {msg}" if HAS_RICH else f"  ⚠  {msg}")
+def info(msg): log(f"  [dim]{msg}[/dim]"           if HAS_RICH else f"     {msg}")
+
+# ── HEADER ────────────────────────────────────────────────────────────────────
+def print_header():
+    if not HAS_RICH:
+        print("\n" + "="*60)
+        print("  JOB PIPELINE — Raghavendra Karanam")
+        print("="*60 + "\n")
+        return
+    console.print()
+    console.print(Panel.fit(
+        "[bold cyan]🚀  JOB PIPELINE — Raghavendra Karanam[/bold cyan]\n"
+        "[dim]Data Analyst  •  Data Engineer  •  Data Scientist[/dim]\n"
+        f"[dim]{datetime.now().strftime('%Y-%m-%d %H:%M')}[/dim]",
+        border_style="cyan", padding=(1, 4),
+    ))
+    console.print()
+
+# ── STEP 1: FETCH ─────────────────────────────────────────────────────────────
+def step_fetch(args):
+    step("📡", "Fetching Jobs")
+    RAW_CSV = PIPELINE_DIR / "data" / "raw_jobs.csv"
+
+    if args.skip_fetch and RAW_CSV.exists():
+        df = pd.read_csv(RAW_CSV)
+        ok(f"Using cached {len(df)} jobs from raw_jobs.csv")
+        return df
+
+    try:
+        import pipeline as pip_mod
+        with Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}"),
+                      console=console, transient=True) as p:
+            t = p.add_task("Searching LinkedIn, Indeed, RapidAPI...", total=None)
+            # Fetch all configured queries and combine into one DataFrame
+            all_records = []
+            for query in pip_mod.SEARCH_QUERIES:
+                records = pip_mod.fetch_jobs(query)
+                all_records.extend(records)
+            df = pip_mod.clean_dataframe(all_records)
+            p.update(t, completed=True)
+        ok(f"Fetched {len(df)} jobs")
+        RAW_CSV.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(RAW_CSV, index=False)
+        return df
+    except Exception as e:
+        warn(f"Fetch error: {e}")
+        if RAW_CSV.exists():
+            df = pd.read_csv(RAW_CSV)
+            warn(f"Using cached {len(df)} jobs")
+            return df
+        return pd.DataFrame()
+
+# ── STEP 2: FILTER LEVEL ──────────────────────────────────────────────────────
+def step_filter(df):
+    step("🎯", "Filtering — Entry & Mid Level Data Jobs Only")
+    from claude_engine import is_good_level
+
+    TARGET = [
+        "data analyst", "data engineer", "data scientist", "analytics engineer",
+        "business analyst", "bi analyst", "business intelligence", "ml engineer",
+        "machine learning", "etl", "reporting analyst", "insights analyst",
+        "quantitative analyst", "database", "analytics",
+    ]
+    title_col = next((c for c in df.columns if "title" in c.lower()), None)
+    if not title_col:
+        warn("No title column — skipping filter")
+        return df
+
+    before = len(df)
+    mask_data  = df[title_col].str.lower().apply(lambda t: any(kw in str(t) for kw in TARGET))
+    mask_level = df[title_col].apply(lambda t: is_good_level(str(t)))
+    result = df[mask_data & mask_level].copy()
+
+    ok(f"Kept {len(result)} / {before} jobs  (entry/mid data roles)")
+    return result if len(result) > 0 else df
+
+# ── STEP 3: CLAUDE FIT SCORING ────────────────────────────────────────────────
+def step_score(df, limit=0):
+    step("🤖", "Claude Scoring — Fit Analysis per Job")
+
+    try:
+        import claude_engine as ce
+        import raghav_profile as rp
+    except ImportError as e:
+        warn(f"Import error: {e}")
+        df["fit_score"] = 65; df["fit_grade"] = "C"; df["fit_apply"] = True
+        return df
+
+    if not ce.CLAUDE_AVAILABLE:
+        warn("Claude API unavailable — using default scores")
+        df["fit_score"] = 65; df["fit_grade"] = "C"; df["fit_apply"] = True
+        return df
+
+    # Build full profile by merging all raghav_profile module variables
+    full_profile = {
+        **rp.PROFILE,
+        "skills": getattr(rp, "ALL_SKILLS_FLAT", []) or
+                  [s for grp in getattr(rp, "SKILLS", {}).values() for s in grp],
+        "experience": getattr(rp, "EXPERIENCE", []),
+        "education":  getattr(rp, "EDUCATION",  []),
+        "summary": (
+            "Data professional with hands-on experience in data engineering, "
+            "ETL pipelines, SQL, Python, cloud platforms (Azure, AWS, GCP), "
+            "Apache Spark, Kafka, and analytics tools."
+        ),
+    }
+    summary   = ce.build_profile_summary(full_profile)
+    title_col = next((c for c in df.columns if "title" in c.lower()), df.columns[0])
+    co_col    = next((c for c in df.columns if any(k in c.lower()
+                     for k in ["company", "employer", "organization"])), None)
+    desc_col, fallback_cols = _find_desc_col(df)
+
+    # Debug: show what columns we found
+    info(f"Columns in CSV: {list(df.columns)}")
+    info(f"Using → title: {title_col}  |  company: {co_col}  |  desc: {desc_col or f'FALLBACK({fallback_cols})'}")
+    info(f"Profile skills count: {len(full_profile['skills'])}  |  experience roles: {len(full_profile['experience'])}")
+
+    # Sanity check: warn if descriptions look empty
+    if desc_col:
+        sample = str(df.iloc[0].get(desc_col, "")).strip()
+        if not sample or sample.lower() in ("nan", "none", ""):
+            warn(f"⚠  Column '{desc_col}' appears empty — scores may be low. Check raw_jobs.csv.")
+
+    cap = limit if limit > 0 else min(len(df), 50)
+    df  = df.head(cap).copy()
+
+    scores, grades, applys, reasons = [], [], [], []
+
+    with Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}"),
+                  BarColumn(bar_width=30), TextColumn("{task.completed}/{task.total}"),
+                  TimeElapsedColumn(), console=console) as prog:
+        task = prog.add_task("Scoring with Claude...", total=cap)
+        for _, row in df.iterrows():
+            jd_text = _get_jd_text(row, desc_col, fallback_cols)
+            res = ce.score_fit(
+                summary,
+                jd_text,
+                str(row.get(title_col, "Data Role")),
+                str(row.get(co_col, "Company")) if co_col else "Company",
+            )
+            scores.append(res.get("score", 65))
+            grades.append(res.get("grade", "C"))
+            applys.append(res.get("apply", True))
+            reasons.append(res.get("reasoning", ""))
+            prog.advance(task)
+            time.sleep(0.3)
+
+    df["fit_score"] = scores
+    df["fit_grade"] = grades
+    df["fit_apply"] = applys
+    df["fit_reasoning"] = reasons
+
+    good = sum(applys)
+    ok(f"Scored {cap} jobs — {good} good fits (≥{ce.FIT_THRESHOLD}%)")
+
+    if HAS_RICH:
+        a = sum(1 for s in scores if s >= 85)
+        b = sum(1 for s in scores if 70 <= s < 85)
+        c = sum(1 for s in scores if 55 <= s < 70)
+        d = sum(1 for s in scores if s < 55)
+        console.print(
+            f"\n  [bold green]A {a}[/bold green]  "
+            f"[cyan]B {b}[/cyan]  "
+            f"[yellow]C {c}[/yellow]  "
+            f"[red]D {d}[/red]"
         )
 
-    if not filtered_df.empty:
-        avg_before = filtered_df.get("actual_initial_score",
-                     filtered_df.get("initial_score",
-                     filtered_df.get("ats_score", [0]))).mean()
-        avg_after  = filtered_df.get("actual_optimized_score",
-                     filtered_df.get("optimized_score",
-                     filtered_df.get("ats_score", [0]))).mean()
-        print(f"\n  {'AVERAGE':<28}  {'─'*18}  {avg_before:>5.0f}%  {avg_after:>5.1f}%  "
-              f"+{avg_after - avg_before:>3.0f}%")
+    # Save scored jobs
+    scored_csv = PIPELINE_DIR / "data" / "filtered_jobs.csv"
+    df.to_csv(scored_csv, index=False)
+    info(f"Scored jobs saved → {scored_csv}")
+    return df
 
-    print("═" * 72 + "\n")
+# ── STEP 4: BUILD RESUMES ─────────────────────────────────────────────────────
+def step_resumes(df):
+    step("📄", "Building Custom Word Resumes")
 
+    apply_df  = df[df["fit_apply"]] if "fit_apply" in df.columns else df
+    if apply_df.empty:
+        warn("No jobs to build resumes for"); return df
 
-# =============================================================================
-# MAIN PIPELINE
-# =============================================================================
+    try:
+        import resume_builder as rb
+        import jd_parser      as jdp
+        import raghav_profile as rp
+        import claude_engine  as ce
+        import copy
+    except ImportError as e:
+        warn(f"Import error: {e}"); return df
 
-def run_pipeline(
-    skip_fetch:   bool = False,
-    role:         str  = None,
-    auto_apply:   bool = False,
-    dry_run:      bool = False,
-    apply_limit:  int  = None,
-    platform:     str  = None,
-):
-    start_time = time.time()
-    print(BANNER)
-    print(f"  Started:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"  Mode:      {'Skip fetch' if skip_fetch else 'Full fetch'}")
-    if role:
-        print(f"  Role:      {role}")
-    if auto_apply:
-        print(f"  Auto-Apply: {'Dry Run' if dry_run else 'ENABLED'}")
-    print()
+    full_profile = {
+        **rp.PROFILE,
+        "skills": getattr(rp, "ALL_SKILLS_FLAT", []) or
+                  [s for grp in getattr(rp, "SKILLS", {}).values() for s in grp],
+        "experience": getattr(rp, "EXPERIENCE", []),
+        "education":  getattr(rp, "EDUCATION",  []),
+        "summary": (
+            "Data professional with hands-on experience in data engineering, "
+            "ETL pipelines, SQL, Python, cloud platforms (Azure, AWS, GCP), "
+            "Apache Spark, Kafka, and analytics tools."
+        ),
+    }
+    summary   = ce.build_profile_summary(full_profile)
+    title_col = next((c for c in df.columns if "title"   in c.lower()), df.columns[0])
+    co_col    = next((c for c in df.columns if any(k in c.lower()
+                     for k in ["company", "employer", "organization"])), None)
+    desc_col, fallback_cols = _find_desc_col(df)
 
-    # ── STEP 1: Fetch Jobs ────────────────────────────────────────────────────
-    print("▶  STEP 1 / 6 — Fetching Jobs")
-    print("─" * 50)
+    with Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}"),
+                  BarColumn(bar_width=30), TextColumn("{task.completed}/{task.total}"),
+                  console=console) as prog:
+        task = prog.add_task("Building resumes...", total=len(apply_df))
 
-    if not skip_fetch:
-        from pipeline import main as fetch_jobs
-        if role:
-            import pipeline as pl
-            pl.SEARCH_QUERIES = [role]
-        jobs_df = fetch_jobs()
+        for idx, row in apply_df.iterrows():
+            title   = str(row.get(title_col, "Data Role"))
+            company = str(row.get(co_col, "Company")) if co_col else "Company"
+            jd      = _get_jd_text(row, desc_col, fallback_cols)
+
+            try:
+                parsed = jdp.parse_jd(jd, title) if jd else {}
+
+                if ce.CLAUDE_AVAILABLE and jd:
+                    all_bullets = []
+                    for exp in full_profile.get("experience", []):
+                        all_bullets.extend(exp.get("bullets",
+                                           exp.get("responsibilities", [])))
+                    tailored = ce.tailor_bullets(all_bullets[:12], jd, title)
+                    p_copy = copy.deepcopy(profile)
+                    bi = 0
+                    for exp in p_copy.get("experience", []):
+                        key = "bullets" if "bullets" in exp else "responsibilities"
+                        for i in range(len(exp.get(key, []))):
+                            if bi < len(tailored):
+                                exp[key][i] = tailored[bi]; bi += 1
+                    use_profile = p_copy
+                else:
+                    use_profile = full_profile
+
+                path = rb.build_resume(use_profile, parsed, title, company)
+                df.loc[idx, "resume_path"] = path
+            except Exception as e:
+                df.loc[idx, "resume_path"] = ""
+
+            prog.advance(task)
+
+    built = df["resume_path"].notna().sum() if "resume_path" in df.columns else 0
+    ok(f"Built {built} custom resumes in ~/job_pipeline/resumes/")
+    return df
+
+# ── STEP 5: COVER LETTERS ─────────────────────────────────────────────────────
+def step_cover_letters(df):
+    step("✉️ ", "Writing Custom Cover Letters")
+
+    try:
+        import cover_letter   as cl
+        import raghav_profile as rp
+        import claude_engine  as ce
+    except ImportError as e:
+        warn(f"Import error: {e}"); return df
+
+    apply_df  = df[df["fit_apply"]] if "fit_apply" in df.columns else df
+    full_profile = {
+        **rp.PROFILE,
+        "skills": getattr(rp, "ALL_SKILLS_FLAT", []) or
+                  [s for grp in getattr(rp, "SKILLS", {}).values() for s in grp],
+        "experience": getattr(rp, "EXPERIENCE", []),
+        "education":  getattr(rp, "EDUCATION",  []),
+        "summary": (
+            "Data professional with hands-on experience in data engineering, "
+            "ETL pipelines, SQL, Python, cloud platforms (Azure, AWS, GCP), "
+            "Apache Spark, Kafka, and analytics tools."
+        ),
+    }
+    name      = full_profile.get("name", "Raghavendra Karanam")
+    summary   = ce.build_profile_summary(full_profile)
+    title_col = next((c for c in df.columns if "title"   in c.lower()), df.columns[0])
+    co_col    = next((c for c in df.columns if any(k in c.lower()
+                     for k in ["company", "employer", "organization"])), None)
+    desc_col, fallback_cols = _find_desc_col(df)
+
+    with Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}"),
+                  BarColumn(bar_width=30), TextColumn("{task.completed}/{task.total}"),
+                  console=console) as prog:
+        task = prog.add_task("Writing cover letters...", total=len(apply_df))
+        for idx, row in apply_df.iterrows():
+            title   = str(row.get(title_col, "Data Role"))
+            company = str(row.get(co_col, "Company")) if co_col else "Company"
+            jd      = _get_jd_text(row, desc_col, fallback_cols)
+            try:
+                text = ce.write_cover_letter(name, summary, jd, title, company)
+                path = cl.save_cover_letter(text, title, company)
+                df.loc[idx, "cover_letter_path"] = path
+            except Exception:
+                df.loc[idx, "cover_letter_path"] = ""
+            prog.advance(task)
+
+    built = df["cover_letter_path"].notna().sum() if "cover_letter_path" in df.columns else 0
+    ok(f"Wrote {built} cover letters in ~/job_pipeline/cover_letters/")
+    return df
+
+# ── STEP 6: AUTO APPLY ───────────────────────────────────────────────────────
+def step_apply(df, dry_run=False, limit=0):
+    step("🚀", "Auto Applying — LinkedIn Easy Apply + Indeed Portal")
+    if dry_run:
+        info("DRY RUN — previewing only, not applying")
+        apply_df = df[df["fit_apply"]] if "fit_apply" in df.columns else df
+        info(f"{len(apply_df)} jobs queued for application")
+        return
+    try:
+        import auto_apply as aa
+        aa.main_from_df(df, limit=limit)
+    except Exception as e:
+        warn(f"Auto-apply error: {e}")
+
+# ── STEP 7: TRACKER ───────────────────────────────────────────────────────────
+def step_tracker(df):
+    step("📊", "Updating Excel Tracker")
+    try:
+        import tracker as tr
+        path = tr.create_tracker(df)
+        ok(f"Tracker → {path}")
+        import subprocess
+        subprocess.Popen(["open", str(path)])
+    except Exception as e:
+        warn(f"Tracker error: {e}")
+
+# ── SUMMARY ───────────────────────────────────────────────────────────────────
+def print_summary(df, start):
+    elapsed = time.time() - start
+    m, s    = int(elapsed // 60), int(elapsed % 60)
+
+    if not HAS_RICH:
+        print(f"\n{'='*50}\n  Done in {m}m {s}s\n{'='*50}")
+        return
+
+    t = Table(title="Pipeline Summary", box=box.ROUNDED, border_style="cyan")
+    t.add_column("Metric",  style="bold white", width=28)
+    t.add_column("Result",  style="cyan",        width=15)
+
+    def count(col): return str(df[col].notna().sum()) if col in df.columns else "—"
+
+    t.add_row("Total jobs scored",    str(len(df)))
+    t.add_row("Good fits",            str(int(df["fit_apply"].sum())) if "fit_apply" in df.columns else "—")
+    t.add_row("Resumes built",        count("resume_path"))
+    t.add_row("Cover letters",        count("cover_letter_path"))
+    t.add_row("Time",                 f"{m}m {s}s")
+
+    console.print(); console.print(t); console.print()
+
+    if "fit_score" in df.columns:
+        tc = next((c for c in df.columns if "title"   in c.lower()), df.columns[0])
+        cc = next((c for c in df.columns if "company" in c.lower()), None)
+        top = df.nlargest(5, "fit_score")
+
+        top_t = Table(title="🏆 Top 5 Best Fits", box=box.SIMPLE, border_style="green")
+        top_t.add_column("Score", width=8, style="bold green")
+        top_t.add_column("Title", width=35)
+        top_t.add_column("Company", width=25)
+
+        for _, row in top.iterrows():
+            sc  = int(row.get("fit_score", 0))
+            col = "green" if sc >= 85 else "cyan" if sc >= 70 else "yellow"
+            top_t.add_row(
+                f"[{col}]{sc}%[/{col}]",
+                str(row.get(tc, ""))[:33],
+                str(row.get(cc, ""))[:23] if cc else "",
+            )
+        console.print(top_t)
+
+    console.print(Panel(
+        "[bold green]✅  Pipeline complete![/bold green]\n"
+        "[dim]Open Application_Tracker.xlsx to see all results.[/dim]",
+        border_style="green", padding=(0, 2),
+    ))
+    console.print()
+
+# ── MAIN ──────────────────────────────────────────────────────────────────────
+def main():
+    p = argparse.ArgumentParser(description="Job Pipeline — Raghavendra Karanam")
+    p.add_argument("--skip-fetch", action="store_true")
+    p.add_argument("--apply",      action="store_true")
+    p.add_argument("--dry-run",    action="store_true")
+    p.add_argument("--limit",      type=int, default=0)
+    p.add_argument("--no-resumes", action="store_true")
+    p.add_argument("--no-cl",      action="store_true")
+    args = p.parse_args()
+
+    start = time.time()
+    print_header()
+
+    df = step_fetch(args)
+    if df.empty:
+        log("[red]No jobs found.[/red]" if HAS_RICH else "No jobs found.")
+        sys.exit(1)
+
+    df = step_filter(df)
+    df = step_score(df, limit=args.limit)
+
+    if not args.no_resumes:
+        df = step_resumes(df)
+    if not args.no_cl:
+        df = step_cover_letters(df)
+
+    if args.apply:
+        step_apply(df, dry_run=args.dry_run, limit=args.limit)
     else:
-        import pandas as pd
-        raw_path = os.path.join(os.path.dirname(__file__), "data", "raw_jobs.csv")
-        if not os.path.exists(raw_path):
-            print("  ❌ raw_jobs.csv not found. Remove --skip-fetch to download.")
-            sys.exit(1)
-        jobs_df = pd.read_csv(raw_path)
-        print(f"  ✓ Loaded {len(jobs_df)} jobs from existing CSV\n")
+        info("Tip: Add --apply to auto-apply to LinkedIn + Indeed Easy Apply jobs")
 
-    # ── STEP 2: Parse JDs + ATS Scoring ──────────────────────────────────────
-    print("\n▶  STEP 2 / 6 — Parsing JDs & Scoring (BEFORE scores)")
-    print("─" * 50)
-
-    from jd_parser import main as parse_jds
-    filtered_df = parse_jds()
-
-    if filtered_df is None or filtered_df.empty:
-        print("  ⚠  No jobs passed the ATS filter.")
-        sys.exit(0)
-
-    print(f"  ✓ {len(filtered_df)} jobs ready for resume tailoring")
-
-    # ── STEP 3: Build Resumes (98%+ guarantee) ────────────────────────────────
-    print("\n▶  STEP 3 / 6 — Building Tailored Resumes (target: 98%+ ATS)")
-    print("─" * 50)
-
-    from resume_builder import build_all_resumes
-    resume_results = build_all_resumes()  # returns list of (path, initial, actual_optimized)
-
-    # Update filtered_df with actual scores from resume builder
-    import pandas as pd
-    for i, (path, actual_ini, actual_opt) in enumerate(resume_results):
-        if i < len(filtered_df):
-            filtered_df.at[i, "actual_initial_score"]   = actual_ini
-            filtered_df.at[i, "actual_optimized_score"] = actual_opt
-
-    # ── STEP 4: Build Cover Letters ───────────────────────────────────────────
-    print("\n▶  STEP 4 / 6 — Generating Cover Letters")
-    print("─" * 50)
-
-    from cover_letter import build_all_cover_letters
-    cl_paths = build_all_cover_letters()
-
-    # ── STEP 5: Update Excel Tracker ─────────────────────────────────────────
-    print("\n▶  STEP 5 / 6 — Creating Application Tracker")
-    print("─" * 50)
-
-    from tracker import create_tracker
-    tracker_path = create_tracker(filtered_df)
-
-    # ── SCORE TABLE ───────────────────────────────────────────────────────────
-    print_score_table(filtered_df, resume_results)
-
-    # ── STEP 6: Auto-Apply ───────────────────────────────────────────────────
-    if auto_apply:
-        print("\n▶  STEP 6 / 6 — Auto-Apply")
-        print("─" * 50)
-        from auto_apply import build_apply_queue, save_queue, execute_apply_queue
-        queue = build_apply_queue()
-        save_queue(queue)
-        execute_apply_queue(queue, dry_run=dry_run, platform_filter=platform, limit=apply_limit)
-    else:
-        print("\n▶  STEP 6 / 6 — Auto-Apply (SKIPPED)")
-        print("─" * 50)
-        from auto_apply import build_apply_queue, save_queue, print_summary
-        queue = build_apply_queue()
-        save_queue(queue)
-        print_summary(queue)
-        print("  💡 To auto-apply now: python master_run.py --skip-fetch --auto-apply")
-
-    # ── FINAL SUMMARY ─────────────────────────────────────────────────────────
-    elapsed = round(time.time() - start_time, 1)
-    out_dir = os.path.join(os.path.dirname(__file__), "output")
-
-    print("═" * 66)
-    print("  ✅  PIPELINE COMPLETE")
-    print("═" * 66)
-    print(f"  ⏱  Time:          {elapsed}s")
-    print(f"  📋  Jobs:          {len(filtered_df)} analyzed")
-    print(f"  📄  Resumes:       {len(resume_results)} built  (98%+ ATS guaranteed)")
-    print(f"  📝  Cover Letters: {len(cl_paths)} generated")
-    print(f"  📊  Tracker:       {os.path.basename(tracker_path)}")
-    print(f"\n  📁  Files saved to:")
-    print(f"     • {out_dir}/resumes/")
-    print(f"     • {out_dir}/cover_letters/")
-    print(f"     • {os.path.dirname(tracker_path)}/")
-    print()
-
-    if resume_results:
-        best_jobs = sorted(
-            zip(resume_results, filtered_df.iterrows()),
-            key=lambda x: x[0][2],  # sort by actual_optimized
-            reverse=True,
-        )[:5]
-        print("  🏆  Top 5 Matches (Actual ATS After Tailoring):")
-        for (path, ini, opt), (_, row) in best_jobs:
-            print(f"     [{opt:.1f}%] {row.get('title','?')[:32]} @ {row.get('company','?')[:20]}")
-    print("═" * 66 + "\n")
-
-
-# =============================================================================
-# ENTRY POINT
-# =============================================================================
+    step_tracker(df)
+    print_summary(df, start)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Raghavendra Karanam — Pro Job Application Pipeline",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python master_run.py                                 Full pipeline
-  python master_run.py --skip-fetch                   Use existing CSV
-  python master_run.py --role "Azure Data Engineer"   Specific role
-  python master_run.py --auto-apply                   Auto-apply at end
-  python master_run.py --auto-apply --dry-run         Preview apply
-  python master_run.py --skip-fetch --auto-apply --limit 5
-        """,
-    )
-    parser.add_argument("--skip-fetch", action="store_true",
-                        help="Skip API fetch and use existing raw_jobs.csv")
-    parser.add_argument("--role",        type=str, default=None,
-                        help='Search specific role e.g. "Azure Data Engineer"')
-    parser.add_argument("--auto-apply",  action="store_true",
-                        help="Auto-apply to jobs after building resumes")
-    parser.add_argument("--dry-run",     action="store_true",
-                        help="With --auto-apply: simulate without real submissions")
-    parser.add_argument("--limit",       type=int, default=None,
-                        help="Limit number of auto-apply applications")
-    parser.add_argument("--platform",    type=str, default=None,
-                        help="Filter auto-apply by platform: linkedin, indeed")
-    args = parser.parse_args()
-
-    check_api_key()
-    run_pipeline(
-        skip_fetch  = args.skip_fetch,
-        role        = args.role,
-        auto_apply  = args.auto_apply,
-        dry_run     = args.dry_run,
-        apply_limit = args.limit,
-        platform    = args.platform,
-    )
+    main()
