@@ -96,7 +96,16 @@ def score_fit(profile_summary: str, jd_text: str,
     if not CLAUDE_AVAILABLE:
         return _fallback_score()
 
-    prompt = f"""Evaluate this candidate's fit for the job below. Be honest and realistic.
+    prompt = f"""You are evaluating an ENTRY/MID LEVEL job candidate for a data role.
+Score how well they match the job. Focus on SKILLS MATCH, not years of experience.
+
+IMPORTANT CONTEXT:
+- Candidate has 3+ years total experience (including undergrad projects + grad school + work)
+- Python/SQL: 4 years (since undergrad 2020)
+- Data Engineering, ETL, Cloud: 2-3 years
+- If the job says "2-3 years experience" and candidate has matching skills → high score
+- Do NOT penalize for being entry/mid level — this role IS entry/mid level
+- A skill match should be weighted heavily even if candidate's title doesn't match exactly
 
 === JOB ===
 Title   : {job_title}
@@ -106,23 +115,29 @@ Job Description:
 {jd_text[:3000]}
 
 === CANDIDATE ===
-{profile_summary[:2000]}
+{profile_summary[:3000]}
+
+Score based on:
+1. Technical skill overlap (50%) — do their skills match what's listed?
+2. Role relevance (30%) — is this a data/analytics/ML/engineering role they can do?
+3. Education & background (20%) — M.S. Data Science is a strong signal
 
 Respond ONLY in this JSON format (no other text):
 {{
   "score": 72,
   "grade": "B",
-  "reasoning": "Strong SQL and Python skills match well. Missing 2 years experience.",
-  "strengths": ["SQL", "Python", "data visualization"],
-  "missing": ["Cloud experience", "meets 5-yr requirement"],
+  "reasoning": "Strong SQL and Python skills match well. Azure and Spark align with JD.",
+  "strengths": ["SQL", "Python", "Azure"],
+  "missing": ["Snowflake (minor gap)"],
   "apply": true
 }}
 
 Scoring guide:
-  85-100 → Excellent fit (A)
-  70-84  → Good fit      (B)
-  55-69  → Moderate fit  (C) — still worth applying
-  below 55 → Poor fit    (D) — skip
+  85-100 → Excellent skill match   (A)
+  70-84  → Good match              (B)
+  65-69  → Decent match, apply     (C)
+  50-64  → Weak match, skip        (D)
+  below 50 → Poor fit, definitely skip
 apply = true if score >= {FIT_THRESHOLD}"""
 
     raw  = _ask(prompt, max_tokens=500)
@@ -226,34 +241,58 @@ Requirements:
 # ── 5. PROFILE SUMMARY BUILDER ────────────────────────────────────────────────
 def build_profile_summary(profile: dict) -> str:
     """
-    Converts raghav_profile dict into a readable text summary for Claude prompts.
+    Converts raghav_profile dict into a full readable summary for Claude scoring.
+    Shows ALL skills, correct experience order, and skill years.
     """
-    name    = profile.get("name", "Candidate")
-    skills  = profile.get("skills", [])
-    exp     = profile.get("experience", [])
-    edu     = profile.get("education", [{}])
-    summary = profile.get("summary", "")
+    import config as cfg
 
-    exp_lines = []
-    for e in exp[:3]:
-        role    = e.get("title", "")
-        company = e.get("company", "")
-        bullets = e.get("bullets", e.get("responsibilities", []))[:3]
-        exp_lines.append(f"  {role} at {company}")
-        for b in bullets:
-            exp_lines.append(f"    • {b}")
+    name   = profile.get("name", "Raghavendra Karanam")
+    skills = profile.get("skills", [])
+    exp    = profile.get("experience", [])
+    edu    = profile.get("education", [{}])
 
+    # Education
     edu_line = ""
     if edu:
         e0 = edu[0]
         edu_line = f"{e0.get('degree','')}, {e0.get('field','')}, {e0.get('school','')}"
 
-    return f"""Name        : {name}
-Skills      : {', '.join(skills[:25])}
-Education   : {edu_line}
-Experience  :
-{chr(10).join(exp_lines)}
-Summary     : {summary[:300]}"""
+    # Skills — show ALL of them, not just 25
+    all_skills = ", ".join(skills) if skills else "Python, SQL, PySpark, Azure, AWS, GCP, Snowflake, dbt, Airflow, Kafka, Spark, Power BI, Tableau, Docker, TensorFlow, pandas, scikit-learn"
+
+    # Skill years — key context for scoring
+    skill_years_lines = "\n".join(
+        f"  {k}: {v} yrs" for k, v in cfg.SKILL_YEARS.items()
+    )
+
+    # Experience — primary data jobs first, max 3 bullets each
+    exp_lines = []
+    primary   = [e for e in exp if e.get("include_always") or "data" in e.get("title","").lower() or "engineer" in e.get("title","").lower()]
+    secondary = [e for e in exp if e not in primary]
+    ordered   = (primary + secondary)[:4]
+
+    for e in ordered:
+        role    = e.get("title", "")
+        company = e.get("company", "")
+        dur     = e.get("duration", "")
+        bullets = e.get("bullets", e.get("responsibilities", []))[:3]
+        exp_lines.append(f"\n  [{role}] @ {company}  ({dur})")
+        for b in bullets:
+            exp_lines.append(f"    • {b[:120]}")
+
+    return f"""CANDIDATE: {name}
+EDUCATION : {edu_line}
+WORK AUTH : F-1 OPT/STEM OPT — authorized, no sponsorship needed
+TOTAL EXP : 3+ years (undergrad + grad research + professional)
+
+SKILLS (all):
+  {all_skills}
+
+EXPERIENCE BY SKILL (years):
+{skill_years_lines}
+
+WORK HISTORY:
+{"".join(exp_lines)}"""
 
 # ── Quick self-test ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
