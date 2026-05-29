@@ -232,5 +232,80 @@ def build_all_cover_letters(filtered_csv: str = None) -> list[str]:
     return paths
 
 
+def save_cover_letter(text: str, job_title: str, company: str, output_path: str = None) -> str:
+    """
+    Save a Claude-generated plain-text cover letter into a formatted .docx.
+    Called by master_run.py after ce.write_cover_letter() returns the text.
+    Returns the saved file path.
+    """
+    doc = Document()
+    _set_margins(doc)
+
+    style = doc.styles["Normal"]
+    style.font.name = FONT_NAME
+    style.font.size = Pt(11)
+
+    today = datetime.now().strftime("%B %d, %Y")
+
+    # Header
+    p_name = doc.add_paragraph()
+    p_name.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    _para_space(p_name, before_pt=0, after_pt=2)
+    _set_font(p_name.add_run(PROFILE["name"]), 16, bold=True, color=COLOR_ACCENT)
+
+    p_contact = doc.add_paragraph()
+    _para_space(p_contact, before_pt=0, after_pt=2)
+    _set_font(p_contact.add_run(
+        f"{PROFILE['email']}  ·  {PROFILE['phone']}  ·  {PROFILE['location']}\n"
+        f"{PROFILE['linkedin']}  ·  {PROFILE['github']}"
+    ), 10, color=COLOR_MID)
+
+    # Divider line
+    p_div = doc.add_paragraph()
+    _para_space(p_div, before_pt=4, after_pt=6)
+    pPr = p_div._p.get_or_add_pPr()
+    pBdr = OxmlElement("w:pBdr")
+    bot = OxmlElement("w:bottom")
+    bot.set(qn("w:val"), "single"); bot.set(qn("w:sz"), "6")
+    bot.set(qn("w:space"), "1");    bot.set(qn("w:color"), "1F5C99")
+    pBdr.append(bot); pPr.append(pBdr)
+
+    # Date
+    p_date = doc.add_paragraph()
+    _para_space(p_date, before_pt=0, after_pt=8)
+    _set_font(p_date.add_run(today), 11, color=COLOR_DARK)
+
+    # Body — split Claude's text into paragraphs and write each
+    body_text = text.strip()
+    paragraphs = [p.strip() for p in body_text.split("\n\n") if p.strip()]
+
+    for para_text in paragraphs:
+        p = doc.add_paragraph()
+        _para_space(p, before_pt=0, after_pt=7)
+        _set_font(p.add_run(para_text), 11, color=COLOR_DARK)
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+    # Sign-off (if not already in text)
+    if "warm regards" not in body_text.lower() and "sincerely" not in body_text.lower():
+        p_sign = doc.add_paragraph()
+        _para_space(p_sign, before_pt=8, after_pt=2)
+        _set_font(p_sign.add_run("Warm regards,"), 11, color=COLOR_DARK)
+
+        p_sig = doc.add_paragraph()
+        _para_space(p_sig, before_pt=0, after_pt=2)
+        _set_font(p_sig.add_run(PROFILE["name"]), 11, bold=True, color=COLOR_ACCENT)
+
+    # Save
+    if not output_path:
+        cl_dir = os.path.join(os.path.dirname(__file__), "cover_letters")
+        os.makedirs(cl_dir, exist_ok=True)
+        safe_co = re.sub(r"[^\w\s-]", "", company).strip().replace(" ", "_")[:30]
+        safe_ti = re.sub(r"[^\w\s-]", "", job_title).strip().replace(" ", "_")[:25]
+        output_path = os.path.join(cl_dir, f"CoverLetter_{safe_co}_{safe_ti}.docx")
+
+    doc.save(output_path)
+    return output_path
+
+
 if __name__ == "__main__":
     build_all_cover_letters()

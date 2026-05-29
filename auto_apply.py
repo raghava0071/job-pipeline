@@ -336,66 +336,180 @@ def _fill_linkedin_form_step(page, resume_path: str, step: int):
 def apply_linkedin(page, job: dict, dry_run: bool) -> tuple[str, str]:
     try:
         page.goto(job["url"], wait_until="domcontentloaded", timeout=25000)
-        time.sleep(2.5)
+        time.sleep(4)   # Wait for React components to fully render
 
         # Check if already applied
-        if page.locator("text=Applied").count() > 0:
+        body_text = page.evaluate("() => document.body.innerText.toLowerCase()")
+        if "you applied" in body_text or "application was sent" in body_text:
             return "Already Applied", "LinkedIn shows already applied"
 
         # ── STRICT: only Easy Apply, never external Apply ──────────────────
-        easy_btn = page.locator(
-            "button.jobs-apply-button:has-text('Easy Apply'), "
-            "button[aria-label*='Easy Apply'], "
-            ".jobs-s-apply button:has-text('Easy Apply')"
-        ).first
+        # Use JS evaluation — resilient to LinkedIn DOM/class changes
+        easy_apply_info = page.evaluate("""
+            () => {
+                const elems = Array.from(document.querySelectorAll(
+                    'button, a, [role="button"], [role="link"]'
+                ));
+                for (const el of elems) {
+                    const t  = (el.textContent  || '').toLowerCase().trim();
+                    const al = (el.getAttribute('aria-label') || '').toLowerCase();
+                    if (t.includes('easy apply') || al.includes('easy apply')) {
+                        // Return the element's identifying info so we can click it
+                        return {
+                            found: true,
+                            ariaLabel: el.getAttribute('aria-label') || '',
+                            text: el.textContent.trim().substring(0, 60),
+                            tagName: el.tagName
+                        };
+                    }
+                }
+                // Check if there's an external Apply button (non-Easy Apply)
+                for (const el of elems) {
+                    const t = (el.textContent || '').toLowerCase().trim();
+                    if (t === 'apply' || t.startsWith('apply on')) {
+                        return { found: false, external: true };
+                    }
+                }
+                return { found: false, external: false };
+            }
+        """)
 
-        if not easy_btn.count() or not easy_btn.is_visible():
-            # Check if there's a regular Apply (external) button
-            ext_btn = page.locator("button.jobs-apply-button:has-text('Apply')").first
-            if ext_btn.count() and ext_btn.is_visible():
+        if not easy_apply_info or not easy_apply_info.get("found"):
+            if easy_apply_info and easy_apply_info.get("external"):
                 return "Skipped", "External Apply only — not Easy Apply. Skip per rules."
-            return "Skipped", "No apply button found (job may be expired)"
+            return "Skipped", "No Easy Apply button found (job may be expired or filled)"
 
         if dry_run:
             return "Dry Run", f"Would click Easy Apply | Resume: {Path(job['resume']).name if job['resume'] else 'none found'}"
 
-        easy_btn.click()
-        time.sleep(2)
+        # Click Easy Apply button — use Playwright native click (not JS click)
+        # Native click dispatches real mouse events that LinkedIn's handlers respond to
+        ea_clicked = False
+        for sel in [
+            "button[aria-label*='Easy Apply']",
+            "button:has-text('Easy Apply')",
+            "[data-control-name='jobdetails_topcard_inapply']",
+        ]:
+            try:
+                btn = page.locator(sel).first
+                if btn.count() > 0 and btn.is_visible():
+                    btn.click()
+                    ea_clicked = True
+                    break
+            except Exception:
+                continue
+
+        if not ea_clicked:
+            # Fallback: JS click as last resort
+            ea_clicked = page.evaluate("""
+                () => {
+                    const elems = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+                    for (const el of elems) {
+                        const t  = (el.textContent || '').toLowerCase().trim();
+                        const al = (el.getAttribute('aria-label') || '').toLowerCase();
+                        if ((t.includes('easy apply') || al.includes('easy apply'))
+                            && !al.includes('filter')) {
+                            el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            """)
+
+        if not ea_clicked:
+            return "Failed", "Could not click Easy Apply button"
+        time.sleep(3)
 
         # ── Walk multi-step form ───────────────────────────────────────────
-        for step in range(12):
-            page_text = page.content().lower()
+        CONFIRM_STRINGS = [
+            "application was sent", "your application was submitted",
+            "application submitted", "applied to", "successfully applied",
+            "your application has been", "application complete",
+            "application was sent to", "sent your application",
+            "you've applied", "you applied", "application received",
+            "thank you for applying", "thanks for applying",
+        ]
 
-            # Confirmation — done!
-            if any(s in page_text for s in [
-                "application was sent", "your application was submitted",
-                "application submitted", "applied to", "successfully applied"
-            ]):
-                return "Applied", "LinkedIn Easy Apply confirmed ✅"
+        def _check_confirmed():
+            txt = page.evaluate("() => document.body.innerText.toLowerCase()")
+            return any(s in txt for s in CONFIRM_STRINGS), txt
+
+        def _modal_still_open():
+            """Returns True if Easy Apply modal is still visible."""
+            return page.evaluate("""
+                () => {
+                    const modal = document.querySelector(
+                        '[data-test-modal], .jobs-easy-apply-modal, '
+                        '[aria-label*="Easy Apply"], [aria-labelledby*="easy-apply"]'
+                    );
+                    return !!modal;
+                }
+            """)
+
+        for step in range(20):
+            # Check confirmation before each step
+            confirmed, page_text = _check_confirmed()
+            if confirmed:
+                print(f"      ✅ Form step {step}: confirmation detected")
+                return "Applied", "LinkedIn Easy Apply submitted ✅"
+
+            # Check if modal closed — means application was submitted
+            if step > 0 and not _modal_still_open():
+                print(f"      ✅ Form step {step}: modal closed — application submitted")
+                return "Applied", "LinkedIn Easy Apply — modal closed after submit ✅"
 
             _fill_linkedin_form_step(page, job["resume"], step)
+            time.sleep(0.5)
 
-            # Click the primary action button
-            clicked = False
-            for btn_label in ["Submit application", "Review", "Next", "Continue"]:
-                btn = page.locator(f"button:has-text('{btn_label}')").first
-                if btn.count() and btn.is_visible():
-                    btn.click()
-                    time.sleep(1.8)
-                    clicked = True
-                    break
+            # Click primary action button using Playwright native click
+            # Native click fires real mouse events — required for LinkedIn's JS handlers
+            btn_clicked = False
+            btn_label_clicked = ""
+            for btn_text in ["Submit application", "Review", "Next", "Continue", "Done"]:
+                try:
+                    btn = page.locator(f"button:has-text('{btn_text}')").first
+                    if btn.count() > 0 and btn.is_visible():
+                        btn.click()
+                        btn_clicked = True
+                        btn_label_clicked = btn_text
+                        print(f"      Step {step}: clicked '{btn_text}'")
+                        break
+                except Exception:
+                    continue
 
-            if not clicked:
-                # Maybe a final dismiss after submit
-                dismiss = page.locator("button[aria-label='Dismiss']").first
-                if dismiss.count() and dismiss.is_visible():
-                    break
+            if btn_clicked:
+                if "Submit" in btn_label_clicked or "Done" in btn_label_clicked:
+                    time.sleep(4)
+                    confirmed, _ = _check_confirmed()
+                    if confirmed:
+                        return "Applied", "LinkedIn Easy Apply submitted ✅"
+                    if not _modal_still_open():
+                        return "Applied", "LinkedIn Easy Apply — modal closed after submit ✅"
+                else:
+                    time.sleep(2)
+            else:
+                # No button found — log visible buttons for debug
+                visible = page.evaluate("""
+                    () => Array.from(document.querySelectorAll('button:not([disabled])'))
+                        .filter(b => { const r=b.getBoundingClientRect(); return r.width>0&&r.height>0; })
+                        .map(b => b.textContent.trim().substring(0,25))
+                        .filter(t => t.length > 0).slice(0,6)
+                """)
+                print(f"      Step {step}: no action button. Visible: {visible}")
+                confirmed, _ = _check_confirmed()
+                if confirmed:
+                    return "Applied", "LinkedIn Easy Apply submitted ✅"
+                if not _modal_still_open():
+                    return "Applied", "LinkedIn Easy Apply — submitted (modal gone) ✅"
+                break
 
-        # One final check
-        if any(s in page.content().lower() for s in [
-            "application was sent", "application submitted", "applied to"
-        ]):
-            return "Applied", "LinkedIn Easy Apply confirmed ✅"
+        # Final check
+        confirmed, _ = _check_confirmed()
+        if confirmed:
+            return "Applied", "LinkedIn Easy Apply submitted ✅"
+        if not _modal_still_open():
+            return "Applied", "LinkedIn Easy Apply — submitted (modal gone) ✅"
 
         return "Failed", "Reached form end but couldn't confirm submission"
 
@@ -502,15 +616,26 @@ def apply_indeed(page, job: dict, dry_run: bool) -> tuple[str, str]:
                 except Exception:
                     continue
 
-            # Click Continue / Next / Submit
-            clicked = False
-            for lbl in ["Submit your application", "Submit", "Continue", "Next"]:
-                b = page.locator(f"button:has-text('{lbl}')").first
-                if b.count() and b.is_visible():
-                    b.click()
-                    time.sleep(2)
-                    clicked = True
-                    break
+            # JS-based button click for Indeed — handles any label/CSS variation
+            clicked = page.evaluate("""
+                () => {
+                    const priority = ['submit your application', 'submit', 'continue', 'next', 'apply now'];
+                    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+                    for (const label of priority) {
+                        for (const btn of buttons) {
+                            const t = (btn.textContent || '').toLowerCase().trim();
+                            const al = (btn.getAttribute('aria-label') || '').toLowerCase();
+                            if ((t.includes(label) || al.includes(label)) && !btn.disabled) {
+                                btn.click();
+                                return label;
+                            }
+                        }
+                    }
+                    return null;
+                }
+            """)
+            if clicked:
+                time.sleep(2)
 
             if not clicked:
                 break

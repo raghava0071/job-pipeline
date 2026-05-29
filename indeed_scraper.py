@@ -116,15 +116,17 @@ def scrape_indeed_page(page, url: str, max_jobs: int = 20) -> list[dict]:
         page.goto(url, wait_until="domcontentloaded", timeout=25000)
         time.sleep(3)
 
-        # Find job cards
-        cards = page.locator(
-            "div.job_seen_beacon, "
-            "div.slider_container, "
-            "li.css-5lfssm"
-        ).all()
+        # Find job cards — use ONE selector only to avoid duplicate matches
+        # div.job_seen_beacon is the standard Indeed job card container
+        cards = page.locator("div.job_seen_beacon").all()
+
+        # Fallback if nothing found with primary selector
+        if not cards:
+            cards = page.locator("li[class*='css-']").all()
 
         print(f"    Found {len(cards)} job cards")
 
+        seen_titles = set()  # extra dedup within same page
         for card in cards[:max_jobs]:
             try:
                 # Click card to load detail
@@ -163,6 +165,12 @@ def scrape_indeed_page(page, url: str, max_jobs: int = 20) -> list[dict]:
 
                 if not company:
                     continue
+
+                # Skip duplicate titles on same page
+                dedup_key = f"{company}|{title}".lower()
+                if dedup_key in seen_titles:
+                    continue
+                seen_titles.add(dedup_key)
 
                 # Get job URL
                 job_url = page.url

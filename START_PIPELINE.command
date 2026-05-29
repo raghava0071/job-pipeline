@@ -13,7 +13,9 @@
 # Remove macOS quarantine flag so script runs without Gatekeeper block
 xattr -d com.apple.quarantine "$0" 2>/dev/null
 
-PIPELINE_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Always run from ~/job_pipeline — never from Claude session outputs or other dirs
+PIPELINE_DIR="$HOME/job_pipeline"
+mkdir -p "$PIPELINE_DIR/data" "$PIPELINE_DIR/resumes" "$PIPELINE_DIR/cover_letters"
 cd "$PIPELINE_DIR" || exit 1
 
 # ── Python binary (prefer conda) ─────────────────────────────────────────────
