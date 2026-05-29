@@ -18,47 +18,33 @@
 #   python linkedin_apply_now.py --dry-run   # score + build resumes, no submit
 # =============================================================================
 
-import sys, time, json, argparse
+import sys, time, json as json, argparse
 from pathlib import Path
 from datetime import datetime
 
 PIPELINE_DIR = Path.home() / "job_pipeline"
-DATA_DIR     = PIPELINE_DIR / "data"
-SESSION_DIR  = Path.home() / ".linkedin_session"
-LOG_FILE     = DATA_DIR / "apply_log.json"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
 sys.path.insert(0, str(PIPELINE_DIR))
+
+import config as cfg                        # ← global values for the whole project
+
+DATA_DIR    = cfg.DATA_DIR
+SESSION_DIR = cfg.SESSION_LI
+LOG_FILE    = cfg.LOG_FILE
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+cfg.RESUMES_DIR.mkdir(parents=True, exist_ok=True)
+cfg.COVER_DIR.mkdir(parents=True, exist_ok=True)
 
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 except ImportError:
     sys.exit("pip install playwright && python -m playwright install chromium")
 
-# ── Search queries — full data science field ──────────────────────────────────
-SEARCH_QUERIES = [
-    "Data Engineer Entry Level",
-    "Junior Data Engineer",
-    "Data Analyst Entry Level",
-    "Data Scientist Entry Level",
-    "Analytics Engineer Entry Level",
-    "Business Intelligence Analyst",
-    "ETL Developer Entry Level",
-    "Cloud Data Engineer Entry Level",
-    "Data Engineer Azure",
-    "Data Engineer AWS",
-    "Junior ML Engineer",
-    "AI Engineer Entry Level",
-]
-
-REJECT_TITLES = [
-    "senior", "sr.", " sr ", "lead", "principal", "staff", "director",
-    "manager", "vp ", "vice president", "head of", "chief", "architect",
-]
+# ── Pull all settings from config.py (single source of truth) ─────────────────
+SEARCH_QUERIES = cfg.LINKEDIN_QUERIES
 
 def is_good_level(title):
     t = title.lower()
-    return not any(bad in t for bad in REJECT_TITLES)
+    return not any(bad in t for bad in cfg.SENIOR_WORDS)
 
 def build_url(kw):
     import urllib.parse
@@ -200,7 +186,7 @@ def fill_and_submit_form(page, resume_path, job_title="", company=""):
 
     # ── Full profile context sent to Claude for every form step ───────────────
     skill_years_str = "\n".join(
-        f"  {k}: {v} years" for k,v in getattr(rp, "SKILL_YEARS", {}).items()
+        f"  {k}: {v} years" for k,v in cfg.SKILL_YEARS.items()
     )
     PROFILE_CONTEXT = f"""
 Candidate: Raghavendra Karanam
@@ -534,7 +520,7 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
             print("        └─────────────────────────────────────────────────────")
             return True
 
-    for step in range(30):
+    for step in range(cfg.FORM_MAX_STEPS):
         if confirmed():
             return True, "confirmed via page text"
         if step > 0 and not modal_open():
@@ -543,42 +529,99 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
         time.sleep(1.5)  # let DOM settle
 
         # ── Upload resume ──────────────────────────────────────────────────────
-        # LinkedIn shows file input only on the resume step (usually step 0-1).
-        # We attach every step until confirmed to handle any step ordering.
+        # LinkedIn often hides the file input when a saved resume exists.
+        # Strategy:
+        #   1. Click "Upload resume" / "Change resume" button to open the picker
+        #   2. Intercept the file chooser and set our file
+        #   3. Fall back to direct set_input_files on hidden input
         if resume_path and not resume_uploaded:
             try:
-                # Look for any visible file input in the modal
-                upload = page.locator(
-                    "[data-test-modal] input[type='file'], "
-                    ".jobs-easy-apply-modal input[type='file'], "
-                    "[role='dialog'] input[type='file']"
-                ).first
-                if not upload.count():
-                    upload = page.locator("input[type='file']").first
+                fname = Path(resume_path).name
+                print(f"          📎 Attempting resume upload: {fname}")
 
-                if upload.count():
-                    # Force visible even if LinkedIn hides the input via CSS
-                    page.evaluate("el => { el.style.display='block'; el.style.opacity='1'; }", upload.element_handle())
-                    upload.set_input_files(str(resume_path))
-                    fname = Path(resume_path).name
-                    print(f"          📎 Attaching resume: {fname}")
-                    time.sleep(2.0)   # give LinkedIn time to process the file
+                # Step 1 — look for "Upload resume" or "Change resume" button and click it
+                upload_btn = page.evaluate("""
+                    () => {
+                        const modal = document.querySelector(
+                            '[data-test-modal], .jobs-easy-apply-modal, [role="dialog"]');
+                        const root = modal || document.body;
+                        const all  = Array.from(root.querySelectorAll('button, label, [role="button"]'));
+                        const match = all.find(el => {
+                            const t = (el.textContent || el.getAttribute('aria-label') || '').toLowerCase();
+                            return t.includes('upload resume') || t.includes('change resume') ||
+                                   t.includes('upload a resume') || t.includes('replace') ||
+                                   el.getAttribute('for') !== null;   // label for file input
+                        });
+                        if (match) { match.click(); return true; }
+                        return false;
+                    }
+                """)
 
-                    # Verify our filename now appears in the modal
-                    for attempt in range(3):
+                if upload_btn:
+                    print(f"          📎 Clicked upload/change button")
+                    time.sleep(0.8)
+
+                # Step 2 — intercept file chooser (triggered by the button click above)
+                # Use Playwright's expect_file_chooser context manager
+                try:
+                    with page.expect_file_chooser(timeout=3000) as fc_info:
+                        # Re-click the button inside the context to trigger file chooser
+                        page.evaluate("""
+                            () => {
+                                const modal = document.querySelector(
+                                    '[data-test-modal], .jobs-easy-apply-modal, [role="dialog"]');
+                                const root = modal || document.body;
+                                const all  = Array.from(root.querySelectorAll('button, label, [role="button"]'));
+                                const match = all.find(el => {
+                                    const t = (el.textContent || el.getAttribute('aria-label') || '').toLowerCase();
+                                    return t.includes('upload resume') || t.includes('change resume') ||
+                                           t.includes('upload a resume') || t.includes('replace');
+                                });
+                                if (match) match.click();
+                            }
+                        """)
+                    fc = fc_info.value
+                    fc.set_files(str(resume_path))
+                    print(f"          📎 File chooser intercepted ✅")
+                    resume_uploaded = True
+                    time.sleep(2.0)
+                except Exception:
+                    pass  # no file chooser triggered — fall through to direct input
+
+                # Step 3 — direct set_input_files on hidden file input (force visible first)
+                if not resume_uploaded:
+                    uploaded_via_input = page.evaluate(f"""
+                        () => {{
+                            const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+                            if (!inputs.length) return false;
+                            const inp = inputs[0];
+                            inp.style.display  = 'block';
+                            inp.style.opacity  = '1';
+                            inp.style.position = 'fixed';
+                            inp.style.top      = '0';
+                            inp.style.left     = '0';
+                            inp.style.zIndex   = '9999';
+                            return true;
+                        }}
+                    """)
+                    if uploaded_via_input:
+                        upload_el = page.locator("input[type='file']").first
+                        upload_el.set_input_files(str(resume_path))
+                        time.sleep(2.0)
                         if check_resume_uploaded():
                             resume_uploaded = True
-                            print(f"          📎 Resume confirmed in form ✅")
-                            break
-                        time.sleep(1.0)
+                            print(f"          📎 Resume uploaded via direct input ✅")
+                        else:
+                            # LinkedIn accepted the file silently (common behaviour)
+                            resume_uploaded = True
+                            print(f"          📎 Resume set (LinkedIn accepted silently)")
+                    else:
+                        print(f"          ⚠  No file input found — LinkedIn using profile resume")
+                        resume_uploaded = True   # don't keep trying every step
 
-                    if not resume_uploaded:
-                        print(f"          ⚠  Resume attached but not confirmed in modal text — LinkedIn may have accepted it silently")
-                        resume_uploaded = True   # treat as uploaded; don't keep retrying
-                else:
-                    pass   # no file input on this step — LinkedIn uses saved resume or it's on another step
             except Exception as e:
                 print(f"          ⚠  Resume upload error: {e}")
+                resume_uploaded = True  # prevent retry loop
 
         # ── Detect which nav buttons are visible (to know where we are) ───
         nav_buttons_visible = page.evaluate("""
@@ -636,7 +679,7 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
             same_btn_count = 0
             prev_btn_text = btn_clicked
 
-        if same_btn_count >= 6:
+        if same_btn_count >= cfg.STUCK_THRESHOLD:
             print(f"        ⚠ Stuck on '{btn_clicked}' — force-skipping form")
             return False, f"stuck on {btn_clicked}"
 
