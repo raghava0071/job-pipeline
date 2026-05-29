@@ -26,7 +26,8 @@ except ImportError:
 
 from raghav_profile import PROFILE, EDUCATION, EXPERIENCE, SKILLS
 
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output", "resumes")
+from pathlib import Path as _Path
+OUTPUT_DIR = str(_Path.home() / "job_pipeline" / "resumes")
 
 # ── COLORS & FONTS ────────────────────────────────────────────────────────────
 COLOR_ACCENT = RGBColor(0x1F, 0x5C, 0x99)
@@ -445,7 +446,7 @@ def add_summary(doc, jd_keywords: list, role_title: str):
     p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
 
-def add_experience(doc, jd_keywords: list, injectable_kws: list):
+def add_experience(doc, jd_keywords: list, injectable_kws: list, ai_bullets: dict = None):
     add_section_header(doc, "Work Experience")
 
     kw_set       = set(k.lower() for k in jd_keywords)
@@ -481,20 +482,24 @@ def add_experience(doc, jd_keywords: list, injectable_kws: list):
             9.5, italic=True, color=COLOR_MID
         )
 
-        bullets = list(job["bullets"])
-        bullets_sorted = sorted(
-            bullets,
-            key=lambda b: sum(1 for kw in kw_set if kw in b.lower()),
-            reverse=True,
-        )
-        max_bullets = 7 if job["include_always"] else 4
-
-        if first_primary and job["include_always"] and missing_from_bullets:
-            bullets_sorted = enhance_bullets_with_keywords(
-                bullets_sorted, missing_from_bullets, max_additions=4
-            )
+        # Use Claude-rewritten bullets if available for this job
+        if ai_bullets and job["title"] in ai_bullets:
+            bullets_sorted = ai_bullets[job["title"]]
             first_primary = False
+        else:
+            bullets = list(job["bullets"])
+            bullets_sorted = sorted(
+                bullets,
+                key=lambda b: sum(1 for kw in kw_set if kw in b.lower()),
+                reverse=True,
+            )
+            if first_primary and job["include_always"] and missing_from_bullets:
+                bullets_sorted = enhance_bullets_with_keywords(
+                    bullets_sorted, missing_from_bullets, max_additions=4
+                )
+                first_primary = False
 
+        max_bullets = 7 if job["include_always"] else 4
         for bullet in bullets_sorted[:max_bullets]:
             p_b = doc.add_paragraph(style="List Bullet")
             _para_space(p_b, before_pt=0, after_pt=1)
@@ -608,27 +613,111 @@ def add_ats_gap_fill(doc, missing_keywords: list):
 
 
 # =============================================================================
-# MASTER BUILD FUNCTION  — 98%+ GUARANTEE
+# CLAUDE AI — INTELLIGENT RESUME REWRITING
+# =============================================================================
+
+def _claude_rewrite_summary(job_title: str, company: str, jd_text: str, profile_summary: str) -> str:
+    """Use Claude to write a tailored professional summary for this specific job."""
+    try:
+        import anthropic, os
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY") or
+                                     open(Path.home() / "job_pipeline" / ".env").read().split("ANTHROPIC_API_KEY=")[1].split()[0])
+        prompt = (
+            f"Write a 3-sentence professional summary for a resume applying to: '{job_title}' at '{company}'.\n\n"
+            f"Job description excerpt:\n{jd_text[:1200]}\n\n"
+            f"Candidate background:\n{profile_summary}\n\n"
+            f"Rules:\n"
+            f"- 3 sentences only, no bullet points\n"
+            f"- Start with a strong action-oriented opening (e.g. 'Results-driven...' or 'Data professional...')\n"
+            f"- Naturally weave in the most important JD keywords\n"
+            f"- End with: 'M.S. Data Science & Analytics (Florida Atlantic University, 2025). Available immediately on F-1 OPT/STEM OPT — no sponsorship required.'\n"
+            f"- Return ONLY the summary text, nothing else"
+        )
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return resp.content[0].text.strip()
+    except Exception as e:
+        return ""  # fallback to template-based summary
+
+
+def _claude_rewrite_bullets(job_title: str, company: str, jd_text: str, bullets: list, missing_kws: list) -> list:
+    """Use Claude to rewrite/enhance experience bullets to match this JD."""
+    try:
+        import anthropic, os
+        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY") or
+                                     open(Path.home() / "job_pipeline" / ".env").read().split("ANTHROPIC_API_KEY=")[1].split()[0])
+        bullets_text = "\n".join(f"- {b}" for b in bullets[:8])
+        missing_str  = ", ".join(missing_kws[:15]) if missing_kws else "none"
+        prompt = (
+            f"You are rewriting resume bullet points for a '{job_title}' role at '{company}'.\n\n"
+            f"Job description excerpt:\n{jd_text[:1000]}\n\n"
+            f"Original bullets:\n{bullets_text}\n\n"
+            f"Keywords to naturally include if possible: {missing_str}\n\n"
+            f"Rules:\n"
+            f"- Rewrite each bullet to be more impactful and relevant to this role\n"
+            f"- Keep each bullet under 20 words\n"
+            f"- Start each with a strong past-tense action verb (Built, Designed, Optimized, etc.)\n"
+            f"- Preserve real metrics/numbers from the original bullets\n"
+            f"- Do NOT invent metrics or companies\n"
+            f"- Return ONLY the bullets, one per line, no dashes or numbers, no extra text"
+        )
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        rewritten = [line.strip().lstrip("•-– ") for line in resp.content[0].text.strip().split("\n") if line.strip()]
+        # Keep originals for any bullets Claude dropped
+        while len(rewritten) < len(bullets[:8]):
+            rewritten.append(bullets[len(rewritten)])
+        return rewritten
+    except Exception as e:
+        return bullets  # fallback to originals
+
+
+# =============================================================================
+# MASTER BUILD FUNCTION  — 98%+ GUARANTEE + CLAUDE AI INTELLIGENCE
 # =============================================================================
 
 def build_resume(
-    job_title:      str,
-    company:        str,
-    jd_keywords:    list,
-    injectable_kws: list,
-    initial_score:  float,
+    job_title:       str,
+    company:         str,
+    jd_keywords:     list,
+    injectable_kws:  list,
+    initial_score:   float,
     optimized_score: float,
-    output_path:    str = None,
+    output_path:     str  = None,
+    jd_text:         str  = "",
+    profile_summary: str  = "",
 ) -> tuple:
     """
-    Build a tailored, ATS-optimized .docx resume.
-    After building, verifies actual keyword coverage.
-    If < 98%, adds a gap-fill section and re-verifies.
+    Build a tailored, ATS-optimized .docx resume with Claude AI rewriting.
+    Claude rewrites the summary and top bullets to match this specific job.
+    After building, verifies actual keyword coverage (98%+ guarantee).
     Returns (file_path, actual_initial_score, actual_optimized_score).
     """
     print(f"\n  ┌─ Building resume: {job_title} @ {company}")
     print(f"  │  Estimated BEFORE: {initial_score:.0f}%  →  Estimated AFTER: {optimized_score:.0f}%")
     print(f"  │  JD keywords: {len(jd_keywords)}  |  Injectable: {len(injectable_kws)}")
+
+    # ── Claude AI: rewrite summary & bullets for this specific job ────────────
+    ai_summary = ""
+    ai_bullets  = {}
+    if jd_text:
+        print(f"  │  🤖 Claude: rewriting summary & bullets for {company}...")
+        ai_summary = _claude_rewrite_summary(job_title, company, jd_text, profile_summary)
+        # Rewrite bullets for the primary (always-included) job
+        for job in EXPERIENCE:
+            if job.get("include_always"):
+                ai_bullets[job["title"]] = _claude_rewrite_bullets(
+                    job_title, company, jd_text,
+                    job.get("bullets", []),
+                    injectable_kws
+                )
+                break  # only rewrite top job to save API calls
 
     doc = Document()
     _set_margins(doc)
@@ -639,8 +728,18 @@ def build_resume(
     title_label = job_title if len(job_title) < 50 else "Data Engineer"
 
     add_name_header(doc, title_label)
-    add_summary(doc, jd_keywords, title_label)
-    add_experience(doc, jd_keywords, injectable_kws)
+
+    # Use Claude summary if available, else template
+    if ai_summary:
+        add_section_header(doc, "Professional Summary")
+        p = doc.add_paragraph()
+        _para_space(p, before_pt=2, after_pt=2)
+        _set_font(p.add_run(ai_summary), 10, color=COLOR_DARK)
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    else:
+        add_summary(doc, jd_keywords, title_label)
+
+    add_experience(doc, jd_keywords, injectable_kws, ai_bullets=ai_bullets)
     add_education(doc)
     add_skills(doc, jd_keywords, injectable_kws)
 
@@ -663,19 +762,6 @@ def build_resume(
             print(f"  │  Pass 2 coverage: {pass2_score:.1f}%  ✅ All keywords covered!")
     else:
         print(f"  │  ✅ Full coverage achieved in Pass 1!")
-
-    # ── FOOTER ────────────────────────────────────────────────────────────────
-    p_footer = doc.add_paragraph()
-    _para_space(p_footer, before_pt=8, after_pt=0)
-    p_footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    _set_font(
-        p_footer.add_run(
-            f"Initial ATS: {initial_score:.0f}%  →  Optimized ATS: {actual_optimized:.1f}%  "
-            f"(+{actual_optimized - initial_score:.0f}% improvement)  |  "
-            f"Tailored for {company}  |  Generated {datetime.now().strftime('%b %d, %Y')}"
-        ),
-        7.5, color=COLOR_GRAY,
-    )
 
     # ── SAVE ──────────────────────────────────────────────────────────────────
     if not output_path:

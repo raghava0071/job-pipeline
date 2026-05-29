@@ -600,5 +600,57 @@ def main():
     return df
 
 
+def parse_jd(jd_text: str, job_title: str) -> dict:
+    """
+    Public API used by master_run.py — parse a JD and return ATS scores + keywords.
+    Wraps compute_ats_score() with sensible defaults.
+
+    Returns dict with:
+      jd_keywords          : list[str]  — tech terms found in JD
+      injectable_keywords  : list[str]  — candidate has these, JD wants them
+      initial_score        : float      — ATS score with generic resume
+      optimized_score      : float      — ATS score with full injectable pool
+      + all dimension scores from compute_ats_score()
+    """
+    if not jd_text or str(jd_text).strip().lower() in ("", "nan", "none"):
+        return {
+            "jd_keywords":         [],
+            "injectable_keywords": [],
+            "initial_score":       0.0,
+            "optimized_score":     0.0,
+        }
+
+    generic_text = _build_generic_resume_text()
+    injectable   = _build_injectable_pool()
+
+    try:
+        scores = compute_ats_score(job_title or "Data Role", jd_text, generic_text, injectable)
+    except Exception as e:
+        return {
+            "jd_keywords":         [],
+            "injectable_keywords": [],
+            "initial_score":       0.0,
+            "optimized_score":     0.0,
+            "error":               str(e),
+        }
+
+    return {
+        "jd_keywords":         scores.get("jd_keywords",         []),
+        "injectable_keywords": scores.get("injectable_keywords", []),
+        "initial_score":       scores.get("initial_score",       0.0),
+        "optimized_score":     scores.get("optimized_score",     0.0),
+        # Dimension detail for tracker
+        "dim_keyword_before":  scores.get("kw_before",  0.0),
+        "dim_keyword_after":   scores.get("kw_after",   0.0),
+        "dim_skills_before":   scores.get("sk_before",  0.0),
+        "dim_skills_after":    scores.get("sk_after",   0.0),
+        "dim_experience":      scores.get("exp_score",  0.0),
+        "dim_education":       scores.get("edu_score",  0.0),
+        "dim_title":           scores.get("ttl_score",  0.0),
+        "yoe_required":        scores.get("yoe_required", 0),
+        "coverage_gap":        scores.get("coverage_gap", []),
+    }
+
+
 if __name__ == "__main__":
     main()

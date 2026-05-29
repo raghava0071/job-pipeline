@@ -1,17 +1,16 @@
 #!/opt/anaconda3/bin/python3
 # =============================================================================
-# LINKEDIN_SCRAPER.PY — Fetch Easy Apply jobs directly from LinkedIn
+# LINKEDIN_SCRAPER.PY  v4  — Broad Data Science scope + debug mode
 #
-# WHAT IT DOES:
-#   - Searches LinkedIn Jobs for data roles (entry/mid level only)
-#   - Collects ONLY jobs that have "Easy Apply" button (never external)
-#   - Saves to ~/job_pipeline/data/linkedin_jobs.csv
-#   - auto_apply.py reads this CSV to know exactly which jobs to apply to
+# STRATEGY:
+#   1. Go to search page with Easy Apply filter (f_LF=f_AL)
+#   2. Click each job card → right panel loads title/company/description
+#   3. Extract via JS page.evaluate() — CSS-class independent
+#   4. Prints EVERY title found (before filtering) — debug mode
 #
 # USAGE:
-#   python linkedin_scraper.py             # Scrape with login prompt
-#   python linkedin_scraper.py --limit 30  # Max 30 jobs
-#   python linkedin_scraper.py --dry-run   # List found jobs, don't save
+#   python linkedin_scraper.py             # Full run
+#   python linkedin_scraper.py --limit 10  # Max 10 jobs per query
 # =============================================================================
 
 import sys
@@ -23,216 +22,269 @@ from datetime import datetime
 try:
     import pandas as pd
 except ImportError:
-    sys.exit("❌  pip install pandas --break-system-packages")
+    sys.exit("pip install pandas --break-system-packages")
 
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 except ImportError:
-    sys.exit("❌  pip install playwright && python -m playwright install chromium")
+    sys.exit("pip install playwright && python -m playwright install chromium")
 
-# ── Config ─────────────────────────────────────────────────────────────────────
-PIPELINE_DIR     = Path.home() / "job_pipeline"
-DATA_DIR         = PIPELINE_DIR / "data"
-OUTPUT_CSV       = DATA_DIR / "linkedin_jobs.csv"
-SESSION_DIR      = Path.home() / ".linkedin_session"
-
+PIPELINE_DIR = Path.home() / "job_pipeline"
+DATA_DIR     = PIPELINE_DIR / "data"
+OUTPUT_CSV   = DATA_DIR / "linkedin_jobs.csv"
+SESSION_DIR  = Path.home() / ".linkedin_session"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Job searches to run on LinkedIn
+# Full data science field — not just exact titles
 SEARCH_QUERIES = [
-    {"keywords": "Data Engineer Entry Level",        "location": "United States", "f_AL": "true"},
-    {"keywords": "Junior Data Engineer",              "location": "United States", "f_AL": "true"},
-    {"keywords": "Data Analyst Entry Level",          "location": "United States", "f_AL": "true"},
-    {"keywords": "Data Engineer Azure",               "location": "United States", "f_AL": "true"},
-    {"keywords": "Cloud Data Engineer Entry Level",   "location": "United States", "f_AL": "true"},
-    {"keywords": "ETL Developer Entry Level",         "location": "United States", "f_AL": "true"},
-    {"keywords": "Business Intelligence Analyst",     "location": "United States", "f_AL": "true"},
+    "Data Engineer Entry Level",
+    "Junior Data Engineer",
+    "Data Analyst Entry Level",
+    "Data Scientist Entry Level",
+    "Junior Data Scientist",
+    "Machine Learning Engineer Entry Level",
+    "Analytics Engineer Entry Level",
+    "Business Intelligence Analyst",
+    "BI Developer Entry Level",
+    "ETL Developer Entry Level",
+    "Cloud Data Engineer Entry Level",
+    "Data Engineer Azure",
+    "Data Engineer AWS",
+    "Data Pipeline Engineer",
+    "Data Warehouse Engineer Entry Level",
+    "SQL Developer Data",
+    "Python Data Engineer",
+    "Spark Engineer Entry Level",
+    "AI Engineer Entry Level",
+    "Junior ML Engineer",
 ]
 
-# Titles to REJECT (senior/lead roles)
 REJECT_TITLE_KEYWORDS = [
-    "senior", "sr.", "lead", "principal", "staff", "director",
+    "senior", "sr.", " sr ", "lead", "principal", "staff", "director",
     "manager", "vp ", "vice president", "head of", "chief", "architect",
-    "distinguished", "fellow"
+    "distinguished", "fellow", "executive",
 ]
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def is_good_level(title: str) -> bool:
     t = title.lower()
     return not any(bad in t for bad in REJECT_TITLE_KEYWORDS)
 
-def build_linkedin_search_url(keywords: str, location: str, easy_apply: bool = True) -> str:
-    """Build LinkedIn Jobs search URL with Easy Apply filter."""
+def build_search_url(keywords: str, location: str = "United States") -> str:
     import urllib.parse
     params = {
         "keywords": keywords,
         "location": location,
-        "sortBy": "DD",          # Date Descending (newest first)
-        "f_TPR": "r604800",      # Posted in last 7 days
+        "sortBy":   "DD",
+        "f_TPR":    "r604800",
+        "f_LF":     "f_AL",
     }
-    if easy_apply:
-        params["f_LF"] = "f_AL"  # Easy Apply filter
-    base = "https://www.linkedin.com/jobs/search/?"
-    return base + urllib.parse.urlencode(params)
+    return "https://www.linkedin.com/jobs/search/?" + urllib.parse.urlencode(params)
 
 def ensure_login(page):
-    """Make sure we're logged into LinkedIn."""
     try:
         page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=20000)
-        time.sleep(2)
-        if "feed" in page.url and page.locator("div.global-nav").count() > 0:
+        time.sleep(3)
+        if "feed" in page.url and page.locator("nav").count() > 0:
             print("  ✅  LinkedIn: already logged in")
             return
     except Exception:
         pass
-
-    print()
-    print("  🔐  LinkedIn login required.")
-    print("      The browser opened — please log in to LinkedIn.")
-    print("      Press ENTER once you can see your LinkedIn home feed...")
+    print("\n  🔐  LinkedIn login required. Log in then press ENTER...")
     input("  → ")
-    print("  ✅  Logged in. Starting scrape...\n")
+    print("  ✅  Logged in.\n")
 
-def scrape_search_page(page, url: str, max_per_query: int = 20) -> list[dict]:
-    """Scrape one LinkedIn search results page for Easy Apply jobs."""
+
+def extract_details(page) -> dict:
+    """Extract title/company/location/description from current page via JS."""
+    return page.evaluate("""
+        () => {
+            let title = '';
+            for (const sel of [
+                '.job-details-jobs-unified-top-card__job-title h1',
+                '.jobs-unified-top-card__job-title h1',
+                'h1.t-24', 'h2.t-24', 'h1'
+            ]) {
+                const el = document.querySelector(sel);
+                if (el && el.innerText.trim().length > 2) {
+                    title = el.innerText.trim(); break;
+                }
+            }
+            if (!title) {
+                const el = document.querySelector('[class*="job-title"]');
+                if (el) title = el.innerText.trim();
+            }
+
+            let company = '';
+            for (const sel of [
+                '.job-details-jobs-unified-top-card__company-name a',
+                '.jobs-unified-top-card__company-name a',
+                '.jobs-unified-top-card__subtitle a',
+                '.topcard__org-name-link',
+                '[class*="company-name"]'
+            ]) {
+                const el = document.querySelector(sel);
+                if (el && el.innerText.trim().length > 1) {
+                    company = el.innerText.trim(); break;
+                }
+            }
+
+            let location = '';
+            for (const sel of [
+                '.jobs-unified-top-card__bullet',
+                '.job-details-jobs-unified-top-card__primary-description-without-tagline .tvm__text',
+                '.topcard__flavor--bullet'
+            ]) {
+                const el = document.querySelector(sel);
+                if (el && el.innerText.trim()) {
+                    location = el.innerText.trim(); break;
+                }
+            }
+
+            let description = '';
+            for (const sel of [
+                '#job-details',
+                '.jobs-description__content',
+                '.jobs-description-content__text',
+                '.description__text',
+                '[class*="job-description"]'
+            ]) {
+                const el = document.querySelector(sel);
+                if (el && el.innerText.length > 50) {
+                    description = el.innerText.substring(0, 3500); break;
+                }
+            }
+
+            return { title, company, location, description };
+        }
+    """) or {"title": "", "company": "", "location": "", "description": ""}
+
+
+def scrape_search_page(page, search_url: str, max_jobs: int = 20) -> list[dict]:
     jobs = []
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=25000)
-        time.sleep(3)
+        page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+        time.sleep(5)
 
-        # Scroll to load more jobs
-        for _ in range(3):
+        # Scroll to load all cards
+        for _ in range(6):
             page.keyboard.press("End")
             time.sleep(1.5)
+        page.keyboard.press("Home")
+        time.sleep(2)
 
-        # Find job cards
-        job_cards = page.locator(
-            ".jobs-search__results-list li, "
-            ".scaffold-layout__list-container li, "
-            "li.ember-view.jobs-search-results__list-item"
-        ).all()
+        job_links = page.evaluate("""
+            () => {
+                const seen = new Set();
+                const result = [];
+                for (const a of document.querySelectorAll('a[href*="/jobs/view/"]')) {
+                    const url = a.href.split('?')[0].replace(/\\/$/, '');
+                    if (url && !seen.has(url)) {
+                        seen.add(url);
+                        result.push({ url });
+                    }
+                }
+                return result;
+            }
+        """) or []
 
-        print(f"    Found {len(job_cards)} job cards on page")
+        print(f"    Found {len(job_links)} job links on page")
 
-        for card in job_cards[:max_per_query]:
+        if not job_links:
+            pg_title = page.title()
+            print(f"    ⚠️  Page title: '{pg_title}' — may be rate-limited or login wall")
+            return jobs
+
+        seen_urls = set()
+        for idx, link_info in enumerate(job_links[:max_jobs]):
+            job_url = link_info.get("url", "")
+            if not job_url or job_url in seen_urls:
+                continue
+            seen_urls.add(job_url)
+
             try:
-                # Click card to load job detail panel
-                card.click()
-                time.sleep(2)
+                # Click the card link to load right panel (no URL navigation)
+                job_id = job_url.split("/jobs/view/")[1].split("?")[0] if "/jobs/view/" in job_url else ""
+                clicked_card = False
+                if job_id:
+                    card = page.locator(f'a[href*="{job_id}"]').first
+                    if card.count() > 0:
+                        card.click()
+                        time.sleep(3.5)
+                        clicked_card = True
 
-                # Get job details from right panel
-                detail = page.locator(".jobs-details, .job-view-layout, .jobs-search__job-details")
+                if not clicked_card:
+                    page.goto(job_url, wait_until="domcontentloaded", timeout=25000)
+                    time.sleep(4)
 
-                # Title
-                title_el = page.locator(
-                    ".jobs-details-top-card__job-title, "
-                    "h1.t-24, "
-                    ".job-details-jobs-unified-top-card__job-title h1"
-                ).first
-                title = title_el.inner_text().strip() if title_el.count() else ""
+                details     = extract_details(page)
+                title       = details["title"].strip()
+                company     = details["company"].strip()
+                location    = details["location"].strip()
+                description = details["description"].strip()
 
-                # Company
-                company_el = page.locator(
-                    ".jobs-details-top-card__company-url, "
-                    ".jobs-unified-top-card__company-name a, "
-                    ".job-details-jobs-unified-top-card__company-name a"
-                ).first
-                company = company_el.inner_text().strip() if company_el.count() else ""
+                # ── Debug: show what we got ──────────────────────────────
+                print(f"      [{idx+1}] '{title[:45]}' | '{company[:25]}'", end="")
 
-                # Location
-                loc_el = page.locator(
-                    ".jobs-details-top-card__bullet, "
-                    ".jobs-unified-top-card__bullet, "
-                    ".job-details-jobs-unified-top-card__primary-description-without-tagline .tvm__text"
-                ).first
-                location = loc_el.inner_text().strip() if loc_el.count() else ""
-
-                # Check for Easy Apply button (strict)
-                easy_btn = page.locator(
-                    "button.jobs-apply-button:has-text('Easy Apply'), "
-                    "button[aria-label*='Easy Apply']"
-                ).first
-                is_easy_apply = easy_btn.count() > 0 and easy_btn.is_visible()
-
-                if not is_easy_apply:
-                    continue  # Skip non-Easy-Apply jobs
-
-                # Get job URL
-                job_url = page.url
-                # Try to get direct job URL from card
-                link = card.locator("a.job-card-list__title, a.job-card-container__link").first
-                if link.count():
-                    href = link.get_attribute("href") or ""
-                    if href:
-                        job_url = "https://www.linkedin.com" + href if href.startswith("/") else href
-                        job_url = job_url.split("?")[0]  # clean URL
-
-                # Skip if title doesn't match level filter
-                if not title or not is_good_level(title):
+                if not title:
+                    print("  → SKIP: no title (right panel may not have loaded)")
                     continue
-
-                # Skip if company missing
+                if not is_good_level(title):
+                    print(f"  → SKIP: senior/lead role")
+                    continue
                 if not company:
+                    print(f"  → SKIP: no company")
                     continue
 
-                # Job description (for Claude scoring later)
-                desc_el = page.locator(
-                    ".jobs-description__content, "
-                    "#job-details, "
-                    ".jobs-description-content__text"
-                ).first
-                description = desc_el.inner_text()[:3000] if desc_el.count() else ""
+                print("  → ✅ ADDED")
+
+                city  = location.split(",")[0].strip() if "," in location else location
+                state = location.split(",")[1].strip() if location.count(",") >= 1 else ""
 
                 jobs.append({
-                    "job_title":        title,
-                    "employer_name":    company,
-                    "job_city":         location.split(",")[0].strip() if "," in location else location,
-                    "job_state":        location.split(",")[-1].strip() if "," in location else "",
-                    "job_apply_link":   job_url,
-                    "job_description":  description,
-                    "is_easy_apply":    True,
-                    "platform":         "LinkedIn",
-                    "fetched_at":       datetime.now().isoformat(),
-                    "fit_score":        0,   # Claude will score this
-                    "fit_grade":        "",
-                    "fit_apply":        False,
+                    "job_title":       title,
+                    "employer_name":   company,
+                    "job_city":        city,
+                    "job_state":       state,
+                    "job_apply_link":  job_url,
+                    "job_description": description,
+                    "is_easy_apply":   True,
+                    "platform":        "LinkedIn",
+                    "fetched_at":      datetime.now().isoformat(),
+                    "fit_score":       0,
+                    "fit_grade":       "",
+                    "fit_apply":       False,
                 })
 
-                print(f"      ✅  {company} — {title}")
-
+            except PWTimeout:
+                print(f"  → SKIP: timeout")
             except Exception as e:
-                continue
+                print(f"  → SKIP: {str(e)[:50]}")
 
     except PWTimeout:
-        print(f"    ⚠️  Page timed out: {url[:80]}")
+        print(f"    ⚠️  Timed out loading search page")
     except Exception as e:
         print(f"    ⚠️  Error: {e}")
 
     return jobs
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════════════════════
-
 def main():
-    parser = argparse.ArgumentParser(description="Scrape LinkedIn Easy Apply jobs")
-    parser.add_argument("--limit",   type=int, default=20,  help="Max jobs per search query")
-    parser.add_argument("--dry-run", action="store_true",   help="Show results, don't save CSV")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit",   type=int, default=20)
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     print()
     print("╔══════════════════════════════════════════════════════════════╗")
-    print("║  LINKEDIN EASY APPLY SCRAPER                                 ║")
-    print("║  Entry & Mid Level Data Roles  •  Easy Apply ONLY            ║")
+    print("║  LINKEDIN EASY APPLY SCRAPER  v4 — Full Data Science Scope   ║")
+    print("║  Entry & Mid Level  •  Easy Apply ONLY  •  Debug Mode ON     ║")
     print("╚══════════════════════════════════════════════════════════════╝")
-    print(f"  Searches : {len(SEARCH_QUERIES)}")
-    print(f"  Max/query: {args.limit}")
+    print(f"  Searches  : {len(SEARCH_QUERIES)}")
+    print(f"  Max/query : {args.limit}")
     print()
 
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    all_jobs = []
+    all_jobs, seen_urls = [], set()
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch_persistent_context(
@@ -244,46 +296,43 @@ def main():
         page = browser.pages[0] if browser.pages else browser.new_page()
         ensure_login(page)
 
-        for i, query in enumerate(SEARCH_QUERIES, 1):
-            kw  = query["keywords"]
-            loc = query["location"]
-            print(f"  [{i}/{len(SEARCH_QUERIES)}]  Searching: '{kw}' in {loc}...")
-            url  = build_linkedin_search_url(kw, loc, easy_apply=True)
-            jobs = scrape_search_page(page, url, max_per_query=args.limit)
-            print(f"    → {len(jobs)} Easy Apply jobs found")
-            all_jobs.extend(jobs)
-            time.sleep(2)  # polite pause between searches
+        for i, kw in enumerate(SEARCH_QUERIES, 1):
+            print(f"\n  [{i}/{len(SEARCH_QUERIES)}]  '{kw}'...")
+            jobs = scrape_search_page(page, build_search_url(kw), max_jobs=args.limit)
+            for job in jobs:
+                key = job["job_apply_link"].split("?")[0].rstrip("/")
+                if key not in seen_urls:
+                    seen_urls.add(key)
+                    all_jobs.append(job)
+            print(f"    → {len(jobs)} jobs collected this query")
+            time.sleep(3)
 
         browser.close()
 
-    # Deduplicate by URL
-    seen = set()
-    unique = []
+    seen, unique = set(), []
     for j in all_jobs:
         key = j["job_apply_link"].split("?")[0].rstrip("/")
         if key not in seen:
             seen.add(key)
             unique.append(j)
 
-    print()
-    print(f"  ── Total unique Easy Apply jobs found: {len(unique)} ──")
+    print(f"\n  ── Total unique Easy Apply jobs: {len(unique)} ──\n")
 
     if args.dry_run:
         for j in unique:
             print(f"    {j['employer_name']:<25}  {j['job_title']}")
-        print("\n  Dry run — not saved. Remove --dry-run to save.\n")
         return
 
     if not unique:
-        print("  ⚠️  No Easy Apply jobs found.")
-        print("       LinkedIn may need fresh login or rate limited.")
+        print("  ⚠️  0 jobs found. Check the debug output above to see WHY each was skipped.")
+        print("  Common causes:")
+        print("    • 'no title' → LinkedIn right panel not loading (rate limit)")
+        print("    • 'senior/lead' → all 7 results are senior roles for that query")
+        print("    • Try running again after 5 minutes, or log out/in on LinkedIn\n")
         return
 
-    # Save to CSV
-    df = pd.DataFrame(unique)
-    df.to_csv(str(OUTPUT_CSV), index=False)
-    print(f"\n  ✅  Saved {len(unique)} jobs → {OUTPUT_CSV}")
-    print(f"  Next step: Run master_run.py --skip-fetch to score & build resumes\n")
+    pd.DataFrame(unique).to_csv(str(OUTPUT_CSV), index=False)
+    print(f"  ✅  Saved {len(unique)} jobs → {OUTPUT_CSV}\n")
 
 
 if __name__ == "__main__":
