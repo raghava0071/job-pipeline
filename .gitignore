@@ -1,22 +1,29 @@
-# ── Personal data — NEVER push ──────────────────────
+# ── NEVER push these ──────────────────────────────────────
 .env
 raghav_profile.py
 
-# ── Pipeline output data ─────────────────────────────
-data/raw_jobs.csv
-data/filtered_jobs.csv
-data/apply_log.json
-data/apply_queue.json
-data/Application_Tracker.xlsx
-data/screenshots/
+# ── Browser session data (login cookies) ──────────────────
+~/.linkedin_session/
+~/.indeed_session/
 
-# ── Generated docs per-job ───────────────────────────
+# ── Generated outputs (resumes, cover letters, logs) ──────
 resumes/
 cover_letters/
-output/
+data/
+*.docx
+*.xlsx
+*.pdf
 
-# ── Python cache ─────────────────────────────────────
+# ── Python cache ───────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+.Python
+
+# ── macOS junk ─────────────────────────────────────────────
+.DS_Store
+*.bak
+
+# ── Logs ───────────────────────────────────────────────────
 *.log
