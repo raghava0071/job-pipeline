@@ -620,8 +620,12 @@ def _claude_rewrite_summary(job_title: str, company: str, jd_text: str, profile_
     """Use Claude to write a tailored professional summary for this specific job."""
     try:
         import anthropic, os
-        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY") or
-                                     open(Path.home() / "job_pipeline" / ".env").read().split("ANTHROPIC_API_KEY=")[1].split()[0])
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            for line in (Path.home() / "job_pipeline" / ".env").read_text().splitlines():
+                if line.startswith("ANTHROPIC_API_KEY="):
+                    api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
+        client = anthropic.Anthropic(api_key=api_key)
         prompt = (
             f"Write a 3-sentence professional summary for a resume applying to: '{job_title}' at '{company}'.\n\n"
             f"Job description excerpt:\n{jd_text[:1200]}\n\n"
@@ -647,8 +651,12 @@ def _claude_rewrite_bullets(job_title: str, company: str, jd_text: str, bullets:
     """Use Claude to rewrite/enhance experience bullets to match this JD."""
     try:
         import anthropic, os
-        client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY") or
-                                     open(Path.home() / "job_pipeline" / ".env").read().split("ANTHROPIC_API_KEY=")[1].split()[0])
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            for line in (Path.home() / "job_pipeline" / ".env").read_text().splitlines():
+                if line.startswith("ANTHROPIC_API_KEY="):
+                    api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
+        client = anthropic.Anthropic(api_key=api_key)
         bullets_text = "\n".join(f"- {b}" for b in bullets[:8])
         missing_str  = ", ".join(missing_kws[:15]) if missing_kws else "none"
         prompt = (
