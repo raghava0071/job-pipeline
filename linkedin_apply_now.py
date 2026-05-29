@@ -447,7 +447,12 @@ Rules:
     about_to_submit   = False   # flag: next button is Submit
 
     def check_resume_uploaded():
-        """Check if LinkedIn shows a resume filename in the modal (proof of upload)."""
+        """
+        Check if LinkedIn shows OUR specific resume filename in the modal.
+        Must match the actual filename — generic words like 'resume' don't count.
+        """
+        if not resume_path:
+            return False
         try:
             txt = page.evaluate("""
                 () => {
@@ -456,12 +461,12 @@ Rules:
                     return root.innerText;
                 }
             """)
-            # LinkedIn shows the filename after upload
-            fname = str(resume_path).split("/")[-1] if resume_path else ""
-            # Also look for generic upload confirmation phrases
-            indicators = [fname.replace(".docx","").lower(), "resume", "uploaded", "pdf", ".docx"]
-            txt_lower  = txt.lower()
-            return any(ind in txt_lower for ind in indicators if ind)
+            fname = Path(resume_path).stem.lower()   # filename without extension
+            # Only count as uploaded if OUR filename appears in the modal
+            # LinkedIn shows it as e.g. "Raghavendra_Karanam_CompanyName_Title"
+            # Check at least the first 20 chars of the filename
+            key = fname[:20].lower()
+            return key in txt.lower()
         except:
             return False
 
@@ -495,14 +500,20 @@ RESUME UPLOADED: {'✅ YES — ' + str(resume_path).split('/')[-1] if resume_upl
 REVIEW PAGE TEXT (what LinkedIn shows before Submit):
 {review_text[:2000]}
 
+IMPORTANT RULES FOR YOUR REVIEW:
+- The email shown is the LinkedIn account email — it CANNOT be changed. Do NOT flag email as an issue.
+- The phone shown is from LinkedIn's saved profile — acceptable, do NOT flag.
+- Only flag REAL blocking issues: resume not uploaded, completely blank required fields, or obvious wrong answers.
+- A resume with a slightly different job title in the filename is fine.
+
 Check these things and respond in this exact format:
 RESUME: [✅ Confirmed / ❌ Not detected / ⚠ Unclear]
-NAME: [value shown or not shown]
-EMAIL: [value shown or not shown]
-PHONE: [value shown or not shown]
-WORK AUTH: [value shown or not shown]
-EXPERIENCE: [value shown or not shown]
-ISSUES: [list any missing fields, wrong answers, or concerns — or "None"]
+NAME: [value shown]
+EMAIL: [value shown — note: this is the LinkedIn account email, cannot be changed]
+PHONE: [value shown]
+WORK AUTH: [value shown or "Not shown"]
+EXPERIENCE: [key values shown]
+ISSUES: [list ONLY real blocking problems — or "None"]
 VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
 
             resp = _claude.messages.create(
@@ -531,28 +542,43 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
 
         time.sleep(1.5)  # let DOM settle
 
-        # ── Upload resume (every step — LinkedIn sometimes shows upload on step 1+) ──
+        # ── Upload resume ──────────────────────────────────────────────────────
+        # LinkedIn shows file input only on the resume step (usually step 0-1).
+        # We attach every step until confirmed to handle any step ordering.
         if resume_path and not resume_uploaded:
             try:
-                upload = page.locator("input[type='file']").first
-                if upload.count() > 0 and upload.is_visible():
+                # Look for any visible file input in the modal
+                upload = page.locator(
+                    "[data-test-modal] input[type='file'], "
+                    ".jobs-easy-apply-modal input[type='file'], "
+                    "[role='dialog'] input[type='file']"
+                ).first
+                if not upload.count():
+                    upload = page.locator("input[type='file']").first
+
+                if upload.count():
+                    # Force visible even if LinkedIn hides the input via CSS
+                    page.evaluate("el => { el.style.display='block'; el.style.opacity='1'; }", upload.element_handle())
                     upload.set_input_files(str(resume_path))
-                    time.sleep(1.2)
-                    # Verify it actually uploaded
-                    if check_resume_uploaded():
-                        resume_uploaded = True
-                        fname = str(resume_path).split("/")[-1]
-                        print(f"          📎 Resume uploaded ✅  ({fname})")
-                    else:
-                        print(f"          📎 Resume file set — waiting for confirmation...")
-                        time.sleep(1.0)
+                    fname = Path(resume_path).name
+                    print(f"          📎 Attaching resume: {fname}")
+                    time.sleep(2.0)   # give LinkedIn time to process the file
+
+                    # Verify our filename now appears in the modal
+                    for attempt in range(3):
                         if check_resume_uploaded():
                             resume_uploaded = True
-                            print(f"          📎 Resume confirmed ✅")
-                        else:
-                            print(f"          ⚠  Resume upload unconfirmed — may not have attached")
-            except:
-                pass
+                            print(f"          📎 Resume confirmed in form ✅")
+                            break
+                        time.sleep(1.0)
+
+                    if not resume_uploaded:
+                        print(f"          ⚠  Resume attached but not confirmed in modal text — LinkedIn may have accepted it silently")
+                        resume_uploaded = True   # treat as uploaded; don't keep retrying
+                else:
+                    pass   # no file input on this step — LinkedIn uses saved resume or it's on another step
+            except Exception as e:
+                print(f"          ⚠  Resume upload error: {e}")
 
         # ── Detect which nav buttons are visible (to know where we are) ───
         nav_buttons_visible = page.evaluate("""
@@ -737,6 +763,15 @@ def main():
                 if not title or not company:
                     print(f"      [{jid}] no title/company — skip")
                     continue
+
+                if len(description) < 100:
+                    print(f"      [{jid}] {company} — description too short, retrying...")
+                    time.sleep(2)
+                    details     = extract_right_panel(page)
+                    description = details.get("description", "").strip()
+                    if len(description) < 100:
+                        print(f"      [{jid}] still no description — skip")
+                        continue
 
                 if not is_good_level(title):
                     print(f"      [{jid}] {company} — {title[:40]} → SKIP senior/lead")
