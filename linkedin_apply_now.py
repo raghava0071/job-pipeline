@@ -25,11 +25,14 @@ from datetime import datetime
 PIPELINE_DIR = Path.home() / "job_pipeline"
 sys.path.insert(0, str(PIPELINE_DIR))
 
-import config as cfg                        # ← global values for the whole project
+import config as cfg
+import answer_cache as _cache   # SQLite answer cache — avoids repeat Claude calls                        # ← global values for the whole project
 
 DATA_DIR    = cfg.DATA_DIR
 SESSION_DIR = cfg.SESSION_LI
-LOG_FILE    = cfg.LOG_FILE
+LOG_FILE      = cfg.LOG_FILE
+SCREENSHOTS   = cfg.BASE_DIR / "screenshots"
+SCREENSHOTS.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 cfg.RESUMES_DIR.mkdir(parents=True, exist_ok=True)
 cfg.COVER_DIR.mkdir(parents=True, exist_ok=True)
@@ -62,10 +65,19 @@ def load_log():
 def save_log(log):
     LOG_FILE.write_text(json.dumps(log, indent=2))
 
-def already_applied(url, log):
+def already_applied(url, log, title="", company=""):
+    """Dedup by URL (normalized) AND by company+title pair."""
     key = url.split("?")[0].rstrip("/")
-    return any(e.get("url","").split("?")[0].rstrip("/") == key
-               and e.get("status") in ("Applied", "Already Applied") for e in log)
+    for e in log:
+        if e.get("status") not in ("Applied", "Already Applied"):
+            continue
+        if e.get("url","").split("?")[0].rstrip("/") == key:
+            return True
+        if title and company:
+            if (e.get("company","").lower().strip() == company.lower().strip()
+                    and e.get("title","").lower().strip() == title.lower().strip()):
+                return True
+    return False
 
 def ensure_login(page):
     page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=20000)
@@ -327,7 +339,14 @@ Applying for: {job_title} at {company}
         if not fields:
             return {}
 
-        fields_desc = _json.dumps(fields, indent=2)
+        # Truncate per-field option lists so prompt stays manageable
+        fields_trimmed = []
+        for f in fields:
+            fc = dict(f)
+            if "options" in fc and len(fc["options"]) > 20:
+                fc["options"] = fc["options"][:20] + [{"value":"...", "label":"(truncated)"}]
+            fields_trimmed.append(fc)
+        fields_desc = _json.dumps(fields_trimmed, indent=2)[:4000]   # hard cap
         prompt = f"""You are filling out a job application form on behalf of this candidate.
 
 CANDIDATE PROFILE:
@@ -355,20 +374,66 @@ Rules:
 - NEVER answer less than 2 for any data/programming/analytics skill
 - Do NOT add any explanation — return raw JSON only"""
 
+        # ── Check cache for each field individually ─────────────────────────────
+        cached_answers = {}
+        uncached_fields = []
+        for f in fields:
+            lbl = f.get("label", f.get("name", ""))
+            cached = _cache.get(lbl)
+            if cached is not None:
+                fid = f.get("id","") or f.get("name","")
+                cached_answers[fid] = cached
+            else:
+                uncached_fields.append(f)
+
+        if cached_answers and not uncached_fields:
+            return cached_answers   # 100% cache hit — no Claude call needed
+
+        # Re-build prompt for only the uncached fields
+        if uncached_fields:
+            fields_trimmed2 = []
+            for f in uncached_fields:
+                fc = dict(f)
+                if "options" in fc and len(fc["options"]) > 20:
+                    fc["options"] = fc["options"][:20] + [{"value":"...", "label":"(truncated)"}]
+                fields_trimmed2.append(fc)
+            fields_desc2 = _json.dumps(fields_trimmed2, indent=2)[:4000]
+            prompt = prompt.replace(fields_desc, fields_desc2)  # swap in uncached only
+
         try:
             resp = _claude.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=600,
+                max_tokens=1500,   # 9 fields with textarea can need 1000+ tokens
                 messages=[{"role":"user","content":prompt}]
             )
             raw = resp.content[0].text.strip()
-            # Extract JSON if wrapped in code block
+            # Strip markdown code fences
             if "```" in raw:
                 raw = raw.split("```")[1].replace("json","").strip()
-            return _json.loads(raw)
+            # Try full parse first, then greedy JSON extraction as fallback
+            try:
+                new_answers = _json.loads(raw)
+            except Exception:
+                import re as _re
+                m = _re.search(r'\{.*\}', raw, _re.DOTALL)
+                if m:
+                    try:
+                        new_answers = _json.loads(m.group())
+                    except Exception:
+                        new_answers = {}
+                else:
+                    new_answers = {}
+            # Save new answers to cache
+            for f in uncached_fields:
+                lbl = f.get("label", f.get("name",""))
+                fid = f.get("id","") or f.get("name","")
+                if fid in new_answers:
+                    _cache.save(lbl, new_answers[fid])
+            merged = {**cached_answers, **new_answers}
+            return merged
         except Exception as e:
             print(f"        ⚠ Claude field-fill error: {e}")
-            return {}
+            return cached_answers  # return whatever we got from cache at least
 
     def apply_claude_answers(fields, answers):
         """Apply Claude's answers to each field on the page."""
@@ -529,100 +594,85 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
         time.sleep(1.5)  # let DOM settle
 
         # ── Upload resume ──────────────────────────────────────────────────────
-        # LinkedIn often hides the file input when a saved resume exists.
-        # Strategy:
-        #   1. Click "Upload resume" / "Change resume" button to open the picker
-        #   2. Intercept the file chooser and set our file
-        #   3. Fall back to direct set_input_files on hidden input
+        # CRITICAL: click MUST happen INSIDE expect_file_chooser context.
+        # Pre-clicking outside the context opens the OS dialog before Playwright
+        # can intercept it — the dialog closes immediately and upload fails.
         if resume_path and not resume_uploaded:
             try:
                 fname = Path(resume_path).name
                 print(f"          📎 Attempting resume upload: {fname}")
 
-                # Step 1 — look for "Upload resume" or "Change resume" button and click it
-                upload_btn = page.evaluate("""
-                    () => {
-                        const modal = document.querySelector(
-                            '[data-test-modal], .jobs-easy-apply-modal, [role="dialog"]');
-                        const root = modal || document.body;
-                        const all  = Array.from(root.querySelectorAll('button, label, [role="button"]'));
-                        const match = all.find(el => {
-                            const t = (el.textContent || el.getAttribute('aria-label') || '').toLowerCase();
-                            return t.includes('upload resume') || t.includes('change resume') ||
-                                   t.includes('upload a resume') || t.includes('replace') ||
-                                   el.getAttribute('for') !== null;   // label for file input
-                        });
-                        if (match) { match.click(); return true; }
-                        return false;
-                    }
-                """)
+                def _click_upload_btn():
+                    """Click the upload/change button or label→input. Call inside expect_file_chooser."""
+                    return page.evaluate("""
+                        () => {
+                            const modal = document.querySelector(
+                                '[data-test-modal],[role="dialog"],.jobs-easy-apply-modal');
+                            const root = modal || document.body;
+                            // Priority 1 — label linked to a file input (most reliable)
+                            for (const inp of root.querySelectorAll('input[type="file"]')) {
+                                if (inp.id) {
+                                    const lbl = root.querySelector('label[for="' + inp.id + '"]');
+                                    if (lbl) { lbl.click(); return 'label'; }
+                                }
+                                inp.style.cssText = 'display:block!important;opacity:1!important;';
+                                inp.click();
+                                return 'input_click';
+                            }
+                            // Priority 2 — button / role=button with upload/change text
+                            const all = Array.from(root.querySelectorAll('button,[role="button"],label'));
+                            const btn = all.find(el => {
+                                const t = (el.textContent + (el.getAttribute('aria-label')||'')).toLowerCase();
+                                return t.includes('upload') || t.includes('change resume') || t.includes('replace');
+                            });
+                            if (btn) { btn.click(); return btn.textContent.trim().slice(0,30); }
+                            return null;
+                        }
+                    """)
 
-                if upload_btn:
-                    print(f"          📎 Clicked upload/change button")
-                    time.sleep(0.8)
-
-                # Step 2 — intercept file chooser (triggered by the button click above)
-                # Use Playwright's expect_file_chooser context manager
+                # Strategy 1 — intercept OS file chooser (click INSIDE context)
+                uploaded = False
                 try:
-                    with page.expect_file_chooser(timeout=3000) as fc_info:
-                        # Re-click the button inside the context to trigger file chooser
+                    with page.expect_file_chooser(timeout=5000) as fc_info:
+                        trigger = _click_upload_btn()   # click happens HERE, inside context
+                    if trigger:
+                        fc = fc_info.value
+                        fc.set_files(str(resume_path))
+                        print(f"          📎 Resume uploaded via file chooser ✅  ({trigger})")
+                        uploaded = True
+                        time.sleep(2.0)
+                    # if trigger is None no button was found — fall through
+                except Exception:
+                    pass  # timeout or no file chooser — try direct input
+
+                # Strategy 2 — click button, wait for DOM to update, set files directly
+                if not uploaded:
+                    # Re-click the change button to reveal the file input in DOM
+                    _click_upload_btn()
+                    time.sleep(1.2)   # wait for LinkedIn to render file input
+                    try:
                         page.evaluate("""
                             () => {
-                                const modal = document.querySelector(
-                                    '[data-test-modal], .jobs-easy-apply-modal, [role="dialog"]');
-                                const root = modal || document.body;
-                                const all  = Array.from(root.querySelectorAll('button, label, [role="button"]'));
-                                const match = all.find(el => {
-                                    const t = (el.textContent || el.getAttribute('aria-label') || '').toLowerCase();
-                                    return t.includes('upload resume') || t.includes('change resume') ||
-                                           t.includes('upload a resume') || t.includes('replace');
+                                document.querySelectorAll('input[type="file"]').forEach(inp => {
+                                    inp.style.cssText = 'display:block!important;opacity:1!important;position:fixed!important;top:0!important;left:0!important;z-index:9999!important;';
                                 });
-                                if (match) match.click();
                             }
                         """)
-                    fc = fc_info.value
-                    fc.set_files(str(resume_path))
-                    print(f"          📎 File chooser intercepted ✅")
-                    resume_uploaded = True
-                    time.sleep(2.0)
-                except Exception:
-                    pass  # no file chooser triggered — fall through to direct input
-
-                # Step 3 — direct set_input_files on hidden file input (force visible first)
-                if not resume_uploaded:
-                    uploaded_via_input = page.evaluate(f"""
-                        () => {{
-                            const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
-                            if (!inputs.length) return false;
-                            const inp = inputs[0];
-                            inp.style.display  = 'block';
-                            inp.style.opacity  = '1';
-                            inp.style.position = 'fixed';
-                            inp.style.top      = '0';
-                            inp.style.left     = '0';
-                            inp.style.zIndex   = '9999';
-                            return true;
-                        }}
-                    """)
-                    if uploaded_via_input:
                         upload_el = page.locator("input[type='file']").first
                         upload_el.set_input_files(str(resume_path))
-                        time.sleep(2.0)
-                        if check_resume_uploaded():
-                            resume_uploaded = True
-                            print(f"          📎 Resume uploaded via direct input ✅")
-                        else:
-                            # LinkedIn accepted the file silently (common behaviour)
-                            resume_uploaded = True
-                            print(f"          📎 Resume set (LinkedIn accepted silently)")
-                    else:
-                        print(f"          ⚠  No file input found — LinkedIn using profile resume")
-                        resume_uploaded = True   # don't keep trying every step
+                        uploaded = True
+                        print(f"          📎 Resume uploaded via direct input ✅")
+                        time.sleep(1.5)
+                    except Exception:
+                        print(f"          ⚠  No upload trigger — LinkedIn using profile resume")
+                        uploaded = True   # stop retrying
+
+                if uploaded:
+                    resume_uploaded = True
 
             except Exception as e:
                 print(f"          ⚠  Resume upload error: {e}")
-                resume_uploaded = True  # prevent retry loop
-
+                resume_uploaded = True
         # ── Detect which nav buttons are visible (to know where we are) ───
         nav_buttons_visible = page.evaluate("""
             () => {
@@ -680,6 +730,27 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
             prev_btn_text = btn_clicked
 
         if same_btn_count >= cfg.STUCK_THRESHOLD:
+            # Before giving up — if we're stuck on Review, look for a Submit button
+            has_submit = page.evaluate("""
+                () => {
+                    const all = Array.from(document.querySelectorAll('button:not([disabled])'));
+                    return all.find(b => {
+                        const t = (b.textContent || '').toLowerCase().trim();
+                        return t.includes('submit') || t.includes('send application');
+                    });
+                }
+            """)
+            if has_submit and "Review" in (btn_clicked or ""):
+                try:
+                    sub = page.locator("button:not([disabled])").filter(has_text="Submit application")
+                    if sub.count() == 0:
+                        sub = page.locator("button:not([disabled])").filter(has_text="Submit")
+                    sub.first.click(timeout=3000)
+                    print(f"        🎯 Stuck on Review — clicked Submit directly ✅")
+                    time.sleep(2.5)
+                    return True, "submitted from review (stuck rescue)"
+                except Exception:
+                    pass
             print(f"        ⚠ Stuck on '{btn_clicked}' — force-skipping form")
             return False, f"stuck on {btn_clicked}"
 
@@ -781,7 +852,7 @@ def main():
                     break
 
                 job_url = f"https://www.linkedin.com/jobs/view/{jid}/"
-                if already_applied(job_url, log):
+                if already_applied(job_url, log):  # URL-only check here; company+title checked after details load
                     print(f"      [{jid}] already applied — skip")
                     continue
 
@@ -797,6 +868,12 @@ def main():
                     continue
 
                 details = extract_right_panel(page)
+                # Second dedup: company+title (catches same job across search queries)
+                if already_applied(job_url, log,
+                                   title=details.get("title",""),
+                                   company=details.get("company","")):
+                    print(f"      [{jid}] {details.get('company','')} — {details.get('title','')} → already applied (dedup)")
+                    continue
                 title       = details.get("title", "").strip()
                 company     = details.get("company", "").strip()
                 description = details.get("description", "").strip()
@@ -892,7 +969,12 @@ def main():
                     continue
 
                 time.sleep(3)
-                submitted, reason = fill_and_submit_form(page, resume_path, job_title=details.get("title",""), company=details.get("company",""))
+                dry_run = getattr(args, "dry_run", False)
+                if dry_run:
+                    print(f"      🔍 DRY RUN — skipping submit for {title} @ {company}")
+                    submitted, reason = False, "dry-run"
+                else:
+                    submitted, reason = fill_and_submit_form(page, resume_path, job_title=details.get("title",""), company=details.get("company",""))
 
                 status = "Applied" if submitted else "Failed"
                 icon   = "✅" if submitted else "❌"
@@ -913,6 +995,14 @@ def main():
 
                 if submitted:
                     applied_count += 1
+                    # Screenshot confirmation page
+                    try:
+                        safe_co = re.sub(r'[^\w]', '_', company)[:30]
+                        safe_ti = re.sub(r'[^\w]', '_', title)[:30]
+                        ss_path = SCREENSHOTS / f"{safe_co}_{safe_ti}.png"
+                        page.screenshot(path=str(ss_path), full_page=False)
+                    except Exception:
+                        pass
                     time.sleep(3)
 
                 # Go back to search results
@@ -925,6 +1015,7 @@ def main():
 
     applied = sum(1 for e in log if e.get("status") == "Applied")
     print(f"\n  ── Done: {applied_count} applied this session | {total_processed} scored ──")
+    _cache.print_stats()
 
 
 if __name__ == "__main__":

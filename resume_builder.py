@@ -781,10 +781,21 @@ def build_resume(
 
     doc.save(output_path)
 
+    # ── PDF copy (for forms that only accept PDF) ──────────────────────────────
+    pdf_path = None
+    try:
+        from docx2pdf import convert as _docx2pdf
+        pdf_out = output_path.replace(".docx", ".pdf")
+        _docx2pdf(output_path, pdf_out)
+        pdf_path = pdf_out
+    except Exception:
+        pass  # docx2pdf not installed or macOS Word not available — skip silently
+
     delta = actual_optimized - initial_score
     flag  = "🟢" if actual_optimized >= 90 else ("🟡" if actual_optimized >= 75 else "🔴")
     print(f"  │  ACTUAL RESULT:  {initial_score:.0f}%  →  {actual_optimized:.1f}%  (+{delta:.0f}%)  {flag}")
-    print(f"  └─ Saved → {os.path.basename(output_path)}")
+    suffix = "  📄+PDF" if pdf_path else ""
+    print(f"  └─ Saved → {os.path.basename(output_path)}{suffix}")
 
     return output_path, initial_score, actual_optimized
 
