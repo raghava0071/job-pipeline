@@ -26,7 +26,8 @@ PIPELINE_DIR = Path.home() / "job_pipeline"
 sys.path.insert(0, str(PIPELINE_DIR))
 
 import config as cfg
-import answer_cache as _cache   # SQLite answer cache — avoids repeat Claude calls                        # ← global values for the whole project
+import answer_cache as _cache   # SQLite answer cache — avoids repeat Claude calls
+import notifier                  # Gmail notifications on each apply (optional)                        # ← global values for the whole project
 
 DATA_DIR    = cfg.DATA_DIR
 SESSION_DIR = cfg.SESSION_LI
@@ -262,22 +263,27 @@ Applying for: {job_title} at {company}
             const modal = document.querySelector('[data-test-modal], .jobs-easy-apply-modal, [role="dialog"]');
             const root  = modal || document.body;
 
+            function cleanLabel(raw) {
+                var lines = raw.split(String.fromCharCode(10)).map(function(l){return l.trim();}).filter(function(l){return l.length>2;});
+                return lines[0] || raw.trim();
+            }
+
             function getLabel(el) {
                 const id = el.id;
                 if (id) {
                     const lbl = root.querySelector('label[for="' + id + '"]');
-                    if (lbl) return lbl.innerText.trim();
+                    if (lbl) return cleanLabel(lbl.innerText);
                 }
                 // walk up to find a label or legend
                 let p = el.parentElement;
                 for (let i=0; i<6 && p; i++, p=p.parentElement) {
                     const leg = p.querySelector('legend');
-                    if (leg) return leg.innerText.trim();
-                    const lbl = p.querySelector('label');
-                    if (lbl && !lbl.htmlFor) return lbl.innerText.trim();
-                    // artdeco form label
+                    if (leg) return cleanLabel(leg.innerText);
+                    // artdeco form label (more specific — check before generic label)
                     const al = p.querySelector('.artdeco-form-element__label, [data-test-form-element-label]');
-                    if (al) return al.innerText.trim();
+                    if (al) return cleanLabel(al.innerText);
+                    const lbl = p.querySelector('label');
+                    if (lbl && !lbl.htmlFor) return cleanLabel(lbl.innerText);
                 }
                 return el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.name || '';
             }
@@ -1003,6 +1009,17 @@ def main():
                         page.screenshot(path=str(ss_path), full_page=False)
                     except Exception:
                         pass
+                    # Email notification — attaches resume + cover letter
+                    notifier.notify_applied(
+                        title=title,
+                        company=company,
+                        fit_score=score,
+                        resume_path=resume_path or "",
+                        cover_letter_path=cover_letter_path or "",
+                        platform="LinkedIn",
+                        job_url=live_url or job_url or "",
+                        screenshot_path=str(ss_path) if "ss_path" in dir() else ""
+                    )
                     time.sleep(3)
 
                 # Go back to search results
@@ -1016,6 +1033,9 @@ def main():
     applied = sum(1 for e in log if e.get("status") == "Applied")
     print(f"\n  ── Done: {applied_count} applied this session | {total_processed} scored ──")
     _cache.print_stats()
+    notifier.notify_session_done(applied=applied_count,
+                                  scored=total_processed,
+                                  skipped=total_processed - applied_count)
 
 
 if __name__ == "__main__":
