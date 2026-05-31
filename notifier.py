@@ -15,7 +15,7 @@
 #   3. Copy the 16-character password (format: xxxx xxxx xxxx xxxx)
 #   4. Add these two lines to ~/job_pipeline/.env:
 #        NOTIFY_EMAIL=raghavendrakaranam30@gmail.com
-#        GMAIL_APP_PASSWORD=zrqq mkrt movj zekm
+#        GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
 #
 # Test:  python ~/job_pipeline/notifier.py
 # =============================================================================
@@ -207,6 +207,39 @@ def notify_session_done(applied: int, scored: int, skipped: int) -> bool:
         return False
 
 
+def send_alert(subject: str, body: str) -> bool:
+    """Send a plain-text alert email — used for CAPTCHA and other urgent pipeline events."""
+    if not ENABLED:
+        print(f"          📧 Email not configured — alert skipped: {subject}")
+        return False
+    try:
+        _load_env()
+        msg = MIMEMultipart("alternative")
+        msg["From"]    = NOTIFY_EMAIL
+        msg["To"]      = NOTIFY_EMAIL
+        msg["Subject"] = subject
+
+        html = f"""
+<html><body style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;">
+<div style="background:#fff3cd;border:2px solid #ffc107;border-radius:12px;padding:24px;">
+  <h2 style="color:#856404;">⚠️ Pipeline Alert</h2>
+  <pre style="font-family:Arial,sans-serif;white-space:pre-wrap;font-size:14px;">{body}</pre>
+</div>
+</body></html>"""
+
+        msg.attach(MIMEText(html, "html"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(NOTIFY_EMAIL, GMAIL_APP_PASSWORD)
+            server.sendmail(NOTIFY_EMAIL, NOTIFY_EMAIL, msg.as_string())
+
+        print(f"          📧 Alert sent → {NOTIFY_EMAIL}: {subject}")
+        return True
+    except Exception as e:
+        print(f"          📧 Alert email failed: {e}")
+        return False
+
+
 # ── CLI test ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     if not ENABLED:
@@ -216,7 +249,7 @@ if __name__ == "__main__":
         print("  To enable, add these 2 lines to ~/job_pipeline/.env:")
         print()
         print("    NOTIFY_EMAIL=raghavendrakaranam30@gmail.com")
-        print("    GMAIL_APP_PASSWORD=zrqq mkrt movj zekm")
+        print("    GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx")
         print()
         print("  Get your App Password here:")
         print("  → https://myaccount.google.com/apppasswords")

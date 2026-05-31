@@ -2,8 +2,8 @@
 # =============================================================================
 # SETUP_SCHEDULER.SH — Install daily auto-run via macOS launchd
 #
-# Runs linkedin_apply_now.py --limit 10 every morning at 8:00 AM automatically.
-# No terminal needed — pipeline runs silently in background.
+# Runs run_all.py (LinkedIn + Indeed) every morning at 8:00 AM automatically.
+# No terminal needed — both pipelines run silently in background.
 #
 # Usage:
 #   bash ~/job_pipeline/setup_scheduler.sh          # install
@@ -40,9 +40,11 @@ cat > "$PLIST_PATH" << PLIST
     <key>ProgramArguments</key>
     <array>
         <string>${PYTHON_PATH}</string>
-        <string>${PIPELINE_DIR}/linkedin_apply_now.py</string>
-        <string>--limit</string>
+        <string>${PIPELINE_DIR}/run_all.py</string>
+        <string>--li-limit</string>
         <string>10</string>
+        <string>--in-limit</string>
+        <string>5</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -83,7 +85,7 @@ echo ""
 echo "✅ Daily pipeline scheduler installed!"
 echo ""
 echo "   Runs every morning at 8:00 AM automatically"
-echo "   Applies to up to 10 jobs per day"
+echo "   LinkedIn: up to 10 jobs | Indeed: up to 5 jobs per day"
 echo "   Logs saved to: $LOG_DIR/scheduler_out.log"
 echo ""
 echo "   To uninstall:  bash ~/job_pipeline/setup_scheduler.sh remove"
