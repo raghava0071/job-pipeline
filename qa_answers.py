@@ -115,10 +115,16 @@ QA = {
         "75000",
 
     # ── Availability / Start Date ─────────────────────────────────────────────
+    "date available":
+        "2 weeks",
+
     "when can you start":
         "2 weeks",
 
     "start date":
+        "2 weeks",
+
+    "earliest start date":
         "2 weeks",
 
     "notice period":
@@ -128,7 +134,7 @@ QA = {
         "2 weeks",
 
     "available to start":
-        "Immediately",
+        "2 weeks",
 
     # ── Location / Relocation ─────────────────────────────────────────────────
     "willing to relocate":
@@ -149,6 +155,43 @@ QA = {
 
     "preferred work arrangement":
         "Remote",
+
+    # ── Name & Contact ────────────────────────────────────────────────────────
+    "first name *":
+        "Raghavendra",
+
+    "first name":
+        "Raghavendra",
+
+    "last name *":
+        "Karanam",
+
+    "last name":
+        "Karanam",
+
+    "full name":
+        "Raghavendra Karanam",
+
+    "type phone number":
+        "5613017799",
+
+    "phone number":
+        "5613017799",
+
+    "phone *":
+        "5613017799",
+
+    "phone":
+        "5613017799",
+
+    "mobile":
+        "5613017799",
+
+    "cell phone":
+        "5613017799",
+
+    "email":
+        "raghavendrakaranam30@gmail.com",
 
     # ── Indeed Profile Visibility ─────────────────────────────────────────────
     "employers can find you on indeed":
@@ -280,6 +323,9 @@ QA = {
 
     # ── Location / Address ────────────────────────────────────────────────────
     # These exact label patterns match what Indeed form fields show
+    "address* *":
+        "7330 W Atlantic Ave Apt 215",
+
     "address *":
         "7330 W Atlantic Ave Apt 215",
 
@@ -289,10 +335,13 @@ QA = {
     "street address":
         "7330 W Atlantic Ave Apt 215",
 
+    "city* *":
+        "Delray Beach",
+
     "city *":
         "Delray Beach",
 
-    "city* *":
+    "city*":
         "Delray Beach",
 
     "state/province *":
@@ -301,11 +350,23 @@ QA = {
     "state/province":
         "Florida",
 
+    "state* *":
+        "Florida",
+
     "state *":
         "Florida",
 
-    "state* *":
+    "state*":
         "Florida",
+
+    "postal code* *":
+        "33444",
+
+    "postal code *":
+        "33444",
+
+    "postal code*":
+        "33444",
 
     "postal/zip *":
         "33444",
@@ -313,17 +374,17 @@ QA = {
     "postal/zip":
         "33444",
 
-    "postal code *":
-        "33444",
-
-    "postal code* *":
-        "33444",
-
     "zip code":
         "33444",
 
     "zip *":
         "33444",
+
+    "desired salary* *":
+        "85000",
+
+    "desired salary *":
+        "85000",
 
     "what city and state do you currently reside":
         "Delray Beach, FL",

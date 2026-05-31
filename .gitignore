@@ -1,10 +1,26 @@
+# Sensitive — never push these
 .env
 raghav_profile.py
+
+# Browser sessions
 .indeed_session/
 .linkedin_session/
+
+# Generated data (not needed in repo)
 __pycache__/
 *.pyc
 *.pyo
 data/answer_cache.db
+data/*.db
 screenshots/
 pipeline_log.txt
+
+# Output files (large, regenerated each run)
+resumes/
+cover_letters/
+output/
+data/raw_jobs.csv
+data/filtered_jobs.csv
+data/linkedin_jobs.csv
+data/scheduler_out.log
+data/scheduler_err.log
