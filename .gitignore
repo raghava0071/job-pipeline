@@ -1,29 +1,10 @@
-# ── NEVER push these ──────────────────────────────────────
 .env
 raghav_profile.py
-
-# ── Browser session data (login cookies) ──────────────────
-~/.linkedin_session/
-~/.indeed_session/
-
-# ── Generated outputs (resumes, cover letters, logs) ──────
-resumes/
-cover_letters/
-data/
-*.docx
-*.xlsx
-*.pdf
-
-# ── Python cache ───────────────────────────────────────────
+.indeed_session/
+.linkedin_session/
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-.Python
-
-# ── macOS junk ─────────────────────────────────────────────
-.DS_Store
-*.bak
-
-# ── Logs ───────────────────────────────────────────────────
-*.log
+data/answer_cache.db
+screenshots/
+pipeline_log.txt
