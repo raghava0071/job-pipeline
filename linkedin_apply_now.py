@@ -27,6 +27,10 @@ sys.path.insert(0, str(PIPELINE_DIR))
 
 import config as cfg
 import answer_cache as _cache   # SQLite answer cache — avoids repeat Claude calls
+try:
+    import qa_answers as _qa    # Master Q&A — checked before cache and Claude
+except ImportError:
+    _qa = None
 import notifier                  # Gmail notifications on each apply (optional)                        # ← global values for the whole project
 
 DATA_DIR    = cfg.DATA_DIR
@@ -380,14 +384,22 @@ Rules:
 - NEVER answer less than 2 for any data/programming/analytics skill
 - Do NOT add any explanation — return raw JSON only"""
 
-        # ── Check cache for each field individually ─────────────────────────────
+        # ── Check qa_answers FIRST, then cache, then Claude ─────────────────────
         cached_answers = {}
         uncached_fields = []
         for f in fields:
             lbl = f.get("label", f.get("name", ""))
+            fid = f.get("id","") or f.get("name","")
+
+            # 1. qa_answers.py — master Q&A file (highest priority)
+            qa_hit = _qa.get_answer(lbl) if (_qa and lbl) else None
+            if qa_hit is not None:
+                cached_answers[fid] = qa_hit
+                continue
+
+            # 2. SQLite cache
             cached = _cache.get(lbl)
             if cached is not None:
-                fid = f.get("id","") or f.get("name","")
                 cached_answers[fid] = cached
             else:
                 uncached_fields.append(f)

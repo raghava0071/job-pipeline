@@ -10,55 +10,63 @@ if [ ! -d ".git" ]; then
     echo "✅ Git initialized"
 fi
 
-# Create .gitignore to never push sensitive files
+# Always write/update .gitignore to block sensitive files
 cat > .gitignore << 'EOF'
+# Sensitive — never push these
 .env
 raghav_profile.py
+
+# Browser sessions
 .indeed_session/
 .linkedin_session/
+
+# Generated data (not needed in repo)
 __pycache__/
 *.pyc
 *.pyo
 data/answer_cache.db
+data/*.db
 screenshots/
 pipeline_log.txt
+
+# Output files (large, regenerated each run)
+resumes/
+cover_letters/
+output/
+data/raw_jobs.csv
+data/filtered_jobs.csv
+data/linkedin_jobs.csv
+data/scheduler_out.log
+data/scheduler_err.log
 EOF
 
-# Add all safe files
-git add \
-    indeed_apply_now.py \
-    linkedin_apply_now.py \
-    auto_apply.py \
-    run_all.py \
-    master_run.py \
-    config.py \
-    claude_engine.py \
-    resume_builder.py \
-    cover_letter.py \
-    jd_parser.py \
-    linkedin_scraper.py \
-    indeed_scraper.py \
-    answer_cache.py \
-    notifier.py \
-    tracker.py \
-    qa_answers.py \
-    phase4_errors.md \
-    setup_scheduler.sh \
-    push_to_github.sh \
-    .gitignore \
-    2>/dev/null || true
+# Stage ALL Python files, shell scripts, and markdown files
+# This automatically picks up any new files without needing to list them
+git add *.py *.sh *.md .gitignore 2>/dev/null || true
+
+# Also stage data files that are useful to keep (logs, tracker)
+git add data/apply_log.json data/indeed_applied_log.json 2>/dev/null || true
+git add data/Application_Tracker.xlsx 2>/dev/null || true
+
+# Show what's being committed
+echo "Files staged:"
+git diff --cached --name-only 2>/dev/null | sed 's/^/  ✅ /'
 
 # Commit
-MSG="Update pipeline — $(date '+%Y-%m-%d %H:%M')"
-git commit -m "$MSG" 2>/dev/null || echo "Nothing new to commit"
+MSG="Pipeline update — $(date '+%Y-%m-%d %H:%M')"
+if git diff --cached --quiet; then
+    echo "ℹ️  Nothing new to commit — all files already up to date"
+else
+    git commit -m "$MSG"
+fi
 
-# Push — set remote if not set
+# Push — check remote is set
 REMOTE=$(git remote get-url origin 2>/dev/null || echo "")
 if [ -z "$REMOTE" ]; then
     echo ""
     echo "⚠️  No GitHub remote set yet."
-    echo "   Run this once to connect your repo:"
-    echo "   git remote add origin https://github.com/YOUR_USERNAME/job_pipeline.git"
+    echo "   Run this once:"
+    echo "   git remote add origin https://github.com/YOUR_USERNAME/job-pipeline.git"
     echo "   Then run this script again."
     exit 1
 fi

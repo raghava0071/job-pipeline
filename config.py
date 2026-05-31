@@ -37,7 +37,7 @@ FIT_THRESHOLD   = 65    # minimum Claude score (%) to apply. Raise to 70+ for qu
 MAX_APPLIES_PER_RUN = 20    # safety cap — never apply to more than this in one run
 APPLY_DELAY_SEC     = 2     # seconds between applications (be kind to LinkedIn)
 FORM_MAX_STEPS      = 30    # max form steps before giving up
-STUCK_THRESHOLD     = 6     # same button clicked this many times → declare stuck
+STUCK_THRESHOLD     = 15    # same button clicked this many times → declare stuck (LinkedIn can have many Review steps)
 
 # ── Target Roles ───────────────────────────────────────────────────────────────
 TARGET_ROLES = [
