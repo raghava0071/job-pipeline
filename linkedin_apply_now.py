@@ -603,13 +603,15 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
             print("        └─────────────────────────────────────────────────────")
             return True
 
+    _need_review = False   # track if Claude answered anything new this form
+
     for step in range(cfg.FORM_MAX_STEPS):
         if confirmed():
             return True, "confirmed via page text"
         if step > 0 and not modal_open():
             return True, "modal closed after submit"
 
-        time.sleep(1.5)  # let DOM settle
+        time.sleep(1.0)  # reduced from 1.5 — let DOM settle
 
         # ── Upload resume ──────────────────────────────────────────────────────
         # CRITICAL: click MUST happen INSIDE expect_file_chooser context.
@@ -705,10 +707,20 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
         """)
         about_to_submit = any(s in str(nav_buttons_visible) for s in ["Submit", "Review"])
 
-        # ── Claude reads all fields on this step and answers them ──────────
+        # ── Answer fields: qa_answers → cache → Claude ───────────────────────
         fields = extract_form_fields()
         if fields:
-            print(f"        🤖 Claude answering {len(fields)} field(s) on step {step}...")
+            # Count how many need Claude (not in qa_answers or cache)
+            _needs_claude = sum(
+                1 for f in fields
+                if not (_qa and _qa.get_answer(f.get("label", f.get("name", ""))))
+                and not _cache.get(f.get("label", f.get("name", "")))
+            )
+            if _needs_claude:
+                _need_review = True   # Claude answered something → run pre-submit review
+                print(f"        🤖 Claude answering {_needs_claude}/{len(fields)} field(s) on step {step}...")
+            else:
+                print(f"        ⚡ Step {step}: all {len(fields)} field(s) answered from qa/cache")
             answers = claude_answer_all_fields(fields, step)
             # Log what was filled for the pre-submit review
             for f in fields:
@@ -726,12 +738,16 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
                 btn = page.locator(f"button:has-text('{btn_text}')").first
                 if btn.count() > 0 and btn.is_visible() and not btn.is_disabled():
 
-                    # ── PRE-SUBMIT REVIEW before hitting Submit ────────────
+                    # ── PRE-SUBMIT REVIEW — only run if Claude answered unknown fields ──
+                    # Skip if all fields were answered from qa_answers/cache (fast path)
                     if "Submit" in btn_text and "Review" not in btn_text:
-                        safe = claude_pre_submit_review()
-                        if not safe:
-                            print(f"        ❌ Claude says DO NOT SUBMIT — skipping this application")
-                            return False, "Claude review blocked submission"
+                        if _need_review:   # only review when Claude had to answer something new
+                            safe = claude_pre_submit_review()
+                            if not safe:
+                                print(f"        ❌ Claude review blocked submission — skipping")
+                                return False, "Claude review blocked submission"
+                        else:
+                            print(f"        ⚡ Skipping pre-submit review (all answers from qa_answers/cache)")
 
                     btn.click()
                     btn_clicked = btn_text
@@ -773,7 +789,8 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
             return False, f"stuck on {btn_clicked}"
 
         if btn_clicked:
-            wait = 4 if "Submit" in btn_clicked or "Done" in btn_clicked else 2
+            # Reduced waits: Submit needs more time, all other clicks just 1s
+            wait = 3 if "Submit" in btn_clicked or "Done" in btn_clicked else 1
             time.sleep(wait)
             if "Submit" in btn_clicked or "Done" in btn_clicked:
                 if confirmed():
