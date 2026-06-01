@@ -3023,5 +3023,61 @@
     "status": "Applied",
     "note": "modal closed after submit",
     "resume_path": "/Users/raghava/job_pipeline/resumes/Raghavendra_Karanam_Laser_Labs_AIML_Engineer.docx"
+  },
+  {
+    "timestamp": "2026-05-31T22:21:25.515917",
+    "company": "Synapse Social",
+    "title": "Founding Machine Learning Engineer",
+    "url": "https://www.linkedin.com/jobs/search/?currentJobId=4421639774&f_LF=f_AL&f_TPR=r604800&keywords=Data%20Engineer%20Entry%20Level&location=United%20States&sortBy=DD",
+    "fit_score": 52.0,
+    "status": "Below Gate",
+    "note": "52% < 65%"
+  },
+  {
+    "timestamp": "2026-05-31T22:21:36.329321",
+    "company": "Agentio",
+    "title": "Software Engineer",
+    "url": "https://www.linkedin.com/jobs/search/?currentJobId=4422809209&f_LF=f_AL&f_TPR=r604800&keywords=Data%20Engineer%20Entry%20Level&location=United%20States&sortBy=DD",
+    "fit_score": 38.0,
+    "status": "Below Gate",
+    "note": "38% < 65%"
+  },
+  {
+    "timestamp": "2026-05-31T22:21:47.022931",
+    "company": "The Ranger Group",
+    "title": "Systems Engineer (MBSE & DOORS)",
+    "url": "https://www.linkedin.com/jobs/search/?currentJobId=4422810043&f_LF=f_AL&f_TPR=r604800&keywords=Data%20Engineer%20Entry%20Level&location=United%20States&sortBy=DD",
+    "fit_score": 8.0,
+    "status": "Below Gate",
+    "note": "8% < 65%"
+  },
+  {
+    "timestamp": "2026-05-31T22:21:56.919755",
+    "company": "Cogent Communications",
+    "title": "Software Developer\u2013 Orlando FL",
+    "url": "https://www.linkedin.com/jobs/search/?currentJobId=4421654431&f_LF=f_AL&f_TPR=r604800&keywords=Data%20Engineer%20Entry%20Level&location=United%20States&sortBy=DD",
+    "fit_score": 52.0,
+    "status": "Below Gate",
+    "note": "52% < 65%"
+  },
+  {
+    "timestamp": "2026-05-31T22:22:09.202751",
+    "company": "Talently",
+    "title": "Machine Learning Engineer",
+    "url": "https://www.linkedin.com/jobs/search/?currentJobId=4412180573&f_LF=f_AL&f_TPR=r604800&keywords=Data%20Engineer%20Entry%20Level&location=United%20States&sortBy=DD",
+    "fit_score": 42.0,
+    "status": "Below Gate",
+    "note": "42% < 65%"
+  },
+  {
+    "timestamp": "2026-05-31T22:25:35.584754",
+    "company": "kadence",
+    "title": "ML Infrastructure Engineer - Quantum AI",
+    "platform": "LinkedIn",
+    "url": "https://www.linkedin.com/jobs/search/?currentJobId=4413764275&f_LF=f_AL&f_TPR=r604800&keywords=Data%20Engineer%20Entry%20Level&location=United%20States&sortBy=DD",
+    "fit_score": 65.0,
+    "status": "Applied",
+    "note": "confirmed after submit click",
+    "resume_path": "/Users/raghava/job_pipeline/resumes/Raghavendra_Karanam_kadence_ML_Infrastructure_Enginee.docx"
   }
 ]

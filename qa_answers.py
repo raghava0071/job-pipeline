@@ -386,6 +386,25 @@ QA = {
     "desired salary *":
         "85000",
 
+    # ── LinkedIn-specific field labels (shorter, no asterisk) ────────────────
+    "city":
+        "Delray Beach",
+
+    "zip":
+        "33444",
+
+    "what is your gpa":
+        "3.8",
+
+    "gpa":
+        "3.8",
+
+    "grade point average":
+        "3.8",
+
+    "university grade point":
+        "3.8",
+
     "what city and state do you currently reside":
         "Delray Beach, FL",
 
