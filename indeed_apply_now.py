@@ -640,8 +640,17 @@ Rules:
                     print(f"             ↩  Fallback → '{lbl}': '{val}'")
                     break
             else:
+                # UUID-format labels (Indeed qualification questions) → default Yes
+                import re as _re2
+                _uuid = _re2.match(
+                    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+                    lbl_l, _re2.I
+                )
+                if _uuid or lbl_l.startswith("q_"):
+                    answers[lbl] = "Yes"
+                    print(f"             ↩  UUID/hash fallback → '{lbl[:30]}': 'Yes'")
                 # Last resort: leave text fields as empty string rather than skip
-                if f.get("type") in ("text","textarea","tel","email","number"):
+                elif f.get("type") in ("text","textarea","tel","email","number"):
                     answers[lbl] = ""
                     print(f"             · No answer for '{lbl}' — leaving blank")
 
@@ -846,16 +855,17 @@ def _check_and_handle_captcha(page, title="", company=""):
                     // Step 3: Position the iframe itself — large, centered, always on top
                     bframe.style.cssText = [
                         'position: fixed !important',
-                        'top: 40px !important',
+                        'top: 10px !important',
                         'left: 50% !important',
                         'transform: translateX(-50%) !important',
-                        'width: 310px !important',
-                        'height: 500px !important',
+                        'width: 330px !important',
+                        'height: 650px !important',   /* taller so Verify is always visible */
                         'z-index: 2147483647 !important',
                         'border: 4px solid #ff0000 !important',
                         'border-radius: 10px !important',
                         'background: white !important',
                         'box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important',
+                        'overflow: visible !important',
                     ].join(';');
 
                     // Step 4: Also fix the reCAPTCHA anchor checkbox if present
@@ -1632,6 +1642,8 @@ def main():
                     OR label LIKE 'ZIP%'
                     OR label LIKE 'Zip%'
                     OR label LIKE 'Street%'
+                    OR label LIKE 'Desired salary%'
+                    OR label LIKE 'Desired Salary%'
                     OR label IN (
                         'Desired Pay','Desired Salary','Expected Salary',
                         'Date Available','Start Date','No'
@@ -1649,25 +1661,25 @@ def main():
     # These exact label strings match what Indeed's smartapply form shows.
     REAL_ANSWERS = {
         # Address fields (various label styles seen across jobs)
-        "Address *":           "7330 W Atlantic Ave",
-        "Address":             "7330 W Atlantic Ave",
-        "Street address":      "7330 W Atlantic Ave Apt 215",
-        "City *":              "Delray Beach",
-        "City":                "Delray Beach",
-        "City, State":         "Delray Beach, FL",
+        "Address *":           os.environ.get("HOME_ADDRESS", ""),
+        "Address":             os.environ.get("HOME_ADDRESS", ""),
+        "Street address":      os.environ.get("HOME_ADDRESS", ""),
+        "City *":              os.environ.get("HOME_CITY", ""),
+        "City":                os.environ.get("HOME_CITY", ""),
+        "City, State":         os.environ.get("HOME_CITY_STATE", ""),
         "State/Province *":    "Florida",
         "State/Province":      "Florida",
         "State":               "Florida",
-        "Postal/ZIP *":        "33444",
-        "Postal/ZIP":          "33444",
-        "Zip code":            "33444",
-        "ZIP Code":            "33444",
+        "Postal/ZIP *":        os.environ.get("HOME_ZIP", ""),
+        "Postal/ZIP":          os.environ.get("HOME_ZIP", ""),
+        "Zip code":            os.environ.get("HOME_ZIP", ""),
+        "ZIP Code":            os.environ.get("HOME_ZIP", ""),
         # Contact
-        "Phone":               "5613017799",
-        "Phone number":        "5613017799",
-        "Type phone number":   "5613017799",
-        "Mobile number":       "5613017799",
-        "Cell phone":          "5613017799",
+        "Phone":               os.environ.get("HOME_PHONE", ""),
+        "Phone number":        os.environ.get("HOME_PHONE", ""),
+        "Type phone number":   os.environ.get("HOME_PHONE", ""),
+        "Mobile number":       os.environ.get("HOME_PHONE", ""),
+        "Cell phone":          os.environ.get("HOME_PHONE", ""),
         "LinkedIn URL":        "https://www.linkedin.com/in/raghavendra-karanam",
         "LinkedIn Profile":    "https://www.linkedin.com/in/raghavendra-karanam",
         # Work authorization & visa

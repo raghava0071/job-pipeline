@@ -207,11 +207,11 @@ def fill_and_submit_form(page, resume_path, job_title="", company=""):
     )
     PROFILE_CONTEXT = f"""
 Candidate: Raghavendra Karanam
-Email: {p.get('email','raghavendrakaranam30@gmail.com')}
+Email: {p.get('email','your_email@gmail.com')}
 Phone: {p.get('phone','7038529618')}
 Location: Boca Raton, FL 33431
 LinkedIn: {p.get('linkedin_url','https://www.linkedin.com/in/raghavendra-karanam')}
-GitHub: {p.get('github_url','https://github.com/raghavendrakaranam')}
+GitHub: {p.get('github_url','https://github.com/yourusername')}
 Portfolio: {p.get('portfolio_url','https://www.linkedin.com/in/raghavendra-karanam')}
 
 Education:

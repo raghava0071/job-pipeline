@@ -6,11 +6,32 @@ HOW IT WORKS:
   - Keys are lowercased question label text (partial match supported).
   - Add any new question+answer here and it applies to ALL future applications.
 
+PERSONAL DATA:
+  - Phone, address, email are loaded from environment variables (set in .env)
+  - Never hardcode personal data here — this file is public on GitHub
+
 HOW TO ADD:
   - Find the question label in the terminal output (e.g. 'Will you be able to work on W2?')
   - Add it below with your answer.
   - Restart the pipeline — it will use your answer from now on.
 """
+
+import os as _os
+
+def _env(key, default=""):
+    """Load from environment — reads .env file if needed."""
+    val = _os.environ.get(key, "")
+    if not val:
+        try:
+            env_path = __import__('pathlib').Path.home() / "job_pipeline" / ".env"
+            for line in env_path.read_text().splitlines():
+                if line.startswith(key + "="):
+                    val = line.split("=", 1)[1].strip()
+                    _os.environ[key] = val
+                    break
+        except Exception:
+            pass
+    return val or default
 
 QA = {
     # ── Work Authorization ────────────────────────────────────────────────────
@@ -173,25 +194,25 @@ QA = {
         "Raghavendra Karanam",
 
     "type phone number":
-        "5613017799",
+        _env("HOME_PHONE", ""),
 
     "phone number":
-        "5613017799",
+        _env("HOME_PHONE", ""),
 
     "phone *":
-        "5613017799",
+        _env("HOME_PHONE", ""),
 
     "phone":
-        "5613017799",
+        _env("HOME_PHONE", ""),
 
     "mobile":
-        "5613017799",
+        _env("HOME_PHONE", ""),
 
     "cell phone":
-        "5613017799",
+        _env("HOME_PHONE", ""),
 
     "email":
-        "raghavendrakaranam30@gmail.com",
+        _env("CANDIDATE_EMAIL", ""),
 
     # ── Indeed Profile Visibility ─────────────────────────────────────────────
     "employers can find you on indeed":
@@ -324,61 +345,61 @@ QA = {
     # ── Location / Address ────────────────────────────────────────────────────
     # These exact label patterns match what Indeed form fields show
     "address* *":
-        "7330 W Atlantic Ave Apt 215",
+        _env("HOME_ADDRESS", ""),
 
     "address *":
-        "7330 W Atlantic Ave Apt 215",
+        _env("HOME_ADDRESS", ""),
 
     "address":
-        "7330 W Atlantic Ave Apt 215",
+        _env("HOME_ADDRESS", ""),
 
     "street address":
-        "7330 W Atlantic Ave Apt 215",
+        _env("HOME_ADDRESS", ""),
 
     "city* *":
-        "Delray Beach",
+        _env("HOME_CITY", ""),
 
     "city *":
-        "Delray Beach",
+        _env("HOME_CITY", ""),
 
     "city*":
-        "Delray Beach",
+        _env("HOME_CITY", ""),
 
     "state/province *":
-        "Florida",
+        _env("HOME_STATE", "FL"),
 
     "state/province":
-        "Florida",
+        _env("HOME_STATE", "FL"),
 
     "state* *":
-        "Florida",
+        _env("HOME_STATE", "FL"),
 
     "state *":
-        "Florida",
+        _env("HOME_STATE", "FL"),
 
     "state*":
-        "Florida",
+        _env("HOME_STATE", "FL"),
 
     "postal code* *":
-        "33444",
+        _env("HOME_ZIP", ""),
 
     "postal code *":
-        "33444",
+        _env("HOME_ZIP", ""),
 
     "postal code*":
-        "33444",
+        _env("HOME_ZIP", ""),
 
     "postal/zip *":
-        "33444",
+        _env("HOME_ZIP", ""),
 
     "postal/zip":
-        "33444",
+        _env("HOME_ZIP", ""),
 
     "zip code":
-        "33444",
+        _env("HOME_ZIP", ""),
 
     "zip *":
-        "33444",
+        _env("HOME_ZIP", ""),
 
     "desired salary* *":
         "85000",
@@ -387,11 +408,17 @@ QA = {
         "85000",
 
     # ── LinkedIn-specific field labels (shorter, no asterisk) ────────────────
+    "city, state":
+        _env("HOME_CITY_STATE", ""),
+
+    "city,state":
+        _env("HOME_CITY_STATE", ""),
+
     "city":
-        "Delray Beach",
+        _env("HOME_CITY", ""),
 
     "zip":
-        "33444",
+        _env("HOME_ZIP", ""),
 
     "what is your gpa":
         "3.8",
@@ -406,16 +433,16 @@ QA = {
         "3.8",
 
     "what city and state do you currently reside":
-        "Delray Beach, FL",
+        _env("HOME_CITY_STATE", ""),
 
     "current city and state":
-        "Delray Beach, FL",
+        _env("HOME_CITY_STATE", ""),
 
     "city and state":
-        "Delray Beach, FL",
+        _env("HOME_CITY_STATE", ""),
 
     "current location":
-        "Delray Beach, FL",
+        _env("HOME_CITY_STATE", ""),
 
     # ── Reason for leaving ────────────────────────────────────────────────────
     "reasons for leaving previous employers":
@@ -446,6 +473,9 @@ QA = {
 }
 
 
+import re as _re
+_UUID_RE = _re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', _re.I)
+
 def get_answer(label: str) -> str | None:
     """
     Look up an answer for a form field label.
@@ -453,11 +483,22 @@ def get_answer(label: str) -> str | None:
     Matching is case-insensitive and partial (question contains key).
     """
     label_l = label.lower().strip()
+
+    # UUID-format labels (e.g. a08e2dc4-9bce-433e-948a-c21dda0a9144) → default Yes
+    if _UUID_RE.match(label_l):
+        return "Yes"
+
+    # Hash-ID labels starting with q_ → default Yes
+    if label_l.startswith("q_") and len(label_l) > 10:
+        return "Yes"
+
     # Exact match first
     if label_l in QA:
         return QA[label_l]
+
     # Partial match — key appears anywhere in label
     for key, answer in QA.items():
         if key in label_l:
             return answer
+
     return None
