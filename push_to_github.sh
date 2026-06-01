@@ -40,9 +40,8 @@ data/scheduler_out.log
 data/scheduler_err.log
 EOF
 
-# Stage ALL Python files, shell scripts, and markdown files
-# This automatically picks up any new files without needing to list them
-git add *.py *.sh *.md .gitignore 2>/dev/null || true
+# Stage ALL safe project files
+git add *.py *.sh *.md *.txt .gitignore .env.example LICENSE 2>/dev/null || true
 
 # Also stage data files that are useful to keep (logs, tracker)
 git add data/apply_log.json data/indeed_applied_log.json 2>/dev/null || true
