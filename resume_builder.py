@@ -402,8 +402,19 @@ def add_summary(doc, jd_keywords: list, role_title: str):
             top_named.append(kw)
         if len(top_named) >= 9:
             break
+    # Only pull in JD keywords that look like actual tech terms (not business words)
+    TECH_STOPWORDS = {
+        "health", "services", "engineering", "familiarity", "compensation",
+        "medical", "requirements", "years", "experience", "ability", "strong",
+        "knowledge", "skills", "management", "team", "work", "role", "job",
+        "company", "position", "candidate", "preferred", "required", "plus",
+        "good", "excellent", "great", "background", "understanding", "support",
+        "business", "data", "information", "systems", "solutions", "development",
+        "applications", "tools", "technologies", "platforms", "environment",
+    }
     for kw in jd_keywords:
-        if kw not in top_named:
+        kw_clean = kw.lower().strip()
+        if kw not in top_named and kw_clean not in TECH_STOPWORDS and len(kw_clean) > 2:
             top_named.append(kw)
         if len(top_named) >= 9:
             break
