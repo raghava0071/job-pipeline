@@ -53,7 +53,8 @@ def _ask(prompt: str, system: str = "", max_tokens: int = 1000) -> str:
         )
         return resp.content[0].text.strip()
     except Exception as e:
-        return f"ERROR:{e}"
+        print(f"  ⚠  Claude API error: {e}")
+        return ""  # Never return error text — caller handles empty string gracefully
 
 def _parse_json(text: str) -> dict:
     try:
@@ -236,7 +237,23 @@ Requirements:
 - Professional, direct, warm
 - No salutation, no signature — just the 3 paragraphs"""
 
-    return _ask(prompt, max_tokens=600)
+    result = _ask(prompt, max_tokens=600)
+    # Never write error text or empty content into the cover letter document
+    if not result or result.startswith("ERROR") or "Error code" in result:
+        return (
+            f"The opportunity to contribute to {company} as a {job_title} is one I find "
+            f"genuinely compelling. My background in data engineering — spanning Python, SQL, "
+            f"cloud infrastructure, and end-to-end pipeline development — maps directly to the "
+            f"technical demands of this role.\n\n"
+            f"Over the course of my career I have designed and deployed production ETL systems, "
+            f"built scalable data warehouses on Azure and AWS, and delivered analytics solutions "
+            f"that directly informed business decisions. I work well independently and as part "
+            f"of cross-functional teams, and I bring both the technical depth and communication "
+            f"skills needed to bridge data and business.\n\n"
+            f"I would welcome the chance to discuss how my experience aligns with your team's "
+            f"goals. Thank you for your consideration."
+        )
+    return result
 
 # ── 5. PROFILE SUMMARY BUILDER ────────────────────────────────────────────────
 def build_profile_summary(profile: dict) -> str:
