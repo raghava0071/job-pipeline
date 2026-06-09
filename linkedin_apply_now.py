@@ -537,7 +537,7 @@ Rules:
                 "years of experience": "2", "background check": "Yes", "drug test": "Yes",
                 "18 or older": "Yes", "us citizen": "No", "green card": "No",
                 "linkedin": "https://www.linkedin.com/in/raghavendra-karanam",
-                "phone": "5618160256", "city": "Delray Beach", "state": "FL", "zip": "33484",
+                "phone": os.environ.get("HOME_PHONE",""), "city": os.environ.get("HOME_CITY",""), "state": os.environ.get("HOME_STATE","FL"), "zip": os.environ.get("HOME_ZIP",""),
             }
             for f in uncached_fields:
                 lbl = f.get("label", f.get("name",""))
