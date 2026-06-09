@@ -201,11 +201,11 @@ def _extract_jd_keywords(jd_text: str) -> List[str]:
         for m in re.finditer(pat, jd_lower):
             candidates.add(m.group().strip())
 
-    # Also extract quoted or capitalized terms
-    for m in re.finditer(r"\b([A-Z][A-Za-z0-9/\.\-]+(?:\s+[A-Z][A-Za-z0-9/\.\-]+){0,2})\b", jd_text):
-        term = m.group().lower().strip()
-        if 2 < len(term) < 40 and not term.startswith(("the", "and", "for", "with", "that", "this", "has", "are", "you", "our", "will", "we", "be", "to", "in", "or", "as", "of", "is")):
-            candidates.add(term)
+    # NOTE: Do NOT extract generic capitalized words from the JD.
+    # That approach pulls in job-posting boilerplate ("Preferred Qualifications",
+    # "Job Summary", "Full-Time", "United States", "Bachelor", "Six Sigma", etc.)
+    # and injects them into the resume's skills section as fake keywords.
+    # The tech_patterns above already cover every real technical term we need.
 
     # Deduplicate: remove sub-terms already covered by longer terms
     final = []
