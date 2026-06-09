@@ -31,6 +31,15 @@ try:
     import qa_answers as _qa    # Master Q&A — checked before cache and Claude
 except ImportError:
     _qa = None
+try:
+    import claude_answers as _claude_ans  # Auto-saved Claude answers (human-reviewable)
+except ImportError:
+    _claude_ans = None
+try:
+    from salary_helper import pick_salary as _pick_salary, salary_rule_for_prompt as _salary_rule
+except ImportError:
+    _pick_salary = lambda jd, title: "75000"
+    _salary_rule = lambda jd, title: "- salary: answer 75000 (plain number only)"
 import notifier                  # Gmail notifications on each apply (optional)                        # ← global values for the whole project
 
 DATA_DIR    = cfg.DATA_DIR
@@ -90,8 +99,40 @@ def ensure_login(page):
     if "feed" in page.url and page.locator("nav").count() > 0:
         print("  ✅  LinkedIn: logged in")
         return
-    print("\n  🔐  Log in to LinkedIn then press ENTER...")
-    input("  → ")
+
+    # When running via scheduler (no terminal), input() crashes with EOF.
+    # Instead: send email alert and wait up to 5 minutes for user to log in manually.
+    print("\n  🔐  LinkedIn not logged in — sending alert and waiting up to 5 minutes...")
+    try:
+        import notifier
+        notifier.send_alert(
+            subject="🔐 LinkedIn Login Required — Pipeline Paused",
+            body=(
+                "The job pipeline needs you to log in to LinkedIn.\n\n"
+                "1. Open the Chromium browser window on your Mac\n"
+                "2. Log in to LinkedIn\n"
+                "3. The pipeline will continue automatically within 5 minutes\n\n"
+                "If you don't log in, this run will be skipped."
+            )
+        )
+    except Exception as e:
+        print(f"  ⚠  Could not send alert: {e}")
+
+    # Wait up to 5 minutes for login
+    for i in range(60):
+        time.sleep(5)
+        try:
+            page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=10000)
+            time.sleep(2)
+            if "feed" in page.url and page.locator("nav").count() > 0:
+                print("  ✅  LinkedIn: logged in successfully")
+                return
+        except:
+            pass
+        if i % 12 == 11:
+            print(f"  ⏳ Still waiting for LinkedIn login... ({(i+1)*5}s elapsed)")
+
+    print("  ❌ LinkedIn login timeout — skipping this run")
 
 def extract_right_panel(page):
     """Extract job details from the right panel after clicking a card."""
@@ -144,7 +185,29 @@ def extract_right_panel(page):
             // Get current job URL from page
             const jobUrl = window.location.href;
 
-            return { title, company, location, description, hasEasyApply, jobUrl };
+            // Detect Workday apply links
+            let workdayUrl = '';
+            const WD_DOMAINS = ['myworkdayjobs.com', 'workday.com/jobs'];
+            for (const b of allBtns) {
+                const href = (b.getAttribute('href') || '');
+                if (WD_DOMAINS.some(d => href.includes(d))) {
+                    workdayUrl = href;
+                    break;
+                }
+            }
+            // Also check all links on the page
+            if (!workdayUrl) {
+                const allLinks = Array.from(document.querySelectorAll('a[href]'));
+                for (const a of allLinks) {
+                    const href = a.getAttribute('href') || '';
+                    if (WD_DOMAINS.some(d => href.includes(d))) {
+                        workdayUrl = href;
+                        break;
+                    }
+                }
+            }
+
+            return { title, company, location, description, hasEasyApply, jobUrl, workdayUrl };
         }
     """) or {}
 
@@ -220,7 +283,7 @@ Education:
 
 Work Authorization: F-1 OPT/STEM OPT — legally authorized to work in USA, NO sponsorship needed
 Total Professional Experience: 3+ years (including undergrad projects, internships, grad research)
-Expected Salary: $75,000–$90,000 (negotiable)
+Expected Salary: {_pick_salary(jd_text if "jd_text" in dir() else "", job_title)} (plain number, no $ signs)
 Veteran: No | Disability: No | Gender: Male (prefer not to say) | Ethnicity: Asian (prefer not to say)
 Willing to relocate: Yes | Work mode: Remote / Hybrid / On-site
 
@@ -391,16 +454,25 @@ Rules:
             lbl = f.get("label", f.get("name", ""))
             fid = f.get("id","") or f.get("name","")
 
-            # 1. qa_answers.py — master Q&A file (highest priority)
+            # 1. qa_answers.py — master Q&A (manually curated, highest priority)
             qa_hit = _qa.get_answer(lbl) if (_qa and lbl) else None
             if qa_hit is not None:
                 cached_answers[fid] = qa_hit
                 continue
 
-            # 2. SQLite cache
+            # 2. claude_answers.py — Claude's past answers (auto-saved, human-reviewable)
+            ca_hit = _claude_ans.get(lbl) if (_claude_ans and lbl) else None
+            if ca_hit is not None:
+                cached_answers[fid] = ca_hit
+                continue
+
+            # 3. SQLite cache (legacy)
             cached = _cache.get(lbl)
             if cached is not None:
                 cached_answers[fid] = cached
+                # Promote to claude_answers.py so it's visible and editable
+                if _claude_ans:
+                    _claude_ans.save(lbl, cached)
             else:
                 uncached_fields.append(f)
 
@@ -441,17 +513,41 @@ Rules:
                         new_answers = {}
                 else:
                     new_answers = {}
-            # Save new answers to cache
+            # Save new answers to claude_answers.py (permanent, reviewable) + SQLite cache
             for f in uncached_fields:
                 lbl = f.get("label", f.get("name",""))
                 fid = f.get("id","") or f.get("name","")
-                if fid in new_answers:
+                if fid in new_answers and new_answers[fid]:
                     _cache.save(lbl, new_answers[fid])
+                    if _claude_ans:
+                        _claude_ans.save(lbl, str(new_answers[fid]))
             merged = {**cached_answers, **new_answers}
             return merged
         except Exception as e:
             print(f"        ⚠ Claude field-fill error: {e}")
-            return cached_answers  # return whatever we got from cache at least
+            # Profile-based fallback — never leave fields blank
+            PROFILE_FALLBACK = {
+                "work authorization": "Yes", "authorized to work": "Yes",
+                "legally authorized": "Yes", "sponsorship": "No",
+                "visa": "F-1 STEM OPT", "salary": _pick_salary(locals().get("jd_text",""), locals().get("job_title","")), "compensation": _pick_salary(locals().get("jd_text",""), locals().get("job_title","")),
+                "hourly rate": "40", "start date": "2 weeks", "notice": "2 weeks",
+                "relocat": "No", "remote": "Yes", "gender": "I don't wish to answer",
+                "ethnicity": "I don't wish to answer", "race": "I don't wish to answer",
+                "veteran": "I am not a protected veteran", "disability": "I don't wish to answer",
+                "years of experience": "2", "background check": "Yes", "drug test": "Yes",
+                "18 or older": "Yes", "us citizen": "No", "green card": "No",
+                "linkedin": "https://www.linkedin.com/in/raghavendra-karanam",
+                "phone": "5618160256", "city": "Delray Beach", "state": "FL", "zip": "33484",
+            }
+            for f in uncached_fields:
+                lbl = f.get("label", f.get("name",""))
+                fid = f.get("id","") or f.get("name","")
+                for kw, val in PROFILE_FALLBACK.items():
+                    if kw in lbl.lower():
+                        cached_answers[fid] = val
+                        if _claude_ans: _claude_ans.save(lbl, val)
+                        break
+            return cached_answers
 
     def apply_claude_answers(fields, answers):
         """Apply Claude's answers to each field on the page."""
@@ -763,6 +859,40 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
             same_btn_count = 0
             prev_btn_text = btn_clicked
 
+        if same_btn_count >= cfg.STUCK_THRESHOLD // 2:
+            # ── Vision assist: halfway to stuck threshold, let Claude see the page ──
+            print(f"        👁  Calling Claude Vision to inspect stuck form (same btn {same_btn_count}x)...")
+            try:
+                import claude_engine as _ce
+                _ss_bytes = page.screenshot()
+                _page_txt = page.evaluate("() => document.body.innerText")[:3000]
+                _vision   = _ce.vision_assist(_ss_bytes, _page_txt,
+                                              job_title, company)
+                _action   = _vision.get("action", "click_button")
+
+                if _action == "fill_field":
+                    print(f"        👁  Vision filling {len(_vision.get('fields', []))} field(s)...")
+                    for _fld in _vision.get("fields", []):
+                        _lbl = _fld.get("label", "")
+                        _val = _fld.get("value", "")
+                        if not _lbl or not _val:
+                            continue
+                        try:
+                            _sel = f"[placeholder*='{_lbl}' i],[aria-label*='{_lbl}' i]"
+                            _el = page.query_selector(_sel)
+                            if _el:
+                                _el.fill(_val)
+                                print(f"           ✔ Vision filled '{_lbl}' = '{_val}'")
+                        except Exception:
+                            pass
+
+                elif _action == "skip":
+                    print(f"        👁  Vision sees confirmation — marking as submitted")
+                    return True, "submitted (vision confirmed)"
+
+            except Exception as _ve:
+                print(f"        👁  Vision assist error: {_ve}")
+
         if same_btn_count >= cfg.STUCK_THRESHOLD:
             # Before giving up — if we're stuck on Review, look for a Submit button
             has_submit = page.evaluate("""
@@ -830,6 +960,8 @@ def main():
     import resume_builder as rb
     import cover_letter   as cl_mod
     import raghav_profile as rp
+    from pipeline_logger import RunLogger
+    _run_log = RunLogger("linkedin")
 
     full_profile = {
         **rp.PROFILE,
@@ -930,10 +1062,33 @@ def main():
 
                 if not is_good_level(title):
                     print(f"      [{jid}] {company} — {title[:40]} → SKIP senior/lead")
+                    _run_log.job_skip(title, company, "senior/lead filter", url=live_url)
+                    continue
+
+                # ── Local pre-filter: zero API cost ───────────────────────────
+                # Skip obvious mismatches before spending any tokens on scoring.
+                _skip_local, _match_count = ce.local_prefilter(description, title)
+                if _skip_local:
+                    print(f"      [{jid}] {company} — {title[:40]} → SKIP (local filter: {_match_count} skill matches)")
+                    _run_log.job_skip(title, company, f"local prefilter {_match_count} skills", url=live_url)
                     continue
 
                 if not has_ea:
-                    print(f"      [{jid}] {company} — {title[:40]} → no Easy Apply btn")
+                    # Check if this job has a Workday apply link — queue it for workday_apply_now.py
+                    wd_url = details.get("workdayUrl", "")
+                    if wd_url:
+                        try:
+                            import workday_apply_now as _wd
+                            _wd.add_to_wd_queue({
+                                "title": title, "company": company,
+                                "url": wd_url, "description": description,
+                                "source": "linkedin",
+                            })
+                            print(f"      [{jid}] {company} — {title[:40]} → 📥 Queued for Workday")
+                        except Exception as _wde:
+                            print(f"      [{jid}] Workday queue error: {_wde}")
+                    else:
+                        print(f"      [{jid}] {company} — {title[:40]} → no Easy Apply btn")
                     continue
 
                 total_processed += 1
@@ -952,11 +1107,13 @@ def main():
                                 "title": title, "url": live_url, "fit_score": score,
                                 "status": "Below Gate", "note": f"{score:.0f}% < {ce.FIT_THRESHOLD}%"})
                     save_log(log)
+                    _run_log.job_skip(title, company, f"below gate {score:.0f}%", fit_score=score, url=live_url)
                     continue
 
                 # Build resume
                 print(f"      Building resume...")
                 resume_path = ""
+                cover_letter_path = ""
                 try:
                     import jd_parser as jdp
                     parsed = jdp.parse_jd(description, title)
@@ -974,14 +1131,8 @@ def main():
                 except Exception as e:
                     print(f"      ⚠️  Resume error: {e}")
 
-                # Cover letter
-                try:
-                    cl_text = ce.write_cover_letter(rp.PROFILE.get("name","Raghavendra Karanam"),
-                                                    profile_summary, description, title, company)
-                    cl_mod.save_cover_letter(cl_text, title, company)
-                    print(f"      ✅ Cover letter saved")
-                except Exception as e:
-                    print(f"      ⚠️  Cover letter error: {e}")
+                # Cover letters PAUSED — resume does the heavy lifting.
+                cover_letter_path = ""
 
                 if args.dry_run:
                     print(f"      [DRY RUN] Would apply")
@@ -1014,6 +1165,9 @@ def main():
                 status = "Applied" if submitted else "Failed"
                 icon   = "✅" if submitted else "❌"
                 print(f"      {icon} {status} — {reason}")
+
+                _run_log.job_start(title, company, live_url, fit_score=score, grade=grade)
+                _run_log.job_result(status, reason=reason, resume_file=Path(resume_path).name if resume_path else "")
 
                 log.append({
                     "timestamp":   datetime.now().isoformat(),
@@ -1062,6 +1216,7 @@ def main():
     applied = sum(1 for e in log if e.get("status") == "Applied")
     print(f"\n  ── Done: {applied_count} applied this session | {total_processed} scored ──")
     _cache.print_stats()
+    _run_log.finish(searches_run=len(SEARCH_QUERIES), jobs_found=total_processed)
     notifier.notify_session_done(applied=applied_count,
                                   scored=total_processed,
                                   skipped=total_processed - applied_count)

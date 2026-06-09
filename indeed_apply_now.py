@@ -23,7 +23,7 @@
 #   python indeed_apply_now.py --dry-run
 # =============================================================================
 
-import sys, time, json, argparse, re, random
+import os, sys, time, json, argparse, re, random
 from pathlib import Path
 from datetime import datetime
 
@@ -37,6 +37,15 @@ try:
     import qa_answers as _qa
 except ImportError:
     _qa = None
+try:
+    import claude_answers as _claude_ans  # Auto-saved Claude answers (human-reviewable)
+except ImportError:
+    _claude_ans = None
+try:
+    from salary_helper import pick_salary as _pick_salary, salary_rule_for_prompt as _salary_rule
+except ImportError:
+    _pick_salary = lambda jd, title: "75000"
+    _salary_rule = lambda jd, title: "- salary: answer 75000 (plain number only)"
 
 DATA_DIR      = cfg.DATA_DIR
 SESSION_DIR   = cfg.BASE_DIR / ".indeed_session"
@@ -54,8 +63,8 @@ try:
 except ImportError:
     sys.exit("pip install playwright && python -m playwright install chromium")
 
-# ── Search queries (reuse from config) ────────────────────────────────────────
-SEARCH_QUERIES = cfg.LINKEDIN_QUERIES  # same keywords work for Indeed
+# ── Search queries ────────────────────────────────────────────────────────────
+SEARCH_QUERIES = getattr(cfg, "INDEED_QUERIES", cfg.LINKEDIN_QUERIES)
 
 def is_good_level(title):
     t = title.lower()
@@ -115,7 +124,18 @@ def already_applied(url, log, title="", company=""):
 
 def ensure_login(page):
     """Check Indeed login; prompt user if not logged in."""
-    page.goto("https://www.indeed.com/", wait_until="domcontentloaded", timeout=20000)
+    # Retry up to 3x — a single network timeout was killing entire evening runs
+    for _i in range(3):
+        try:
+            page.goto("https://www.indeed.com/", wait_until="domcontentloaded", timeout=30000)
+            break
+        except Exception as _e:
+            print(f"  ⚠  Indeed homepage load failed (attempt {_i+1}/3): {str(_e)[:80]}")
+            if _i < 2:
+                time.sleep(8)
+            else:
+                print("  ❌ Could not reach Indeed after 3 attempts — skipping this run")
+                return
     time.sleep(3)
     # Check for user account indicator
     logged_in = page.evaluate("""
@@ -132,8 +152,49 @@ def ensure_login(page):
     if logged_in:
         print("  ✅  Indeed: logged in")
         return
-    print("\n  🔐  Log in to Indeed then press ENTER...")
-    input("  → ")
+
+    # When running via scheduler (no terminal), input() crashes with EOF.
+    # Instead: send email alert and wait up to 5 minutes for user to log in.
+    print("\n  🔐  Indeed not logged in — sending alert and waiting up to 5 minutes...")
+    try:
+        notifier.send_alert(
+            subject="🔐 Indeed Login Required — Pipeline Paused",
+            body=(
+                "The job pipeline needs you to log in to Indeed.\n\n"
+                "1. Open the Chromium browser window on your Mac\n"
+                "2. Log in to Indeed\n"
+                "3. The pipeline will continue automatically within 5 minutes\n\n"
+                "If you don't log in, this run will be skipped."
+            )
+        )
+    except Exception as e:
+        print(f"  ⚠  Could not send alert: {e}")
+
+    # Wait up to 5 minutes for login
+    for i in range(60):
+        time.sleep(5)
+        try:
+            page.goto("https://www.indeed.com/", wait_until="domcontentloaded", timeout=10000)
+            time.sleep(2)
+            logged_in = page.evaluate("""
+                () => {
+                    const indicators = [
+                        document.querySelector('[data-testid="gnav-accountMenu"]'),
+                        document.querySelector('[aria-label*="Account"]'),
+                        document.querySelector('.gnav-header-component__account'),
+                    ];
+                    return indicators.some(el => el !== null);
+                }
+            """)
+            if logged_in:
+                print("  ✅  Indeed: logged in successfully")
+                return
+        except:
+            pass
+        if i % 12 == 11:
+            print(f"  ⏳ Still waiting for Indeed login... ({(i+1)*5}s elapsed)")
+
+    print("  ❌ Indeed login timeout — skipping this run")
 
 def extract_job_panel(page):
     """Extract job details from the Indeed right panel / detail view."""
@@ -272,7 +333,24 @@ def click_apply_button(page):
     time.sleep(2)
     return bool(clicked)
 
-def smart_fill_step(page, profile_text, job_title, company, resume_filename=""):
+def _extract_posted_salary(jd_text: str) -> str:
+    """Extract posted salary range from job description. Returns empty string if none found."""
+    import re as _re
+    # Match patterns like $55,000 - $65,000, $55k-$65k, 55000-65000/yr, etc.
+    patterns = [
+        r'\$[\d,]+\s*[-–to]+\s*\$[\d,]+\s*(?:a year|/yr|per year|annually|/year)?',
+        r'\$[\d,]+[kK]\s*[-–to]+\s*\$[\d,]+[kK]',
+        r'[\d,]+\s*[-–]\s*[\d,]+\s*(?:per year|a year|annually|/yr)',
+        r'\$[\d,]+\+?\s*(?:a year|per year|annually|/yr)',
+    ]
+    for pat in patterns:
+        m = _re.search(pat, jd_text, _re.IGNORECASE)
+        if m:
+            return m.group(0).strip()
+    return ""
+
+
+def smart_fill_step(page, profile_text, job_title, company, resume_filename="", cover_letter_text="", jd_text=""):
     """
     Extract → answer (cache/Claude) → fill by CSS selector (no re-labeling).
 
@@ -282,6 +360,15 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename=""):
       3. Uncached → Claude API → save to cache
       4. JS fills each element by its stored CSS selector — no label re-detection
     """
+    # Cover letter field label patterns — when we see these, paste the cover letter
+    COVER_LETTER_LABELS = {
+        "cover letter", "cover note", "why are you interested",
+        "why do you want to work", "why this role", "why this company",
+        "why do you want to join", "tell us about yourself",
+        "additional information", "additional comments",
+        "message to hiring manager", "message to the hiring team",
+        "anything else", "is there anything else",
+    }
     import anthropic, os, json as _json
 
     # ── Step 1: Extract fields with unique CSS selectors ──────────────────────
@@ -518,18 +605,35 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename=""):
     for f in fields:
         lbl = f.get("label","")
 
-        # 1. Check qa_answers.py FIRST (master Q&A file — highest priority)
+        # 0. Cover letter fields — paste actual cover letter text
+        lbl_lower = lbl.lower().strip().rstrip(" *:?")
+        if cover_letter_text and f.get("type") in ("textarea", "text", "richtext"):
+            if any(cl_kw in lbl_lower for cl_kw in COVER_LETTER_LABELS):
+                print(f"             📝 COVER LETTER field detected: '{lbl}' — inserting cover letter")
+                answers[lbl] = cover_letter_text
+                continue
+
+        # 1. qa_answers.py — master Q&A (manually curated, highest priority)
         qa_hit = _qa.get_answer(lbl) if (_qa and lbl) else None
         if qa_hit is not None:
-            print(f"             ✔ QA FILE    '{lbl}' → '{qa_hit}'")
+            print(f"             ✔ QA FILE    '{lbl}' → '{str(qa_hit)[:60]}'")
             answers[lbl] = qa_hit
             continue
 
-        # 2. Check SQLite cache
+        # 2. claude_answers.py — Claude's past answers (auto-saved, human-reviewable)
+        ca_hit = _claude_ans.get(lbl) if (_claude_ans and lbl) else None
+        if ca_hit is not None:
+            print(f"             ✔ SAVED      '{lbl}' → '{str(ca_hit)[:60]}'")
+            answers[lbl] = ca_hit
+            continue
+
+        # 3. SQLite cache (legacy)
         cached = _cache.get(lbl) if lbl else None
         if cached is not None:
-            print(f"             ✔ CACHE HIT  '{lbl}' → '{cached}'")
+            print(f"             ✔ CACHE HIT  '{lbl}' → '{str(cached)[:60]}'")
             answers[lbl] = cached
+            # Promote to claude_answers.py so it's visible and editable
+            if _claude_ans: _claude_ans.save(lbl, cached)
         else:
             print(f"             ✗ cache miss '{lbl}'")
             uncached.append(f)
@@ -556,6 +660,9 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename=""):
             for i, f in enumerate(uncached)
         )
 
+        # Smart salary: uses posted JD range if available, else profile defaults by role
+        salary_rule = _salary_rule(jd_text or "", job_title or "")
+
         prompt = f"""Fill out this job application form step on Indeed for: {job_title} at {company}
 
 CANDIDATE PROFILE:
@@ -571,10 +678,16 @@ Rules:
 - select/radio/checkbox: copy one option EXACTLY as written
 - years of experience questions: answer with a number
 - work authorization: "Yes"
-- salary expectation: "85000"
+- {salary_rule}
 - notice period / start date: "2 weeks" or "Immediately"
 - relocation: "No"
 - cover letter / additional info: write 2 sentences about the candidate
+- "can you perform essential functions" or "able to perform the job": always "Yes"
+- "are you available to work full time / on-site / weekends": "Yes"
+- "do you have experience with [any tool/platform/technology]": always "Yes"
+- "are you familiar with [any software/system]": always "Yes"
+- "have you worked with [any technology]": always "Yes"
+- date fields expecting MM/DD/YYYY format: use today's date + 14 days
 - Never mention Community Dreams Foundation or Mobile Stage Pros
 - For text fields with no obvious answer: leave blank ("")"""
 
@@ -590,14 +703,42 @@ Rules:
             claude_answers = {}
             if m:
                 claude_answers = _json.loads(m.group(0))
-                for lbl, ans in claude_answers.items():
-                    answers[lbl] = ans
-                    if ans:
-                        _cache.save(lbl, ans)
-                        print(f"             ✔ Claude → '{lbl}': '{ans}'  (saved to cache)")
+
+                # Robust matching: Claude sometimes strips '? *' or has minor label differences.
+                # For each uncached field, find the best matching key in claude_answers.
+                def _norm(s):
+                    return re.sub(r'[\s\*\?\:]+$', '', s).strip().lower()
+
+                for f_unc in uncached:
+                    orig_lbl = f_unc.get("label", "")
+                    orig_norm = _norm(orig_lbl)
+                    matched_ans = None
+                    # 1. Exact match
+                    if orig_lbl in claude_answers:
+                        matched_ans = claude_answers[orig_lbl]
                     else:
-                        print(f"             · Claude → '{lbl}': (blank)")
-            print(f"          🤖 Claude answered {len(claude_answers)}/{len(uncached)} uncached fields")
+                        # 2. Normalized match
+                        for ck, cv in claude_answers.items():
+                            if _norm(ck) == orig_norm:
+                                matched_ans = cv
+                                break
+                        if matched_ans is None:
+                            # 3. Substring match
+                            for ck, cv in claude_answers.items():
+                                ck_n = _norm(ck)
+                                if orig_norm and (orig_norm in ck_n or ck_n in orig_norm):
+                                    matched_ans = cv
+                                    break
+                    if matched_ans is not None:
+                        answers[orig_lbl] = matched_ans
+                        if matched_ans:
+                            _cache.save(orig_lbl, matched_ans)
+                            if _claude_ans: _claude_ans.save(orig_lbl, str(matched_ans))
+                            print(f"             ✔ Claude → '{orig_lbl}': '{str(matched_ans)[:80]}'  (saved)")
+                        else:
+                            print(f"             · Claude → '{orig_lbl}': (blank)")
+
+            print(f"          🤖 Claude answered {len([f for f in uncached if f.get('label','') in answers])}/{len(uncached)} uncached fields")
         except Exception as e:
             print(f"          ⚠  Claude API error: {e}")
             print(f"          ↩  Applying fallback answers for uncached fields...")
@@ -610,11 +751,11 @@ Rules:
             "legally authorized": "Yes",
             "sponsorship": "No",
             "require visa": "No",
-            "salary": "85000",
-            "compensation": "85000",
-            "expected pay": "85000",
-            "desired pay": "85000",
-            "desired salary": "85000",
+            "salary":        _pick_salary(jd_text or "", job_title or ""),
+            "compensation":  _pick_salary(jd_text or "", job_title or ""),
+            "expected pay":  _pick_salary(jd_text or "", job_title or ""),
+            "desired pay":   _pick_salary(jd_text or "", job_title or ""),
+            "desired salary":_pick_salary(jd_text or "", job_title or ""),
             "start date": "2 weeks",
             "notice period": "2 weeks",
             "available": "2 weeks",
@@ -631,8 +772,10 @@ Rules:
         }
         for f in uncached:
             lbl = f.get("label", "")
-            if lbl in answers:
-                continue  # already answered by Claude
+            # Skip if Claude already answered (exact OR non-empty value in answers)
+            existing = answers.get(lbl)
+            if existing is not None and existing != "":
+                continue  # Claude answered — never overwrite with fallback
             lbl_l = lbl.lower()
             for kw, val in FALLBACK.items():
                 if kw in lbl_l:
@@ -763,8 +906,55 @@ Rules:
                              || opts2.find(function(o){ return o.text.toLowerCase().includes(ans.toLowerCase()); })
                              || opts2.find(function(o){ return ans.toLowerCase().includes(o.text.toLowerCase()) && o.text.length > 1; });
                     if (match) { el.value = match.value; fireEvents(el); filled++; }
+                } else if (el.getAttribute('contenteditable') !== null) {
+                    // React rich-text editor (contenteditable div) — el.value doesn't work.
+                    // Use execCommand insertText which fires the right React synthetic events.
+                    el.focus();
+                    document.execCommand('selectAll', false, null);
+                    var inserted = document.execCommand('insertText', false, ans);
+                    if (!inserted) {
+                        // execCommand fallback: set innerText and fire events manually
+                        el.innerText = ans;
+                        ['input','change','keyup'].forEach(function(ev) {
+                            el.dispatchEvent(new Event(ev, {bubbles:true}));
+                        });
+                    }
+                    fireEvents(el);
+                    filled++;
                 } else {
-                    el.value = ans;
+                    // Standard input/textarea — fill value and fire React synthetic events.
+                    // Uses a safe multi-strategy approach to avoid "Illegal invocation"
+                    // errors that occur with cross-origin iframes or shadow DOM elements.
+                    try {
+                        var tag = el.tagName ? el.tagName.toUpperCase() : '';
+                        var filled_ok = false;
+
+                        // Strategy 1: React native setter (only for same-origin elements)
+                        if (!filled_ok && (tag === 'INPUT' || tag === 'TEXTAREA')) {
+                            try {
+                                var proto = tag === 'INPUT'
+                                    ? window.HTMLInputElement.prototype
+                                    : window.HTMLTextAreaElement.prototype;
+                                var setter = Object.getOwnPropertyDescriptor(proto, 'value');
+                                if (setter && setter.set && el.ownerDocument === document) {
+                                    setter.set.call(el, ans);
+                                    filled_ok = true;
+                                }
+                            } catch(e1) { /* cross-origin or shadow DOM — try next strategy */ }
+                        }
+
+                        // Strategy 2: Plain assignment (always works, React may not see it)
+                        if (!filled_ok) {
+                            try { el.value = ans; filled_ok = true; } catch(e2) {}
+                        }
+
+                        // Strategy 3: innerText for contenteditable elements
+                        if (!filled_ok) {
+                            try { el.innerText = ans; filled_ok = true; } catch(e3) {}
+                        }
+                    } catch(eOuter) {
+                        try { el.value = ans; } catch(eFinal) {}
+                    }
                     fireEvents(el);
                     filled++;
                 }
@@ -775,7 +965,56 @@ Rules:
 
     filled_n = filled or 0
     print(f"          ✏️  DOM fill result: {filled_n}/{len(fields)} field(s) written to page")
-    return filled_n
+
+    # ── Playwright fill pass: for number/text inputs that JS evaluate misses ──
+    # React controlled number inputs often ignore el.value= but respond to frame.fill()
+    pw_filled = 0
+    for item in fill_items:
+        sel  = item.get("sel", "")
+        ans  = item.get("answer", "")
+        typ  = item.get("type", "")
+        if not sel or not ans:
+            continue
+        if typ in ("text", "number", "textarea", "tel", "email"):
+            try:
+                el_handle = page.query_selector(sel)
+                if el_handle:
+                    el_handle.click()
+                    el_handle.select_text() if hasattr(el_handle, 'select_text') else None
+                    page.keyboard.press("Control+A")
+                    page.keyboard.type(str(ans), delay=30)
+                    pw_filled += 1
+            except Exception:
+                pass
+        elif typ in ("radio", "checkbox") and not item.get("gname"):
+            # Radio/checkbox with no gname — try clicking by visible label text
+            try:
+                lbl_text = item.get("label", "")
+                ans_text  = item.get("answer", "")
+                if ans_text and lbl_text:
+                    # Find label element containing the answer text, click its input
+                    clicked = page.evaluate(f"""
+                        () => {{
+                            const labels = Array.from(document.querySelectorAll('label, [role="radio"], [role="checkbox"]'));
+                            const target = labels.find(l => {{
+                                const t = (l.innerText || l.textContent || '').trim().toLowerCase();
+                                return t === {_json.dumps(ans_text.lower())} || t.includes({_json.dumps(ans_text.lower())});
+                            }});
+                            if (target) {{ target.click(); return true; }}
+                            const inp = document.querySelector('input[value={_json.dumps(ans_text)}]');
+                            if (inp) {{ inp.click(); return true; }}
+                            return false;
+                        }}
+                    """)
+                    if clicked:
+                        pw_filled += 1
+            except Exception:
+                pass
+
+    if pw_filled:
+        print(f"          ✏️  Playwright fill pass: {pw_filled} additional field(s) written")
+
+    return filled_n + pw_filled
 
 CONFIRM_PHRASES = [
     'application submitted', 'successfully applied',
@@ -887,25 +1126,68 @@ def _check_and_handle_captcha(page, title="", company=""):
         except:
             pass
 
-        # Wait up to 5 minutes for CAPTCHA to be solved
-        CAPTCHA_TIMEOUT = 300
+        # Wait up to 10 minutes for CAPTCHA to be solved
+        CAPTCHA_TIMEOUT = 600
         for i in range(CAPTCHA_TIMEOUT):
             time.sleep(1)
             try:
-                still_captcha = any(
-                    "bframe" in (f.url or "") for f in list(page.frames)
-                )
-                if not still_captcha:
-                    print(f"          ✅ CAPTCHA solved! Waiting 5s before continuing...")
-                    time.sleep(5)  # let Indeed settle before next action
-                    return True
-            except:
-                pass
-            if i % 30 == 29:
-                remaining = CAPTCHA_TIMEOUT - i - 1
-                print(f"          ⏳ Still waiting for CAPTCHA... ({remaining}s left)")
+                frames = list(page.frames)
+                still_captcha = any("bframe" in (f.url or "") for f in frames)
 
-        print(f"          ❌ CAPTCHA not solved in 5 minutes — skipping this job")
+                # Also check if page already confirmed — user may have clicked Submit manually
+                page_text = ""
+                try:
+                    page_text = page.evaluate("() => document.body.innerText || ''").lower()
+                except Exception:
+                    pass
+
+                already_confirmed = any(phrase in page_text for phrase in [
+                    "application submitted", "successfully applied",
+                    "your application has been", "application received",
+                    "thanks for applying", "thank you for applying",
+                    "application complete",
+                ])
+
+                if already_confirmed:
+                    print(f"          ✅ Confirmation detected during CAPTCHA wait — application submitted!")
+                    return True
+
+                if not still_captcha:
+                    print(f"          ✅ CAPTCHA solved! Clicking Submit and waiting 6s...")
+                    time.sleep(2)  # brief settle
+                    # Click Submit automatically so user doesn't have to
+                    try:
+                        for frame in page.frames:
+                            clicked = _safe_eval(frame, """
+                                () => {
+                                    const kws = ['submit your application','submit application','submit','apply now'];
+                                    const btns = Array.from(document.querySelectorAll('button,[role=button],input[type=submit]'));
+                                    for (const b of btns) {
+                                        if (!b.offsetParent) continue;
+                                        const t = (b.innerText||b.textContent||b.value||'').toLowerCase().trim();
+                                        if (kws.some(k=>t.includes(k))) { b.click(); return t; }
+                                    }
+                                    return null;
+                                }
+                            """, None)
+                            if clicked:
+                                print(f"          ✔  Auto-clicked Submit after CAPTCHA: '{clicked}'")
+                                break
+                    except Exception:
+                        pass
+                    time.sleep(6)  # let Indeed process the submit
+                    return True
+
+            except Exception:
+                pass
+
+            if i % 60 == 59:
+                remaining = CAPTCHA_TIMEOUT - i - 1
+                mins = remaining // 60
+                secs = remaining % 60
+                print(f"          ⏳ Still waiting for CAPTCHA... ({mins}m {secs}s left) — solve it in the browser window")
+
+        print(f"          ❌ CAPTCHA not solved in 10 minutes — skipping this job")
         return False
 
     except Exception as e:
@@ -1254,27 +1536,86 @@ def _force_click_continue_on_resume_page(page, verbose=True):
         if verbose: print(f"          ⚠  resume-m: no button found even in last-resort scan")
     return False
 
-def _upload_resume(page, resume_path, done_flag):
-    """Upload resume once — checks all frames."""
+def _upload_resume(page, resume_path, done_flag, cover_letter_path="", cover_done_flag=None):
+    """Upload resume (and optional cover letter) — checks all frames."""
     if done_flag[0]:
+        # Resume already uploaded — but check for a cover letter file input on this step
+        if cover_letter_path and cover_done_flag and not cover_done_flag[0]:
+            _upload_cover_letter(page, cover_letter_path, cover_done_flag)
         return
+
     all_frames = [page.main_frame] + list(page.frames)
+    file_inputs_found = 0
     for i, frame in enumerate(all_frames):
         try:
-            fi = frame.locator('input[type="file"]').first
-            if fi.count() > 0:
-                frame_url = ""
-                try: frame_url = frame.url or ""
-                except: pass
+            fi_all = frame.locator('input[type="file"]')
+            count = fi_all.count()
+            if count == 0:
+                continue
+            frame_url = ""
+            try: frame_url = frame.url or ""
+            except: pass
+
+            if not done_flag[0]:
+                fi = fi_all.first
                 print(f"          📎 File input found in frame[{i}] ({frame_url[:50] or 'main'}) — uploading resume...")
                 fi.set_input_files(str(resume_path))
                 time.sleep(1)
                 done_flag[0] = True
                 print(f"          📎 Resume uploaded ✅  ({Path(resume_path).name})")
-                return
-        except Exception as e:
+                file_inputs_found += 1
+
+            # If there's a SECOND file input, try uploading cover letter there
+            if cover_letter_path and cover_done_flag and not cover_done_flag[0] and count >= 2:
+                try:
+                    fi2 = fi_all.nth(1)
+                    print(f"          📎 Second file input found — uploading cover letter...")
+                    fi2.set_input_files(str(cover_letter_path))
+                    time.sleep(1)
+                    cover_done_flag[0] = True
+                    print(f"          📎 Cover letter uploaded ✅  ({Path(cover_letter_path).name})")
+                except Exception:
+                    pass
+        except Exception:
             pass
-    print(f"          ℹ  No file input found (resume upload skipped this step)")
+
+    if not done_flag[0]:
+        print(f"          ℹ  No file input found (resume upload skipped this step)")
+
+    # Final check for cover letter file input on this step
+    if cover_letter_path and cover_done_flag and not cover_done_flag[0]:
+        _upload_cover_letter(page, cover_letter_path, cover_done_flag)
+
+
+def _upload_cover_letter(page, cover_letter_path, done_flag):
+    """Try to find and upload cover letter to any additional file input."""
+    if done_flag[0] or not cover_letter_path:
+        return
+    all_frames = [page.main_frame] + list(page.frames)
+    for frame in all_frames:
+        try:
+            # Look for file inputs labeled for cover letter
+            cl_input = frame.evaluate("""
+                () => {
+                    const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+                    for (const inp of inputs) {
+                        const label = document.querySelector('label[for="' + inp.id + '"]');
+                        const lbl_text = (label ? label.innerText : '').toLowerCase();
+                        const aria = (inp.getAttribute('aria-label') || '').toLowerCase();
+                        if (lbl_text.includes('cover') || aria.includes('cover')) return inp.id || true;
+                    }
+                    return null;
+                }
+            """)
+            if cl_input:
+                fi = frame.locator('input[type="file"]').last
+                fi.set_input_files(str(cover_letter_path))
+                time.sleep(1)
+                done_flag[0] = True
+                print(f"          📎 Cover letter file uploaded ✅")
+                return
+        except Exception:
+            pass
 
 def _get_apply_page(page, browser, timeout_secs=10):
     """
@@ -1302,8 +1643,9 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
     → walk multi-step form using Claude + cache → submit.
     Returns (success: bool, reason: str).
     """
-    title   = job.get("title", "")
-    company = job.get("company", "")
+    title       = job.get("title", "")
+    company     = job.get("company", "")
+    jd_for_fill = job.get("description", "") or job.get("jd_text", "")
 
     # ── Click the Apply button ─────────────────────────────────────────────────
     print(f"          👆 Clicking Indeed Apply button...")
@@ -1367,6 +1709,18 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
     # Resume filename for resume-selection page auto-click
     resume_name = Path(resume_path).name if resume_path else ""
 
+    # ── Read cover letter text from .docx for pasting into form fields ────────
+    cl_text_for_form = ""
+    if cover_letter_path:
+        try:
+            from docx import Document as _DocxDoc
+            _cl_doc = _DocxDoc(cover_letter_path)
+            cl_text_for_form = "\n\n".join(
+                p.text for p in _cl_doc.paragraphs if p.text.strip()
+            )
+        except Exception:
+            pass
+
     # ── Walk multi-step form ───────────────────────────────────────────────────
     step           = 0
     max_steps      = 20
@@ -1374,6 +1728,7 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
     same_btn_count = 0
     submitted      = False
     resume_done    = [False]
+    cover_done     = [False]
     last_url       = ""
     same_url_count = 0
 
@@ -1397,8 +1752,94 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
             if current_step_url_norm and current_step_url_norm == last_url_norm:
                 same_url_count += 1
                 print(f"          ⚠  Same URL repeated {same_url_count}x — possible stuck loop")
+
+                # ── Vision assist: let Claude SEE the page and decide what to do ──
+                if same_url_count == 2:
+                    print(f"          👁  Calling Claude Vision to inspect stuck page...")
+                    try:
+                        import claude_engine as _ce
+                        _ss_bytes = apply_page.screenshot()
+                        _page_txt = apply_page.evaluate("() => document.body.innerText")[:3000]
+                        _vision   = _ce.vision_assist(_ss_bytes, _page_txt, title, company)
+                        _action   = _vision.get("action", "click_button")
+
+                        if _action == "captcha":
+                            print(f"          👁  Vision sees CAPTCHA — handing off to CAPTCHA handler")
+                            _check_and_handle_captcha(apply_page, title, company)
+
+                        elif _action == "fill_field":
+                            print(f"          👁  Vision filling {len(_vision.get('fields', []))} field(s)...")
+                            for _fld in _vision.get("fields", []):
+                                _lbl = _fld.get("label", "")
+                                _val = _fld.get("value", "")
+                                if not _lbl or not _val:
+                                    continue
+                                try:
+                                    # Try to fill by placeholder, label, or aria-label
+                                    _sel = f"[placeholder*='{_lbl}' i],[aria-label*='{_lbl}' i],textarea"
+                                    _el = apply_page.query_selector(_sel)
+                                    if _el:
+                                        _el.fill(_val)
+                                        print(f"             ✔ Vision filled '{_lbl}' = '{_val}'")
+                                    else:
+                                        print(f"             · Vision could not find field '{_lbl}'")
+                                except Exception as _fe:
+                                    print(f"             ⚠ Vision fill error: {_fe}")
+                            # Click the button Vision recommended
+                            _btn_text = _vision.get("button", "Continue")
+                            if _btn_text:
+                                _click_any_forward_button(apply_page)
+                                print(f"          👁  Vision: clicked forward button after filling")
+
+                        elif _action == "click_button":
+                            _btn_text = _vision.get("button", "Continue")
+                            print(f"          👁  Vision says click: '{_btn_text}'")
+                            _click_any_forward_button(apply_page)
+
+                        elif _action == "skip":
+                            print(f"          👁  Vision sees confirmation — marking as submitted")
+                            submitted = True
+                            break
+
+                    except Exception as _ve:
+                        print(f"          👁  Vision assist error: {_ve}")
+
                 if same_url_count >= 4:
                     print(f"          ❌ Stuck on same URL for {same_url_count} steps — giving up on this job")
+                    # ── Save stuck questions for manual review ────────────────
+                    try:
+                        _stuck_file = cfg.BASE_DIR / "data" / "stuck_questions.json"
+                        _stuck_file.parent.mkdir(parents=True, exist_ok=True)
+                        _existing_stuck = []
+                        if _stuck_file.exists():
+                            try:
+                                _existing_stuck = _json.loads(_stuck_file.read_text())
+                            except Exception:
+                                _existing_stuck = []
+                        # Scrape current page fields as the stuck questions
+                        _page_txt = ""
+                        try:
+                            _page_txt = apply_page.evaluate("() => document.body.innerText")
+                        except Exception:
+                            pass
+                        _stuck_entry = {
+                            "timestamp":  datetime.now().isoformat(),
+                            "company":    company,
+                            "job_title":  title,
+                            "url":        apply_page.url,
+                            "page_text_snippet": _page_txt[:1000],
+                            "fields":     [
+                                {"label": f.get("label",""), "type": f.get("type",""), "options": f.get("options",[])}
+                                for f in (form_fields_last_seen if 'form_fields_last_seen' in dir() else [])
+                            ],
+                            "status": "stuck — needs manual review"
+                        }
+                        _existing_stuck.append(_stuck_entry)
+                        _stuck_file.write_text(_json.dumps(_existing_stuck, indent=2))
+                        print(f"          📝 Stuck questions saved → data/stuck_questions.json")
+                        print(f"          💡 Open that file, add answers to qa_answers.py to fix this next time")
+                    except Exception as _se:
+                        print(f"          ⚠  Could not save stuck questions: {_se}")
                     break
             else:
                 same_url_count = 0
@@ -1424,7 +1865,8 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                 # Step A: Fill any remaining fields on this page
                 # (some review pages have EEOC questions, agreements, or checkboxes)
                 form_ctx = _find_active_form_ctx(apply_page, verbose=True)
-                filled = smart_fill_step(form_ctx, profile_text, title, company, resume_name)
+                filled = smart_fill_step(form_ctx, profile_text, title, company, resume_name,
+                                         cover_letter_text=cl_text_for_form, jd_text=jd_for_fill)
                 if filled:
                     print(f"          ✏️  Review page: filled {filled} field(s) before submitting")
                 else:
@@ -1526,8 +1968,10 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                 else:
                     print(f"          ⚠  resume-m force-click found no card/button — trying normal nav")
 
-            # Upload resume once — checks all frames
-            _upload_resume(apply_page, resume_path, resume_done)
+            # Upload resume (and cover letter if there's a second file input)
+            _upload_resume(apply_page, resume_path, resume_done,
+                           cover_letter_path=cover_letter_path or "",
+                           cover_done_flag=cover_done)
 
             # Find which frame has the active form this step
             form_ctx = _find_active_form_ctx(apply_page)
@@ -1542,7 +1986,8 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                 if has_submit:
                     print(f"          🏁 DRY RUN: Submit button found — stopping here (would submit in live mode)")
                     return True, "dry-run: reached submit page"
-                filled = smart_fill_step(form_ctx, profile_text, title, company, resume_name)
+                filled = smart_fill_step(form_ctx, profile_text, title, company, resume_name,
+                                         cover_letter_text=cl_text_for_form, jd_text=jd_for_fill)
                 print(f"          ✏️  Step {step} TOTAL: filled {filled} fields")
                 if nav:
                     _click_nav(nav_frame, nav[0].get("text","continue"))
@@ -1555,7 +2000,10 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                 continue
 
             # Fill using the correct frame
-            filled = smart_fill_step(form_ctx, profile_text, title, company, resume_name)
+            # Track last-seen fields for stuck-questions logging
+            form_fields_last_seen = form_ctx.get("fields", []) if isinstance(form_ctx, dict) else []
+            filled = smart_fill_step(form_ctx, profile_text, title, company, resume_name,
+                                     cover_letter_text=cl_text_for_form, jd_text=jd_for_fill)
             print(f"          ✏️  Step {step} TOTAL: filled {filled} fields")
             time.sleep(1)
 
@@ -1580,11 +2028,78 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                     same_btn_count = 0
                     last_btn = btn_text
 
-                if same_btn_count >= 3:
-                    print(f"          ⚠  Stuck on same button 3x — force-submit")
+                # ── Validation error detection — THE fix for "form walk ended" ─
+                # Before clicking Continue again, check if a validation error is
+                # blocking the form. If so, try to fix the specific failing field
+                # rather than blindly clicking and getting stuck.
+                if same_btn_count >= 2:
+                    validation_errors = _safe_eval(apply_page, """
+                        () => {
+                            const errSelectors = [
+                                '[class*="error"]:not([class*="errorText--hidden"])',
+                                '[class*="Error"]:not([class*="hidden"])',
+                                '[aria-invalid="true"]',
+                                '[aria-describedby*="error"]',
+                                '.icl-TextInput--error',
+                                '[data-testid*="error"]',
+                                '[role="alert"]',
+                            ];
+                            const msgs = [];
+                            for (const sel of errSelectors) {
+                                for (const el of document.querySelectorAll(sel)) {
+                                    if (!el.offsetParent) continue;
+                                    const t = (el.innerText || el.textContent || '').trim();
+                                    if (t && t.length > 2 && t.length < 300) msgs.push(t);
+                                }
+                            }
+                            return [...new Set(msgs)].slice(0, 5);
+                        }
+                    """, [])
+
+                    if validation_errors:
+                        print(f"          🔴 Validation errors blocking Continue:")
+                        for ve in validation_errors:
+                            print(f"             • {ve}")
+
+                        # Common fixes: salary out of range → try hourly rate
+                        err_text = " ".join(validation_errors).lower()
+                        if any(w in err_text for w in ["salary", "pay", "wage", "compensation", "amount"]):
+                            print(f"          💰 Salary validation — trying hourly rate (45)")
+                            _safe_eval(apply_page, """
+                                () => {
+                                    const inputs = Array.from(document.querySelectorAll('input[type="number"],input[type="text"]'));
+                                    const sal = inputs.find(i => {
+                                        const l = (document.querySelector('label[for="'+i.id+'"]') || {}).innerText || '';
+                                        return l.toLowerCase().includes('salary') || l.toLowerCase().includes('pay')
+                                            || i.getAttribute('placeholder','').toLowerCase().includes('salary');
+                                    });
+                                    if (sal) {
+                                        sal.value = '45';
+                                        ['input','change'].forEach(ev => sal.dispatchEvent(new Event(ev,{bubbles:true})));
+                                        return true;
+                                    }
+                                    return false;
+                                }
+                            """, False)
+                            time.sleep(0.5)
+
+                        # If field says "required" or "answer this question" — re-run fill
+                        if any(w in err_text for w in ["required", "answer", "enter", "provide", "select", "must"]):
+                            print(f"          🔄 Required field error — re-running fill step")
+                            smart_fill_step(form_ctx, profile_text, title, company, resume_name,
+                                            cover_letter_text=cl_text_for_form, jd_text=jd_for_fill)
+                            time.sleep(1)
+
+                if same_btn_count >= 8:
+                    # Stuck for 8 consecutive identical buttons — try force-submit once
+                    print(f"          ⚠  Stuck on same button 8x — attempting force-submit")
                     _click_nav(nav_frame, "submit")
                     time.sleep(3)
                     submitted = _is_confirmed(apply_page)
+                    if not submitted:
+                        _click_any_forward_button(apply_page, verbose=False)
+                        time.sleep(2)
+                        submitted = _is_confirmed(apply_page)
                     break
 
                 _click_nav(nav_frame, btn_text)
@@ -1621,6 +2136,17 @@ def main():
     print(f"  Indeed Apply Engine  {'[DRY RUN]' if DRY_RUN else ''}")
     print(f"  Limit: {MAX_APPLY} applications")
     print(f"{'='*60}\n")
+
+    # ── Clear stale Chromium SingletonLock (left over if prior run crashed) ───
+    # Without this, the morning scheduler run fails entirely with ProcessSingleton error.
+    for _lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        _lock_path = SESSION_DIR / _lock_name
+        if _lock_path.exists():
+            try:
+                _lock_path.unlink()
+                print(f"  🔓 Cleared stale {_lock_name} — prior session didn't exit cleanly")
+            except Exception as _le:
+                print(f"  ⚠  Could not clear {_lock_name}: {_le}")
 
     # ── Clear stale resume-selection cache (filename changes every job) ───────
     try:
@@ -1687,9 +2213,9 @@ def main():
         "Are you authorized to work in the US?":                    "Yes",
         "Do you require visa sponsorship now or in the future?":    "No",
         "Will you now or in the future require sponsorship?":       "No",
-        "Desired Pay":         "85000",
-        "Desired Salary":      "85000",
-        "Expected Salary":     "85000",
+        "Desired Pay":         "70000",
+        "Desired Salary":      "70000",
+        "Expected Salary":     "70000",
         "Date Available":      "2 weeks",
         "Start Date":          "2 weeks",
         "Website, Blog or Portfolio": "https://www.linkedin.com/in/raghavendra-karanam",
@@ -1709,6 +2235,8 @@ def main():
     import resume_builder as rb
     import cover_letter   as cl_mod
     import jd_parser      as jdp
+    from pipeline_logger import RunLogger
+    _run_log = RunLogger("indeed")
 
     full_profile    = rp.PROFILE
     profile_summary = ce.build_profile_summary(full_profile)
@@ -1736,10 +2264,20 @@ def main():
 
             print(f"\n🔍  Query: {query}")
             url = build_indeed_url(query)
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=25000)
-            except:
-                print(f"  ⚠  Failed to load search page")
+
+            # Retry up to 3 times on network timeout — single hiccup kills entire run otherwise
+            loaded = False
+            for _attempt in range(3):
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                    loaded = True
+                    break
+                except Exception as _nav_err:
+                    print(f"  ⚠  Search page load failed (attempt {_attempt+1}/3): {str(_nav_err)[:80]}")
+                    if _attempt < 2:
+                        time.sleep(5)   # brief wait before retry
+            if not loaded:
+                print(f"  ❌ Could not load search after 3 attempts — skipping query '{query}'")
                 continue
             time.sleep(3)
 
@@ -1788,6 +2326,14 @@ def main():
 
                 if not is_relevant_domain(title):
                     print(f"  ⏭  Off-domain title: '{title}' — skipping (not data/analytics)")
+                    skipped_count += 1
+                    continue
+
+                # ── Local pre-filter — zero token cost ────────────────────────
+                # Run before loading job page or calling any API.
+                # Uses description from card (short) — enough for keyword check.
+                _skip_early, _match_ct = ce.local_prefilter(title, title)  # title-only fast check
+                if _skip_early:
                     skipped_count += 1
                     continue
 
@@ -1849,12 +2395,47 @@ def main():
                     }
                 """) or False
                 if is_external_panel or is_external_text:
-                    print(f"  ⏭  External apply detected — skipping (no resume build, no API call)")
+                    # Check if the external link is a Workday URL — queue it
+                    wd_url = page.evaluate("""
+                        () => {
+                            const WD = ['myworkdayjobs.com', 'workday.com/jobs'];
+                            const links = Array.from(document.querySelectorAll('a[href]'));
+                            for (const a of links) {
+                                const h = a.getAttribute('href') || '';
+                                if (WD.some(d => h.includes(d))) return h;
+                            }
+                            return null;
+                        }
+                    """) or None
+                    if wd_url:
+                        try:
+                            import workday_apply_now as _wd
+                            _wd.add_to_wd_queue({
+                                "title": title, "company": company,
+                                "url": wd_url, "description": "",
+                                "source": "indeed",
+                            })
+                            print(f"  📥 Workday link detected — queued: {wd_url[:60]}")
+                        except Exception as _wde:
+                            print(f"  ⚠  Workday queue error: {_wde}")
+                    else:
+                        print(f"  ⏭  External apply detected — skipping (no resume build, no API call)")
                     skipped_count += 1
                     continue
 
                 jd = details.get("description","")
                 live_url = details.get("jobUrl", job_url)
+
+                # ── Full JD pre-filter — runs after page load, before API call ─
+                _skip_jd, _jd_matches = ce.local_prefilter(jd, title)
+                if _skip_jd:
+                    print(f"  ⏭  Local filter: only {_jd_matches} skill matches in JD — skipping Claude score")
+                    skipped_count += 1
+                    log.append({"status": "Skipped", "title": title, "company": company,
+                                "score": 0, "url": live_url, "reason": "local prefilter",
+                                "timestamp": datetime.now().isoformat(), "platform": "Indeed"})
+                    save_log(log)
+                    continue
 
                 # ── Score with Claude ──────────────────────────────────────────
                 result = ce.score_fit(profile_summary, jd, title, company)
@@ -1894,21 +2475,14 @@ def main():
                     skipped_count += 1
                     continue
 
-                # ── Build cover letter ─────────────────────────────────────────
+                # Cover letters PAUSED — resume does the heavy lifting.
                 cover_letter_path = ""
-                try:
-                    cl_text = ce.write_cover_letter(
-                        full_profile.get("name", "Raghavendra Karanam"),
-                        profile_summary, jd, title, company
-                    )
-                    cover_letter_path = cl_mod.save_cover_letter(cl_text, title, company)
-                    print(f"  ✅ Cover letter saved")
-                except Exception as e:
-                    print(f"  ⚠  Cover letter skipped: {e}")
 
                 # ── Apply ──────────────────────────────────────────────────────
                 print(f"  🚀 Applying via Indeed Apply...")
-                job_info = {"title": title, "company": company}
+                # Include full JD so apply_to_job can use it for salary + contextual answers
+                job_info = {"title": title, "company": company,
+                            "description": jd, "jd_text": jd}
 
                 try:
                     success, reason = apply_to_job(
@@ -1921,6 +2495,9 @@ def main():
                 status = "Applied" if (success and not DRY_RUN) else ("Dry-Run" if DRY_RUN else "Failed")
                 icon   = "✅" if success else "❌"
                 print(f"  {icon} {status}: {reason}")
+
+                _run_log.job_start(title, company, live_url or job_url, fit_score=score, grade=grade)
+                _run_log.job_result(status, reason=reason, resume_file=Path(resume_path).name if resume_path else "")
 
                 # Screenshot
                 ss_path = ""
@@ -1974,6 +2551,7 @@ def main():
     print(f"{'='*60}\n")
 
     _cache.print_stats()
+    _run_log.finish(searches_run=len(SEARCH_QUERIES), jobs_found=scored_count + skipped_count)
 
     notifier.notify_session_done(applied_count, scored_count, skipped_count)
 

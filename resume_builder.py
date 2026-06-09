@@ -24,7 +24,7 @@ except ImportError:
     print("python-docx not installed. Run:  pip install python-docx")
     sys.exit(1)
 
-from raghav_profile import PROFILE, EDUCATION, EXPERIENCE, SKILLS
+from raghav_profile import PROFILE, EDUCATION, EXPERIENCE, SKILLS, PROJECTS
 
 from pathlib import Path as _Path
 OUTPUT_DIR = str(_Path.home() / "job_pipeline" / "resumes")
@@ -249,6 +249,54 @@ def build_enriched_skills(jd_keywords: list, injectable_kws: list) -> tuple:
             reverse=True,
         )
 
+    # Stopwords — never inject these into the skills section.
+    # These are common JD boilerplate words that are NOT tech skills.
+    # If a word appears here, it will never be added to the resume skills list.
+    SKILLS_STOPWORDS = {
+        # Generic English / filler
+        "ability", "strong", "knowledge", "skills", "experience", "years",
+        "required", "preferred", "plus", "good", "excellent", "great",
+        "background", "understanding", "support", "role", "job", "position",
+        "candidate", "team", "work", "environment", "collaborative",
+        "hands-on", "hands on", "type", "types", "cross-functional",
+        "communication", "written", "verbal", "interpersonal",
+        "problem", "solving", "analytical", "detail", "oriented",
+        "fast", "paced", "startup", "company", "organization",
+        "and", "the", "with", "for", "not", "are", "all", "any",
+        "new", "our", "your", "key", "top", "use", "may", "can",
+        "will", "must", "have", "this", "that", "from", "into",
+        "their", "they", "its", "has", "been", "about", "which",
+        # Business words extracted from JD boilerplate
+        "business", "data", "information", "systems", "solutions",
+        "development", "applications", "tools", "technologies", "platforms",
+        "management", "services", "health", "medical", "engineering",
+        "familiarity", "compensation", "requirements", "processes",
+        "operations", "infrastructure", "architecture", "strategy",
+        "delivery", "quality", "performance", "security", "compliance",
+        "documentation", "reporting", "analysis", "visualization",
+        # Job posting section headers (from JD structure)
+        "job summary", "key responsibilities", "required qualifications",
+        "preferred qualifications", "about us", "what we offer",
+        "responsibilities", "qualifications", "requirements",
+        "location", "full-time", "part-time", "remote", "hybrid",
+        "salary", "benefits", "employment", "apply", "application",
+        # Non-tech business terms that get extracted
+        "economics", "finance", "accounting", "marketing", "sales",
+        "operations management", "project management", "program management",
+        "six sigma", "lean", "kpi", "kpis", "sop", "sops", "crm",
+        "erp", "pivottable", "pivottables", "advanced", "proficiency",
+        "monitor", "maintain", "collaborate", "develop", "prepare",
+        "conduct", "collect", "support", "manage", "coordinate",
+        "implement", "create", "build", "design", "deliver", "provide",
+        "ensure", "identify", "analyze", "review", "report", "update",
+        "working", "working knowledge", "proven", "demonstrated",
+        "strong understanding", "solid understanding", "in-depth",
+        "hands on experience", "related field", "united states",
+        "united states of america", "bachelor", "master", "degree",
+        "computer science", "information technology", "information systems",
+        "equivalent", "relevant", "similar", "related",
+    }
+
     # Inject ALL injectable keywords + remaining JD keywords
     all_to_inject = list(injectable_kws) + list(jd_keywords)
     injected_count = 0
@@ -256,6 +304,21 @@ def build_enriched_skills(jd_keywords: list, injectable_kws: list) -> tuple:
     for kw in all_to_inject:
         kw_lower = kw.lower().strip()
         if not kw_lower:
+            continue
+
+        # Skip generic/non-technical words
+        if kw_lower in SKILLS_STOPWORDS:
+            continue
+        # Skip short single-word non-tech terms (< 3 chars or pure English words)
+        if len(kw_lower) < 3:
+            continue
+        # Skip anything that looks like a sentence fragment (has spaces but no tech marker)
+        if " " in kw_lower and not any(tech in kw_lower for tech in [
+            "azure", "aws", "gcp", "data", "sql", "python", "spark", "kafka",
+            "dbt", "airflow", "snowflake", "power bi", "tableau", "docker",
+            "machine learning", "deep learning", "natural language", "api",
+            "cloud", "etl", "elt", "pipeline", "warehouse", "lake",
+        ]):
             continue
 
         # Find target category
@@ -411,6 +474,11 @@ def add_summary(doc, jd_keywords: list, role_title: str):
         "good", "excellent", "great", "background", "understanding", "support",
         "business", "data", "information", "systems", "solutions", "development",
         "applications", "tools", "technologies", "platforms", "environment",
+        "type", "types", "hands-on", "hands on", "collaborative", "cross-functional",
+        "communication", "written", "verbal", "interpersonal", "problem", "solving",
+        "detail", "oriented", "fast", "paced", "organization", "operations",
+        "infrastructure", "strategy", "delivery", "quality", "performance",
+        "security", "compliance", "documentation", "reporting", "analysis",
     }
     for kw in jd_keywords:
         kw_clean = kw.lower().strip()
@@ -432,28 +500,60 @@ def add_summary(doc, jd_keywords: list, role_title: str):
         tech_detail.append(f"{tool} for business intelligence and reporting")
     if ml_focus:      tech_detail.append("machine learning pipeline support and MLOps workflows")
 
-    lines = [
-        f"Results-driven {role_title} with hands-on experience designing and deploying "
-        f"cloud-native data pipelines, lakehouse architectures, and enterprise-scale analytics "
-        f"solutions on {cloud_str}.",
-    ]
-    if tech_detail:
-        lines.append("Skilled in " + "; ".join(tech_detail[:3]) + ".")
-    lines.append(
-        f"Core competencies span {tech_snippet}, ETL/ELT pipeline engineering, "
-        f"data warehouse optimization, schema design, partitioning strategies, "
-        f"real-time and batch processing, automated data quality frameworks, "
-        f"performance tuning, data lineage, and RBAC security governance. "
-        f"Proven collaborator in Agile cross-functional environments."
-    )
-    lines.append(
-        "Holds an M.S. in Data Science and Analytics (Florida Atlantic University, May 2025) "
-        "and is immediately available on F-1 OPT/STEM OPT — no sponsorship required."
-    )
+    # ── Claude-written summary (executive quality, job-specific) ─────────────
+    import claude_engine as _ce
+    tech_list = tech_snippet if tech_snippet else ", ".join([
+        "Python", "SQL", "PySpark", "Azure", "AWS", "ETL pipelines", "data warehousing"
+    ])
+    tech_detail_str = "; ".join(tech_detail[:3]) if tech_detail else ""
+
+    summary_prompt = f"""Write a 3-sentence professional summary for a resume. This is for:
+
+Role: {role_title}
+Key technologies from the job: {tech_list}
+Specific tools the job emphasizes: {tech_detail_str or "ETL pipelines, cloud data platforms, SQL"}
+Cloud platforms: {cloud_str}
+
+Candidate facts (use these, do not fabricate):
+- M.S. Data Science and Analytics, Florida Atlantic University (May 2025)
+- 3+ years hands-on: Python (4 yrs), SQL (4 yrs), data engineering (3 yrs)
+- Built production ETL/ELT pipelines, cloud data warehouses, real-time streaming systems
+- Deployed on Azure (ADF, ADLS, Databricks), AWS, GCP
+- Delivered analytics and BI solutions that directly drove business decisions
+
+Rules for the 3 sentences:
+- Sentence 1: Open with a bold, specific value statement — what the candidate DELIVERS, not what they "are". No "Results-driven", no "passionate", no "motivated".
+- Sentence 2: Name 2-3 specific technical achievements with concrete detail tied to the JD keywords.
+- Sentence 3: End with a forward-looking statement about what they bring to THIS specific role.
+- No bullet points. No hyphens. No dashes. No F-1/visa/sponsorship mention. No clichés.
+- Sound like a top-tier engineer, not a resume template. Be sharp, specific, confident.
+- Max 80 words total across all 3 sentences.
+
+Return ONLY the 3 sentences, nothing else."""
+
+    summary_text = _ce._ask(summary_prompt, max_tokens=200)
+
+    # Fallback if Claude fails
+    if not summary_text or len(summary_text) < 40:
+        summary_text = (
+            f"{role_title} who designs and ships production-grade data infrastructure "
+            f"on {cloud_str}, with deep hands-on experience in Python, SQL, and ETL/ELT "
+            f"pipeline engineering. "
+            f"Has built end-to-end data systems spanning {tech_list}, delivering "
+            f"measurable improvements in pipeline reliability, processing speed, and "
+            f"analytics accuracy. Holds an M.S. in Data Science and Analytics "
+            f"(Florida Atlantic University, 2025) and brings immediate production-ready "
+            f"capability to {role_title} teams."
+        )
+
+    # Strip markdown — Claude sometimes returns **bold** or *italic* syntax
+    summary_text = re.sub(r'\*\*(.+?)\*\*', r'\1', summary_text)
+    summary_text = re.sub(r'\*(.+?)\*',     r'\1', summary_text)
+    summary_text = summary_text.strip()
 
     p = doc.add_paragraph()
     _para_space(p, before_pt=2, after_pt=2)
-    _set_font(p.add_run(" ".join(lines)), 10, color=COLOR_DARK)
+    _set_font(p.add_run(summary_text), 10, color=COLOR_DARK)
     p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
 
@@ -549,6 +649,72 @@ def add_education(doc):
         )
 
 
+def add_projects(doc, jd_keywords: list, job_title: str = "", max_projects: int = 3):
+    """
+    Add the most relevant GitHub projects section to the resume.
+    Picks projects whose include_for list matches the job title/keywords.
+    Always shows at least 2 projects even if no keyword match.
+
+    Projects come from raghav_profile.PROJECTS — the single source of truth.
+    """
+    if not PROJECTS:
+        return
+
+    kw_set   = set(k.lower() for k in jd_keywords)
+    role_low = job_title.lower()
+
+    # Score each project by relevance to this job
+    def _relevance(proj):
+        score = 0
+        # include_for role match
+        for role_kw in proj.get("include_for", []):
+            if role_kw.lower() in role_low or any(role_kw.lower() in kw for kw in kw_set):
+                score += 3
+                break
+        # tech stack keyword overlap with JD
+        tech_str = proj.get("tech", "").lower()
+        for kw in kw_set:
+            if kw in tech_str:
+                score += 1
+        return score
+
+    ranked = sorted(PROJECTS, key=_relevance, reverse=True)
+    selected = ranked[:max_projects]
+
+    # Always include at least 2 projects
+    if len(selected) < 2 and len(PROJECTS) >= 2:
+        selected = PROJECTS[:2]
+
+    add_section_header(doc, "Projects")
+
+    for proj in selected:
+        name     = proj.get("name", "")
+        tech     = proj.get("tech", "")
+        github   = proj.get("github", "")
+        bullets  = proj.get("bullets", [])
+        # Show max 3 bullets per project (resume space)
+        show_bullets = bullets[:3]
+
+        # Project title line: Name | Tech Stack
+        p_title = doc.add_paragraph()
+        _para_space(p_title, before_pt=5, after_pt=0)
+        _set_font(p_title.add_run(name), 10.5, bold=True, color=COLOR_BLACK)
+        if tech:
+            _set_font(p_title.add_run(f"  |  {tech}"), 9.5, italic=False, color=COLOR_MID)
+
+        # GitHub link on its own line (compact)
+        if github:
+            p_gh = doc.add_paragraph()
+            _para_space(p_gh, before_pt=0, after_pt=1)
+            _add_hyperlink(p_gh, github, github.replace("https://", ""), 9)
+
+        # Bullet points
+        for bullet in show_bullets:
+            p_b = doc.add_paragraph(style="List Bullet")
+            _para_space(p_b, before_pt=0, after_pt=1)
+            _set_font(p_b.add_run(bullet), 10, color=COLOR_DARK)
+
+
 def add_skills(doc, jd_keywords: list, injectable_kws: list):
     add_section_header(doc, "Technical Skills")
 
@@ -577,40 +743,94 @@ def add_skills(doc, jd_keywords: list, injectable_kws: list):
 
 def add_ats_gap_fill(doc, missing_keywords: list):
     """
-    Emergency ATS gap-fill section: adds ALL still-missing JD keywords
-    in a natural 'Key Technical Areas' section so the resume hits 98%+.
-    Only adds keywords that are genuinely in Raghav's profile/expertise.
+    Emergency ATS gap-fill: adds remaining missing TECHNICAL keywords to resume.
+    Only real tech tools/platforms — never business words or JD boilerplate.
     """
     if not missing_keywords:
         return
 
+    # Whitelist: only terms that are real technical tools/platforms/languages.
+    # If a word isn't in at least one of these sets, it does NOT go in the resume.
+    TECH_WHITELIST = {
+        # Languages
+        "python", "sql", "r", "java", "scala", "golang", "go", "rust",
+        "javascript", "typescript", "bash", "shell", "c++", "c#",
+        # Data Engineering
+        "spark", "pyspark", "kafka", "airflow", "hadoop", "hive", "flink",
+        "dbt", "etl", "elt", "pipeline", "data warehouse", "data lake",
+        "lakehouse", "delta lake", "snowflake", "databricks", "redshift",
+        "bigquery", "data mart", "data mesh", "streaming", "batch",
+        # Cloud
+        "aws", "azure", "gcp", "google cloud", "s3", "ec2", "lambda",
+        "azure data factory", "adf", "adls", "synapse", "cosmos db",
+        "redshift", "bigquery", "emr", "glue", "step functions",
+        # Databases
+        "postgresql", "mysql", "sqlite", "mongodb", "cassandra", "redis",
+        "oracle", "sql server", "t-sql", "pl/sql", "dynamodb", "neo4j",
+        # BI / Analytics
+        "power bi", "tableau", "looker", "qlik", "metabase", "superset",
+        "dax", "power query", "excel", "google analytics", "ga4",
+        # ML / AI
+        "scikit-learn", "tensorflow", "pytorch", "keras", "mlflow",
+        "machine learning", "deep learning", "nlp", "llm", "xgboost",
+        "lightgbm", "computer vision", "transformers", "hugging face",
+        # DevOps
+        "docker", "kubernetes", "k8s", "terraform", "ansible", "jenkins",
+        "github actions", "ci/cd", "git", "github", "gitlab",
+        # Misc tech
+        "pandas", "numpy", "scipy", "matplotlib", "seaborn", "plotly",
+        "fastapi", "flask", "django", "rest api", "graphql",
+        "streamlit", "jupyter", "spark sql", "hbase", "impala",
+        "nifi", "talend", "informatica", "ssis", "mulesoft",
+    }
+
+    def _is_real_tech(kw: str) -> bool:
+        """Returns True only if keyword looks like a real technical term."""
+        kw_l = kw.lower().strip()
+        # Direct whitelist match
+        if kw_l in TECH_WHITELIST:
+            return True
+        # Partial match: keyword contains a whitelisted term
+        for tech in TECH_WHITELIST:
+            if tech in kw_l and len(tech) > 3:
+                return True
+        return False
+
+    # Filter to real tech only
+    real_tech_keywords = [kw for kw in missing_keywords if _is_real_tech(kw)]
+
+    if not real_tech_keywords:
+        return  # Nothing real to add — don't print an empty section
+
     add_section_header(doc, "Key Technical Areas")
 
-    # Group by type for natural formatting
+    cloud_terms = {"aws", "gcp", "google cloud", "azure", "databricks", "terraform",
+                   "docker", "kubernetes", "ci/cd", "redshift", "bigquery", "s3", "ec2",
+                   "lambda", "emr", "glue", "synapse", "cosmos", "adf", "adls"}
+    de_terms    = {"airflow", "dbt", "kafka", "spark", "hadoop", "hive", "flink",
+                   "data lake", "delta lake", "lakehouse", "snowflake", "batch",
+                   "streaming", "real-time", "etl", "elt", "pipeline", "data warehouse",
+                   "data mart", "nifi", "talend", "informatica", "ssis", "mulesoft"}
+    analytics_terms = {"power bi", "tableau", "looker", "metabase", "superset", "qlik",
+                       "machine learning", "nlp", "llm", "tensorflow", "pytorch", "keras",
+                       "scikit-learn", "pandas", "ga4", "google analytics", "xgboost",
+                       "computer vision", "matplotlib", "seaborn", "plotly", "streamlit"}
+
     groups = {
         "Cloud & Infrastructure": [],
         "Data Engineering":       [],
-        "Analytics & Reporting":  [],
+        "Analytics & ML":         [],
         "Other Technologies":     [],
     }
 
-    cloud_terms = {"aws", "gcp", "google cloud", "azure", "databricks", "terraform",
-                   "docker", "kubernetes", "ci/cd", "redshift", "bigquery", "s3", "ec2"}
-    de_terms    = {"airflow", "dbt", "kafka", "spark", "hadoop", "hive", "pig", "flink",
-                   "data lake", "delta lake", "lakehouse", "snowflake", "batch", "streaming",
-                   "real-time", "etl", "elt", "pipeline", "data warehouse"}
-    analytics_terms = {"power bi", "tableau", "looker", "metabase", "superset", "qlik",
-                       "machine learning", "ml", "mlops", "sklearn", "tensorflow", "pandas",
-                       "matplotlib", "ga4", "google analytics"}
-
-    for kw in missing_keywords:
+    for kw in real_tech_keywords:
         kw_lower = kw.lower()
         if any(t in kw_lower for t in cloud_terms):
             groups["Cloud & Infrastructure"].append(kw.title())
         elif any(t in kw_lower for t in de_terms):
             groups["Data Engineering"].append(kw.title())
         elif any(t in kw_lower for t in analytics_terms):
-            groups["Analytics & Reporting"].append(kw.title())
+            groups["Analytics & ML"].append(kw.title())
         else:
             groups["Other Technologies"].append(kw.title())
 
@@ -640,13 +860,19 @@ def _claude_rewrite_summary(job_title: str, company: str, jd_text: str, profile_
         prompt = (
             f"Write a 3-sentence professional summary for a resume applying to: '{job_title}' at '{company}'.\n\n"
             f"Job description excerpt:\n{jd_text[:1200]}\n\n"
-            f"Candidate background:\n{profile_summary}\n\n"
+            f"Candidate facts (use these, do not invent):\n"
+            f"- M.S. Data Science and Analytics, Florida Atlantic University, May 2025\n"
+            f"- 3+ years hands-on: Python (4 yrs), SQL (4 yrs), data engineering (3 yrs)\n"
+            f"- Built production ETL/ELT pipelines, cloud data warehouses, real-time streaming\n"
+            f"- Deployed on Azure (ADF, ADLS, Databricks), AWS, GCP\n\n"
             f"Rules:\n"
-            f"- 3 sentences only, no bullet points\n"
-            f"- Start with a strong action-oriented opening (e.g. 'Results-driven...' or 'Data professional...')\n"
-            f"- Naturally weave in the most important JD keywords\n"
-            f"- End with: 'M.S. Data Science & Analytics (Florida Atlantic University, 2025). Available immediately on F-1 OPT/STEM OPT — no sponsorship required.'\n"
-            f"- Return ONLY the summary text, nothing else"
+            f"- 3 sentences only. No bullet points. No dashes as separators.\n"
+            f"- Sentence 1: Bold value statement — what this candidate DELIVERS, not what they 'are'. No 'Results-driven', no 'passionate'.\n"
+            f"- Sentence 2: 2-3 specific technical achievements tied to the JD keywords.\n"
+            f"- Sentence 3: Forward-looking statement about what they bring to THIS role.\n"
+            f"- NO mention of visa, OPT, sponsorship, F-1, or immigration status.\n"
+            f"- NO clichés. Max 80 words total.\n"
+            f"- Return ONLY the 3 sentences, nothing else."
         )
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -750,6 +976,13 @@ def build_resume(
 
     # Use Claude summary if available, else template
     if ai_summary:
+        # Strip markdown formatting — python-docx does not render ** or * syntax
+        # and they appear as literal asterisks on the printed resume.
+        ai_summary = re.sub(r'\*\*(.+?)\*\*', r'\1', ai_summary)   # **bold** → bold
+        ai_summary = re.sub(r'\*(.+?)\*',     r'\1', ai_summary)   # *italic* → italic
+        ai_summary = re.sub(r'#{1,6}\s*',     '',    ai_summary)   # ## headings → nothing
+        ai_summary = ai_summary.strip()
+
         add_section_header(doc, "Professional Summary")
         p = doc.add_paragraph()
         _para_space(p, before_pt=2, after_pt=2)
@@ -760,6 +993,7 @@ def build_resume(
 
     add_experience(doc, jd_keywords, injectable_kws, ai_bullets=ai_bullets)
     add_education(doc)
+    add_projects(doc, jd_keywords, job_title=job_title, max_projects=3)
     add_skills(doc, jd_keywords, injectable_kws)
 
     # ── PASS 1: Verify actual coverage ───────────────────────────────────────
