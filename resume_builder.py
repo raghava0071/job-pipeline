@@ -998,9 +998,15 @@ def build_resume(
 
     # ── PASS 1: Verify actual coverage ───────────────────────────────────────
     doc_text = extract_docx_text(doc)
-    pass1_score, _, missing_after_pass1 = compute_actual_coverage(jd_keywords, doc_text)
 
-    print(f"  │  Pass 1 coverage: {pass1_score:.1f}%  ({len(missing_after_pass1)} keywords still missing)")
+    # If no JD keywords, coverage check is meaningless — keep the original score
+    if not jd_keywords:
+        pass1_score = initial_score
+        missing_after_pass1 = []
+        print(f"  │  Pass 1 coverage: N/A  (no JD keywords — keeping original score {initial_score:.0f}%)")
+    else:
+        pass1_score, _, missing_after_pass1 = compute_actual_coverage(jd_keywords, doc_text)
+        print(f"  │  Pass 1 coverage: {pass1_score:.1f}%  ({len(missing_after_pass1)} keywords still missing)")
 
     # ── PASS 2: Gap-fill any still-missing keywords ───────────────────────────
     actual_optimized = pass1_score
@@ -1026,21 +1032,10 @@ def build_resume(
 
     doc.save(output_path)
 
-    # ── PDF copy (for forms that only accept PDF) ──────────────────────────────
-    pdf_path = None
-    try:
-        from docx2pdf import convert as _docx2pdf
-        pdf_out = output_path.replace(".docx", ".pdf")
-        _docx2pdf(output_path, pdf_out)
-        pdf_path = pdf_out
-    except Exception:
-        pass  # docx2pdf not installed or macOS Word not available — skip silently
-
     delta = actual_optimized - initial_score
     flag  = "🟢" if actual_optimized >= 90 else ("🟡" if actual_optimized >= 75 else "🔴")
     print(f"  │  ACTUAL RESULT:  {initial_score:.0f}%  →  {actual_optimized:.1f}%  (+{delta:.0f}%)  {flag}")
-    suffix = "  📄+PDF" if pdf_path else ""
-    print(f"  └─ Saved → {os.path.basename(output_path)}{suffix}")
+    print(f"  └─ Saved → {os.path.basename(output_path)}")
 
     return output_path, initial_score, actual_optimized
 

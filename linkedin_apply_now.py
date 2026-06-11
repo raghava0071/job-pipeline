@@ -272,7 +272,7 @@ def fill_and_submit_form(page, resume_path, job_title="", company=""):
 Candidate: Raghavendra Karanam
 Email: {p.get('email','your_email@gmail.com')}
 Phone: {p.get('phone','7038529618')}
-Location: Boca Raton, FL 33431
+Location: Delray Beach, FL 33484
 LinkedIn: {p.get('linkedin_url','https://www.linkedin.com/in/raghavendra-karanam')}
 GitHub: {p.get('github_url','https://github.com/yourusername')}
 Portfolio: {p.get('portfolio_url','https://www.linkedin.com/in/raghavendra-karanam')}
@@ -660,7 +660,7 @@ APPLYING FOR: {job_title} at {company}
 WHAT WAS FILLED DURING THE APPLICATION:
 {_json.dumps(filled_log, indent=2)}
 
-RESUME UPLOADED: {'✅ YES — ' + str(resume_path).split('/')[-1] if resume_uploaded else '❌ NO — resume may NOT have uploaded'}
+RESUME UPLOADED: {'✅ YES — ' + str(resume_path).split('/')[-1] if resume_uploaded else '⚠ Not confirmed yet (LinkedIn may have auto-attached it)'}
 
 REVIEW PAGE TEXT (what LinkedIn shows before Submit):
 {review_text[:2000]}
@@ -668,7 +668,8 @@ REVIEW PAGE TEXT (what LinkedIn shows before Submit):
 IMPORTANT RULES FOR YOUR REVIEW:
 - The email shown is the LinkedIn account email — it CANNOT be changed. Do NOT flag email as an issue.
 - The phone shown is from LinkedIn's saved profile — acceptable, do NOT flag.
-- Only flag REAL blocking issues: resume not uploaded, completely blank required fields, or obvious wrong answers.
+- Only flag REAL blocking issues: completely blank required fields, or obviously wrong answers (e.g. wrong name, wrong email domain).
+- Resume upload status is uncertain — do NOT block submission based on resume upload status alone.
 - A resume with a slightly different job title in the filename is fine.
 
 Check these things and respond in this exact format:
@@ -780,15 +781,18 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
                         print(f"          📎 Resume uploaded via direct input ✅")
                         time.sleep(1.5)
                     except Exception:
-                        print(f"          ⚠  No upload trigger — LinkedIn using profile resume")
-                        uploaded = True   # stop retrying
+                        # No file input on this step — resume section may appear later
+                        # Do NOT mark as uploaded — keep trying on subsequent steps
+                        print(f"          ⚠  No upload trigger on this step — will retry later")
+                        uploaded = False
 
                 if uploaded:
                     resume_uploaded = True
+                # If not uploaded, resume_uploaded stays False so next step retries
 
             except Exception as e:
                 print(f"          ⚠  Resume upload error: {e}")
-                resume_uploaded = True
+                # Don't mark as uploaded on error — retry next step
         # ── Detect which nav buttons are visible (to know where we are) ───
         nav_buttons_visible = page.evaluate("""
             () => {
@@ -977,6 +981,16 @@ def main():
     total_processed = 0
 
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Clear stale SingletonLock so scheduler can start even if prior run crashed
+    for _lk in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        _lp = SESSION_DIR / _lk
+        if _lp.exists():
+            try:
+                _lp.unlink()
+                print(f"  🔓 Cleared stale {_lk}")
+            except Exception:
+                pass
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch_persistent_context(
