@@ -89,13 +89,14 @@ def is_relevant_domain(title):
 
 def build_indeed_url(kw, start=0):
     import urllib.parse
-    # fromage=7 = last 7 days, iafilter=1 = Indeed Apply only
+    # fromage=14 = last 14 days (was 7 — pool was exhausted after 509 applications)
+    # iafilter=1 = Indeed Apply only (keeps external-redirect jobs out)
     return "https://www.indeed.com/jobs?" + urllib.parse.urlencode({
         "q": kw,
         "l": "United States",
         "sort": "date",
-        "fromage": "7",
-        "iafilter": "1",   # Indeed Apply only
+        "fromage": "14",
+        "iafilter": "1",
         "start": start,
     })
 
@@ -108,14 +109,26 @@ def load_log():
 def save_log(log):
     LOG_FILE.write_text(json.dumps(log, indent=2))
 
+def _extract_jk(url: str) -> str:
+    """Extract Indeed job key (jk=) from URL — the true unique job identifier."""
+    m = re.search(r'[?&]jk=([a-zA-Z0-9]+)', url or "")
+    return m.group(1) if m else ""
+
 def already_applied(url, log, title="", company=""):
-    """Dedup by URL (normalized) AND by company+title pair."""
-    key = re.sub(r'\?.*', '', url).rstrip("/")
+    """Dedup by Indeed job key (jk param) OR by company+title pair.
+    Previously used full URL strip which caused false-positive dedup because
+    https://www.indeed.com/viewjob?jk=A and ?jk=B both stripped to the same base URL.
+    Now we extract just the jk= parameter as the unique job identifier.
+    """
+    jk = _extract_jk(url)
     for e in log:
         if e.get("status") not in ("Applied", "Already Applied"):
             continue
-        if re.sub(r'\?.*', '', e.get("url","")).rstrip("/") == key:
+        e_jk = _extract_jk(e.get("url", ""))
+        # Match by job key if both have one
+        if jk and e_jk and jk == e_jk:
             return True
+        # Match by company+title (catches jobs logged without jk in URL)
         if title and company:
             if (e.get("company","").lower().strip() == company.lower().strip()
                     and e.get("title","").lower().strip() == title.lower().strip()):
@@ -269,69 +282,79 @@ def extract_job_panel(page):
     """) or {}
 
 def click_apply_button(page):
-    """Click the Indeed Apply button — tries every known selector + JS fallback."""
-    # Playwright native selectors (most reliable)
-    native_selectors = [
-        "button[data-testid='indeedApplyButton']",
-        "a[data-testid='indeedApplyButton']",
-        "[class*='indeed-apply-button']",
-        "[class*='IndeedApplyButton']",
-        "button:has-text('Apply now')",
-        "button:has-text('Apply on Indeed')",
-        "a:has-text('Apply now')",
-        "span:has-text('Apply now')",
-    ]
-    for sel in native_selectors:
-        try:
-            btn = page.locator(sel).first
-            if btn.count() > 0 and btn.is_visible(timeout=1000):
-                btn.scroll_into_view_if_needed()
-                btn.click(timeout=4000)
-                time.sleep(2)
-                return True
-        except:
-            pass
+    """Click the Indeed Apply button — tries every known selector + JS fallback.
+    Retries up to 3 times with 2s waits to handle slow page renders.
+    """
+    for attempt in range(3):
+        # Playwright native selectors (most reliable)
+        native_selectors = [
+            "button[data-testid='indeedApplyButton']",
+            "a[data-testid='indeedApplyButton']",
+            "[class*='indeed-apply-button']",
+            "[class*='IndeedApplyButton']",
+            "button:has-text('Apply now')",
+            "button:has-text('Apply on Indeed')",
+            "a:has-text('Apply now')",
+            "span:has-text('Apply now')",
+        ]
+        for sel in native_selectors:
+            try:
+                btn = page.locator(sel).first
+                if btn.count() > 0 and btn.is_visible(timeout=1000):
+                    btn.scroll_into_view_if_needed()
+                    btn.click(timeout=4000)
+                    time.sleep(2)
+                    return True
+            except:
+                pass
 
-    # JS exhaustive search — checks every clickable element by text
-    clicked = page.evaluate("""
-        () => {
-            const APPLY_TEXTS = ['apply now', 'apply on indeed', 'indeed apply', 'apply'];
-            // data-testid patterns
-            const byTestId = document.querySelector(
-                '[data-testid*="indeedApply"], [data-testid*="apply-button"], [id*="indeedApply"]'
-            );
-            if (byTestId && !byTestId.disabled) {
-                byTestId.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
-                return true;
-            }
-            // class patterns
-            const byClass = document.querySelector(
-                '[class*="indeed-apply"], [class*="IndeedApply"], [class*="applyButton"]'
-            );
-            if (byClass && !byClass.disabled) {
-                byClass.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
-                return true;
-            }
-            // Text search over ALL clickable elements
-            const all = Array.from(document.querySelectorAll(
-                'button, a, [role="button"], span[onclick], div[onclick]'
-            ));
-            for (const el of all) {
-                if (!el.offsetParent) continue;
-                const t = (el.innerText || el.textContent || '').trim().toLowerCase();
-                if (APPLY_TEXTS.some(kw => t === kw || t.startsWith(kw))) {
-                    // Make sure it's not an external link
-                    const href = el.getAttribute('href') || '';
-                    if (href && href.startsWith('http') && !href.includes('indeed')) continue;
-                    el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
+        # JS exhaustive search — checks every clickable element by text
+        clicked = page.evaluate("""
+            () => {
+                const APPLY_TEXTS = ['apply now', 'apply on indeed', 'indeed apply', 'apply'];
+                // data-testid patterns
+                const byTestId = document.querySelector(
+                    '[data-testid*="indeedApply"], [data-testid*="apply-button"], [id*="indeedApply"]'
+                );
+                if (byTestId && !byTestId.disabled) {
+                    byTestId.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
                     return true;
                 }
+                // class patterns
+                const byClass = document.querySelector(
+                    '[class*="indeed-apply"], [class*="IndeedApply"], [class*="applyButton"]'
+                );
+                if (byClass && !byClass.disabled) {
+                    byClass.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
+                    return true;
+                }
+                // Text search over ALL clickable elements
+                const all = Array.from(document.querySelectorAll(
+                    'button, a, [role="button"], span[onclick], div[onclick]'
+                ));
+                for (const el of all) {
+                    if (!el.offsetParent) continue;
+                    const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    if (APPLY_TEXTS.some(kw => t === kw || t.startsWith(kw))) {
+                        // Make sure it's not an external link
+                        const href = el.getAttribute('href') || '';
+                        if (href && href.startsWith('http') && !href.includes('indeed')) continue;
+                        el.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
+                        return true;
+                    }
+                }
+                return false;
             }
-            return false;
-        }
-    """)
-    time.sleep(2)
-    return bool(clicked)
+        """)
+        if clicked:
+            time.sleep(2)
+            return True
+
+        if attempt < 2:
+            print(f"          ⏳ Apply button not found yet — waiting 2s (attempt {attempt+1}/3)")
+            time.sleep(2)
+
+    return False
 
 def _extract_posted_salary(jd_text: str) -> str:
     """Extract posted salary range from job description. Returns empty string if none found."""
@@ -598,6 +621,19 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename="", 
         fields = required_fields  # only required on non-question pages
 
     # ── Step 2: Cache lookup → uncached → Claude ──────────────────────────────
+    # Fields that must be generated fresh by Claude for every job — never cached.
+    # These are job-specific narratives that make no sense recycled from another job.
+    _NEVER_CACHE_KEYS = {
+        "reason for applying", "why do you want to work here",
+        "why are you interested in this role", "why are you applying",
+        "why do you want this job", "why this company",
+        "tell us why you want to work", "what interests you about",
+        "what attracts you to", "motivation for applying",
+    }
+    def _is_never_cache(label: str) -> bool:
+        ll = label.lower().strip()
+        return any(k in ll for k in _NEVER_CACHE_KEYS)
+
     answers = {}       # label → answer string
     uncached = []
 
@@ -612,6 +648,12 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename="", 
                 print(f"             📝 COVER LETTER field detected: '{lbl}' — inserting cover letter")
                 answers[lbl] = cover_letter_text
                 continue
+
+        # 0b. Job-specific fields — always go to Claude, never use cached answer
+        if _is_never_cache(lbl):
+            print(f"             🔄 JOB-SPECIFIC (always fresh): '{lbl}'")
+            uncached.append(f)
+            continue
 
         # 1. qa_answers.py — master Q&A (manually curated, highest priority)
         qa_hit = _qa.get_answer(lbl) if (_qa and lbl) else None
@@ -839,7 +881,11 @@ Rules:
 
             function fireEvents(el) {
                 ['input','change','blur'].forEach(function(ev) {
-                    el.dispatchEvent(new Event(ev, {bubbles:true}));
+                    try {
+                        el.dispatchEvent(new Event(ev, {bubbles:true, cancelable:true}));
+                    } catch(e) {
+                        try { el.dispatchEvent(new Event(ev)); } catch(e2) {}
+                    }
                 });
             }
 
@@ -866,10 +912,14 @@ Rules:
                             optVal.includes(ansL) || ansL.includes(optVal) ||
                             (optLbl && (optLbl.includes(ansL) || ansL.includes(optLbl)))) {
                             if (!opt.checked) {
-                                opt.click();
+                                try { opt.click(); } catch(ec) {}
                                 // Fire React synthetic events so state updates
                                 ['click','change','input'].forEach(function(ev) {
-                                    opt.dispatchEvent(new Event(ev, {bubbles:true}));
+                                    try {
+                                        opt.dispatchEvent(new Event(ev, {bubbles:true, cancelable:true}));
+                                    } catch(e) {
+                                        try { opt.dispatchEvent(new Event(ev)); } catch(e2) {}
+                                    }
                                 });
                             }
                             fireEvents(opt);
@@ -1645,7 +1695,8 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
     """
     title       = job.get("title", "")
     company     = job.get("company", "")
-    jd_for_fill = job.get("description", "") or job.get("jd_text", "")
+    jd_for_fill = ""   # safe default — overwritten below
+    jd_for_fill = job.get("description", "") or job.get("jd_text", "") or ""
 
     # ── Click the Apply button ─────────────────────────────────────────────────
     print(f"          👆 Clicking Indeed Apply button...")
@@ -1808,12 +1859,13 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                     print(f"          ❌ Stuck on same URL for {same_url_count} steps — giving up on this job")
                     # ── Save stuck questions for manual review ────────────────
                     try:
+                        import json as _json_stuck
                         _stuck_file = cfg.BASE_DIR / "data" / "stuck_questions.json"
                         _stuck_file.parent.mkdir(parents=True, exist_ok=True)
                         _existing_stuck = []
                         if _stuck_file.exists():
                             try:
-                                _existing_stuck = _json.loads(_stuck_file.read_text())
+                                _existing_stuck = _json_stuck.loads(_stuck_file.read_text())
                             except Exception:
                                 _existing_stuck = []
                         # Scrape current page fields as the stuck questions
@@ -1835,7 +1887,7 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                             "status": "stuck — needs manual review"
                         }
                         _existing_stuck.append(_stuck_entry)
-                        _stuck_file.write_text(_json.dumps(_existing_stuck, indent=2))
+                        _stuck_file.write_text(_json_stuck.dumps(_existing_stuck, indent=2))
                         print(f"          📝 Stuck questions saved → data/stuck_questions.json")
                         print(f"          💡 Open that file, add answers to qa_answers.py to fix this next time")
                     except Exception as _se:
@@ -1916,9 +1968,33 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                     print(f"          ⚠  No submit button found")
                     return False
 
-                MAX_SUBMIT_ATTEMPTS = 5
+                MAX_SUBMIT_ATTEMPTS = 8
+                _submit_nav_clicks = 0  # track how many non-submit nav clicks we've made
                 for attempt in range(1, MAX_SUBMIT_ATTEMPTS + 1):
                     print(f"          🚀 LIVE: Submit attempt {attempt}/{MAX_SUBMIT_ATTEMPTS}...")
+
+                    # ── Check if form drifted to a non-review page ────────────
+                    # After "apply anyway" the form may show extra pages (profile,
+                    # confirmation of intent) before the actual submit button appears.
+                    # Navigate through "continue" / "save and continue" buttons
+                    # but cap at 4 such navigations to avoid infinite loop.
+                    _nav_btns, _nav_frame = _get_nav_buttons(apply_page)
+                    _first_btn_text = (_nav_btns[0].get("text","") if _nav_btns else "").lower()
+                    _SUBMIT_WORDS = {"submit", "apply now", "send application"}
+                    _is_submit_btn = any(w in _first_btn_text for w in _SUBMIT_WORDS)
+
+                    if _nav_btns and not _is_submit_btn and _submit_nav_clicks < 6:
+                        # Still on a form navigation step — click through it
+                        _lbl = _click_nav(_nav_frame, _nav_btns[0].get("text", "continue"))
+                        print(f"          ↪  Nav-through (submit pending): '{_lbl}'")
+                        _submit_nav_clicks += 1
+                        time.sleep(4)
+                        # Check if we arrived at confirmation after nav-through
+                        if _is_confirmed(apply_page):
+                            print(f"          🎉 Application submitted and confirmed!")
+                            submitted = True
+                            break
+                        continue  # try next attempt
 
                     _click_submit_btn(apply_page)
                     time.sleep(3)  # wait for CAPTCHA or confirmation to appear
@@ -2091,7 +2167,26 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                             time.sleep(1)
 
                 if same_btn_count >= 8:
-                    # Stuck for 8 consecutive identical buttons — try force-submit once
+                    # Stuck for 8 consecutive identical buttons — dump visible fields for diagnosis
+                    try:
+                        _stuck_fields = _safe_eval(apply_page, """
+                            () => {
+                                const out = [];
+                                document.querySelectorAll('label,[aria-label],legend,[placeholder]').forEach(el => {
+                                    if (!el.offsetParent) return;
+                                    const t = (el.innerText||el.getAttribute('aria-label')||el.getAttribute('placeholder')||'').trim();
+                                    if (t && t.length > 2 && t.length < 200) out.push(t);
+                                });
+                                return [...new Set(out)].slice(0,15);
+                            }
+                        """, [])
+                        if _stuck_fields:
+                            print(f"          🔍 Stuck — visible fields at this step:")
+                            for _sf in _stuck_fields:
+                                print(f"             • {_sf}")
+                    except Exception:
+                        pass
+                    # Try force-submit once
                     print(f"          ⚠  Stuck on same button 8x — attempting force-submit")
                     _click_nav(nav_frame, "submit")
                     time.sleep(3)
@@ -2263,47 +2358,56 @@ def main():
                 break
 
             print(f"\n🔍  Query: {query}")
-            url = build_indeed_url(query)
 
-            # Retry up to 3 times on network timeout — single hiccup kills entire run otherwise
-            loaded = False
-            for _attempt in range(3):
-                try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                    loaded = True
+            # Fetch page 1 + page 2 (start=0 and start=15) to double the card pool.
+            # Pool was exhausted because we only scraped the first page per query.
+            job_cards = []
+            for _page_start in [0, 15]:
+                if applied_count >= MAX_APPLY:
                     break
-                except Exception as _nav_err:
-                    print(f"  ⚠  Search page load failed (attempt {_attempt+1}/3): {str(_nav_err)[:80]}")
-                    if _attempt < 2:
-                        time.sleep(5)   # brief wait before retry
-            if not loaded:
-                print(f"  ❌ Could not load search after 3 attempts — skipping query '{query}'")
-                continue
-            time.sleep(3)
+                url = build_indeed_url(query, start=_page_start)
 
-            # Get all job cards on the page
-            job_cards = page.evaluate("""
-                () => {
-                    const cards = Array.from(document.querySelectorAll(
-                        '[data-jk], .job_seen_beacon, [class*="jobCard"], .resultContent'
-                    ));
-                    return cards.map(c => {
-                        const jk = c.getAttribute('data-jk') || c.id || '';
-                        const titleEl = c.querySelector('h2 a, [data-testid="job-title"], .jobTitle a');
-                        const coEl    = c.querySelector('[data-testid="company-name"], .companyName');
-                        const locEl   = c.querySelector('[data-testid="text-location"], .companyLocation');
-                        return {
-                            jk:      jk,
-                            title:   titleEl ? titleEl.innerText.trim() : '',
-                            company: coEl    ? coEl.innerText.trim()    : '',
-                            location:locEl   ? locEl.innerText.trim()   : '',
-                            href:    titleEl ? (titleEl.getAttribute('href') || '') : '',
-                        };
-                    }).filter(c => c.title.length > 2);
-                }
-            """) or []
+                # Retry up to 3 times on network timeout
+                loaded = False
+                for _attempt in range(3):
+                    try:
+                        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        loaded = True
+                        break
+                    except Exception as _nav_err:
+                        print(f"  ⚠  Search load failed (p{_page_start//15+1}, attempt {_attempt+1}/3): {str(_nav_err)[:60]}")
+                        if _attempt < 2:
+                            time.sleep(5)
+                if not loaded:
+                    print(f"  ❌ Could not load page {_page_start//15+1} — skipping")
+                    continue
+                time.sleep(2)
 
-            print(f"  Found {len(job_cards)} cards")
+                _page_cards = page.evaluate("""
+                    () => {
+                        const cards = Array.from(document.querySelectorAll(
+                            '[data-jk], .job_seen_beacon, [class*="jobCard"], .resultContent'
+                        ));
+                        return cards.map(c => {
+                            const jk = c.getAttribute('data-jk') || c.id || '';
+                            const titleEl = c.querySelector('h2 a, [data-testid="job-title"], .jobTitle a');
+                            const coEl    = c.querySelector('[data-testid="company-name"], .companyName');
+                            const locEl   = c.querySelector('[data-testid="text-location"], .companyLocation');
+                            return {
+                                jk:      jk,
+                                title:   titleEl ? titleEl.innerText.trim() : '',
+                                company: coEl    ? coEl.innerText.trim()    : '',
+                                location:locEl   ? locEl.innerText.trim()   : '',
+                                href:    titleEl ? (titleEl.getAttribute('href') || '') : '',
+                            };
+                        }).filter(c => c.title.length > 2);
+                    }
+                """) or []
+                job_cards.extend(_page_cards)
+                if len(_page_cards) < 10:
+                    break   # fewer than 10 results on this page = no point fetching next
+
+            print(f"  Found {len(job_cards)} cards (2 pages)")
 
             for card in job_cards:
                 if applied_count >= MAX_APPLY:
