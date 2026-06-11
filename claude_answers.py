@@ -17,6 +17,7 @@ Last auto-updated: by workday_apply_now.py during form filling.
 
 import re as _re
 from pathlib import Path as _Path
+from datetime import datetime as _datetime, timedelta as _timedelta
 
 # ── Auto-saved Claude answers ──────────────────────────────────────────────────
 # Format: "question label (lowercase)" : "answer"
@@ -201,7 +202,7 @@ CLAUDE_QA: dict[str, str] = {
     "how many years of sql, python, javascript experience do you have? *": "4",
     "how many years of data analytics, root cause, statistical concepts experience do you have? *": "3",
     "what is your annual salary target?": "72000",
-    "how soon, post offer, could you be in tn to start work on site?": "2 weeks",
+    "how soon, post offer, could you be in tn to start work on site?": (_datetime.now() + _timedelta(days=14)).strftime("%m/%d/%Y"),
     "please describe any relevant experience in design engineering, test operations, plant operations in large industrial plants, utilities, process plants, or engineering / construction firms?": "Raghavendra Karanam has 3+ years of experience supporting data engineering and analytics initiatives, including pipeline design, ETL development, and delivering actionable insights using Python, SQL, and cloud platforms such as AWS, Azure, and GCP. His background in building scalable data solutions and working within structured project environments translates well to supporting DoD digital enterprise and large-scale operational data programs.",
     "describe your experience supporting large dod projects/programs?": "I have 3+ years of experience in data engineering and analytics roles where I designed and maintained scalable ETL pipelines, cloud-based data platforms on AWS, Azure, and GCP, and delivered data-driven insights that supported enterprise-level decision-making in complex, multi-stakeholder environments similar to large DoD programs. While transitioning into direct DoD project support, I have built strong foundations in data architecture, pipeline orchestration using Airflow and Kafka, and secure data handling practices that align with the rigorous standards required for Department of Defense digital enterprise IT initiatives.",
     # "reason for applying" removed — this is job-specific and must be generated
@@ -230,6 +231,15 @@ CLAUDE_QA: dict[str, str] = {
     "1-2 years": "3 - 4 years",
     "3 - 4 years": "3 - 4 years",
     "over 5 years": "3 - 4 years",
+    # SMS / contact consent — always Yes
+    "i consent to receive informational recruiting related text messages": "Yes",
+    "consent to receive text messages": "Yes",
+    "consent to receive sms": "Yes",
+    "opt in to receive text": "Yes",
+    "opt-in to receive text": "Yes",
+    "consent to be contacted via text": "Yes",
+    "consent to be contacted by text": "Yes",
+    "by selecting yes, i consent": "Yes",
 }
 
 

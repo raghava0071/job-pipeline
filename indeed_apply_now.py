@@ -25,7 +25,7 @@
 
 import os, sys, time, json, argparse, re, random
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 PIPELINE_DIR = Path.home() / "job_pipeline"
 sys.path.insert(0, str(PIPELINE_DIR))
@@ -721,7 +721,7 @@ Rules:
 - years of experience questions: answer with a number
 - work authorization: "Yes"
 - {salary_rule}
-- notice period / start date: "2 weeks" or "Immediately"
+- notice period / start date: if the field expects plain text use "2 weeks", if it expects MM/DD/YYYY format use today + 14 days
 - relocation: "No"
 - cover letter / additional info: write 2 sentences about the candidate
 - "can you perform essential functions" or "able to perform the job": always "Yes"
@@ -798,9 +798,9 @@ Rules:
             "expected pay":  _pick_salary(jd_text or "", job_title or ""),
             "desired pay":   _pick_salary(jd_text or "", job_title or ""),
             "desired salary":_pick_salary(jd_text or "", job_title or ""),
-            "start date": "2 weeks",
-            "notice period": "2 weeks",
-            "available": "2 weeks",
+            "start date": (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y"),
+            "notice period": (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y"),
+            "available": (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y"),
             "relocate": "No",
             "relocation": "No",
             "years of experience": "2",
@@ -811,6 +811,16 @@ Rules:
             "race": "Prefer not to say",
             "disability": "I don't wish to answer",
             "veteran": "I am not a protected veteran",
+            "sms": "Yes",
+            "text message": "Yes",
+            "consent to receive": "Yes",
+            "opt in": "Yes",
+            "opt-in": "Yes",
+            "recruiting text": "Yes",
+            "informational text": "Yes",
+            "contact me": "Yes",
+            "reach me": "Yes",
+            "reach you": "Yes",
         }
         for f in uncached:
             lbl = f.get("label", "")
@@ -1609,8 +1619,19 @@ def _upload_resume(page, resume_path, done_flag, cover_letter_path="", cover_don
             if not done_flag[0]:
                 fi = fi_all.first
                 print(f"          📎 File input found in frame[{i}] ({frame_url[:50] or 'main'}) — uploading resume...")
-                fi.set_input_files(str(resume_path))
-                time.sleep(1)
+                for _upload_attempt in range(3):
+                    fi.set_input_files(str(resume_path))
+                    time.sleep(2)
+                    # Check for Indeed's "couldn't upload" error and retry
+                    try:
+                        page_txt = page.evaluate("() => document.body.innerText") or ""
+                        if "couldn't upload" in page_txt.lower() or "could not upload" in page_txt.lower():
+                            print(f"          ⚠  Upload rejected by Indeed (attempt {_upload_attempt+1}/3) — retrying in 4s...")
+                            time.sleep(4)
+                            continue
+                    except Exception:
+                        pass
+                    break  # no error detected — upload accepted
                 done_flag[0] = True
                 print(f"          📎 Resume uploaded ✅  ({Path(resume_path).name})")
                 file_inputs_found += 1
@@ -2311,8 +2332,8 @@ def main():
         "Desired Pay":         "70000",
         "Desired Salary":      "70000",
         "Expected Salary":     "70000",
-        "Date Available":      "2 weeks",
-        "Start Date":          "2 weeks",
+        "Date Available":      (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y"),
+        "Start Date":          (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y"),
         "Website, Blog or Portfolio": "https://www.linkedin.com/in/raghavendra-karanam",
     }
     seeded = 0

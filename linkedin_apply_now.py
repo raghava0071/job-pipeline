@@ -20,7 +20,7 @@
 
 import sys, time, json as json, argparse
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 PIPELINE_DIR = Path.home() / "job_pipeline"
 sys.path.insert(0, str(PIPELINE_DIR))
@@ -530,12 +530,17 @@ Rules:
                 "work authorization": "Yes", "authorized to work": "Yes",
                 "legally authorized": "Yes", "sponsorship": "No",
                 "visa": "F-1 STEM OPT", "salary": _pick_salary(locals().get("jd_text",""), locals().get("job_title","")), "compensation": _pick_salary(locals().get("jd_text",""), locals().get("job_title","")),
-                "hourly rate": "40", "start date": "2 weeks", "notice": "2 weeks",
+                "hourly rate": "40",
+                "start date": (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y"),
+                "notice": (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y"),
                 "relocat": "No", "remote": "Yes", "gender": "I don't wish to answer",
                 "ethnicity": "I don't wish to answer", "race": "I don't wish to answer",
                 "veteran": "I am not a protected veteran", "disability": "I don't wish to answer",
                 "years of experience": "2", "background check": "Yes", "drug test": "Yes",
                 "18 or older": "Yes", "us citizen": "No", "green card": "No",
+                "sms": "Yes", "text message": "Yes", "consent to receive": "Yes",
+                "opt in": "Yes", "opt-in": "Yes", "recruiting text": "Yes",
+                "contact me": "Yes", "reach me": "Yes", "reach you": "Yes",
                 "linkedin": "https://www.linkedin.com/in/raghavendra-karanam",
                 "phone": os.environ.get("HOME_PHONE",""), "city": os.environ.get("HOME_CITY",""), "state": os.environ.get("HOME_STATE","FL"), "zip": os.environ.get("HOME_ZIP",""),
             }
