@@ -219,7 +219,7 @@ Rules:
 Return ONLY the rewritten bullets, one per line, each starting with "- ".
 No headers, no explanations."""
 
-    raw   = _ask(prompt, max_tokens=1500)
+    raw   = _ask(prompt, max_tokens=1500, fast=True)   # haiku — 4x cheaper, same structured output quality
     lines = [l.strip().lstrip("- ").strip()
              for l in raw.splitlines()
              if l.strip().startswith("-")]

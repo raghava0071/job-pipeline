@@ -240,6 +240,17 @@ CLAUDE_QA: dict[str, str] = {
     "consent to be contacted via text": "Yes",
     "consent to be contacted by text": "Yes",
     "by selecting yes, i consent": "Yes",
+    "if you need to relocate, please note that relocation assistance is not provided. would that work for you?": "No",
+    "i have read and accept the above acknowledgement": "Yes",
+    "i choose not to self-identify": "I choose not to self-identify",
+    "i don't wish to answer": "I don't wish to answer",
+    "authorizedtowork": "Yes",
+    "i do not wish to answer": "I do not wish to answer",
+    "would you be able to provide the required documents? *": "Yes",
+    "if you're working on a non-immigrant visa, can you provide valid work authorization documents (i-94) *": "Yes",
+    "what is your current work authorization status? *": "F-1 OPT/STEM OPT - Authorized to work without sponsorship",
+    "true": "True",
+    "false": "False",
 }
 
 

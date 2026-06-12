@@ -1027,7 +1027,10 @@ Rules:
     print(f"          ✏️  DOM fill result: {filled_n}/{len(fields)} field(s) written to page")
 
     # ── Playwright fill pass: for number/text inputs that JS evaluate misses ──
-    # React controlled number inputs often ignore el.value= but respond to frame.fill()
+    # React controlled inputs often ignore el.value= but respond to frame.locator().fill()
+    # NOTE: `page` here may be a Frame (not a Page), so page.keyboard is INVALID.
+    # Use frame.locator(sel).fill(ans) — this fires proper Playwright input events
+    # that React's synthetic event system registers correctly.
     pw_filled = 0
     for item in fill_items:
         sel  = item.get("sel", "")
@@ -1037,12 +1040,15 @@ Rules:
             continue
         if typ in ("text", "number", "textarea", "tel", "email"):
             try:
-                el_handle = page.query_selector(sel)
-                if el_handle:
-                    el_handle.click()
-                    el_handle.select_text() if hasattr(el_handle, 'select_text') else None
-                    page.keyboard.press("Control+A")
-                    page.keyboard.type(str(ans), delay=30)
+                loc = page.locator(sel).first
+                if loc.count() > 0:
+                    loc.click(timeout=2000)
+                    loc.fill(str(ans), timeout=3000)
+                    # fire blur so React validators update
+                    try:
+                        loc.evaluate("el => el.dispatchEvent(new Event('blur', {bubbles:true}))")
+                    except Exception:
+                        pass
                     pw_filled += 1
             except Exception:
                 pass

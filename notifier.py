@@ -76,7 +76,8 @@ def notify_applied(title: str, company: str, fit_score: int,
         return False
 
     try:
-        # Score visuals
+        # Score visuals — cast to int so string multiplication works for both int and float scores
+        fit_score = int(fit_score)
         score_bar = "█" * (fit_score // 10) + "░" * (10 - fit_score // 10)
         grade     = "A" if fit_score >= 85 else "B" if fit_score >= 70 else "C" if fit_score >= 65 else "D"
         color     = "#22c55e" if fit_score >= 85 else "#3b82f6" if fit_score >= 70 else "#f59e0b"
@@ -172,7 +173,9 @@ def notify_applied(title: str, company: str, fit_score: int,
         return True
 
     except Exception as e:
-        print(f"          📧 Email skipped: {e}")
+        import traceback
+        print(f"          📧 ❌ Email FAILED: {e}")
+        print(f"          📧    {traceback.format_exc().splitlines()[-1]}")
         return False
 
 
