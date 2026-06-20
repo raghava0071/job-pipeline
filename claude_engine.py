@@ -180,9 +180,12 @@ apply=true if score>={FIT_THRESHOLD}"""
 
 
 def _fallback_score() -> dict:
+    # CRITICAL: when Claude API is unavailable, return SKIP (not apply).
+    # Returning apply=True here would cause blind applications to every job
+    # the pipeline sees, which is exactly how scam/fake jobs get through.
     return {
-        "score": 65, "grade": "C", "apply": True,
-        "reasoning": "Claude unavailable — default score applied.",
+        "score": 0, "grade": "F", "apply": False,
+        "reasoning": "Claude API unavailable — skipping to avoid blind apply.",
         "strengths": [], "missing": [],
     }
 

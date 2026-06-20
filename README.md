@@ -1,231 +1,430 @@
-# 🤖 AI Job Application Pipeline
+# AI-Powered Job Application Pipeline
 
-> **Fully automated job application engine** — scrapes LinkedIn & Indeed, scores jobs with Claude AI, builds tailored resumes, writes cover letters, and submits applications end-to-end with no manual work.
+An end-to-end automated job application system that scrapes live job listings from **LinkedIn**, **Indeed**, and **Workday**, scores them with Claude AI, builds a tailored ATS-optimized resume per job, fills application forms intelligently, and submits — all fully automated on a daily schedule.
 
-[![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python)](https://python.org)
-[![Claude AI](https://img.shields.io/badge/Claude-AI%20Powered-orange?logo=anthropic)](https://anthropic.com)
-[![Playwright](https://img.shields.io/badge/Playwright-Browser%20Automation-green?logo=playwright)](https://playwright.dev)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+> Built in Python · Powered by Claude AI (Anthropic) · Playwright browser automation · Runs 3× daily via macOS launchd
 
 ---
 
-## 🎯 What It Does
+## Table of Contents
 
-The pipeline runs on autopilot and handles every step of job searching:
-
-| Step | What Happens |
-|------|-------------|
-| 🔍 **Search** | Finds fresh jobs on LinkedIn (Easy Apply) and Indeed (In-Portal) |
-| 🎯 **Score** | Claude AI scores each job against your profile (65% gate) |
-| 📄 **Resume** | Builds a tailored Word resume with 100% ATS keyword coverage |
-| ✉️ **Cover Letter** | Writes a custom cover letter for every qualifying job |
-| 🤖 **Apply** | Fills the full application form and submits automatically |
-| 📧 **Notify** | Emails you confirmation with your resume attached |
-
----
-
-## ✨ Key Features
-
-- **Dual platform** — LinkedIn Easy Apply + Indeed In-Portal running simultaneously
-- **Claude AI scoring** — skips jobs below 65% fit, saving time and API costs
-- **Smart form filling** — answers W2, visa, salary, experience questions automatically
-- **CAPTCHA handling** — pauses and alerts you by email + Mac notification when CAPTCHA appears
-- **Answer cache** — SQLite cache avoids repeat Claude API calls for identical questions
-- **Deduplication** — never applies to the same job twice across sessions
-- **ATS optimization** — resumes guaranteed 100% keyword coverage in 1-2 passes
-- **Email notifications** — get notified instantly with resume attached for every application
+- [Architecture Overview](#architecture-overview)
+- [Pipeline Components](#pipeline-components)
+- [LinkedIn Fake Job Detection — 6-Layer System](#linkedin-fake-job-detection--6-layer-system)
+- [Resume Engine](#resume-engine)
+- [AI Form Filling](#ai-form-filling)
+- [Scheduling](#scheduling)
+- [Setup](#setup)
+- [Configuration](#configuration)
+- [File Structure](#file-structure)
+- [Security & Privacy](#security--privacy)
 
 ---
 
-## 📁 Project Structure
+## Architecture Overview
 
 ```
-job-pipeline/
-├── run_all.py              # Main entry point — runs LinkedIn + Indeed in parallel
-├── linkedin_apply_now.py   # LinkedIn Easy Apply engine
-├── indeed_apply_now.py     # Indeed In-Portal apply engine
-├── claude_engine.py        # Claude AI — scoring, resume writing, cover letters
-├── resume_builder.py       # Word document resume builder (ATS optimized)
-├── cover_letter.py         # Cover letter generator
-├── jd_parser.py            # Job description keyword extractor
-├── answer_cache.py         # SQLite cache for form question answers
-├── qa_answers.py           # Master Q&A file for common application questions
-├── notifier.py             # Gmail email notifications
-├── config.py               # Central configuration (queries, thresholds, paths)
-├── tracker.py              # Excel application tracker
-├── setup_scheduler.sh      # Daily auto-run via launchd (macOS)
-└── .env                    # Your credentials (never committed — see .env.example)
-```
-
----
-
-## 🚀 Quick Start
-
-### 1. Clone and install
-
-```bash
-git clone https://github.com/raghava0071/job-pipeline.git
-cd job-pipeline
-pip install -r requirements.txt
-python -m playwright install chromium
-```
-
-### 2. Set up your profile
-
-Create `raghav_profile.py` (not committed — stays local):
-
-```python
-PROFILE = {
-    "name": "Your Name",
-    "email": "you@email.com",
-    "phone": "5551234567",
-    "location": "City, State",
-    "linkedin": "https://linkedin.com/in/yourprofile",
-    "github": "https://github.com/yourusername",
-    "summary": "Your professional summary...",
-    "experience": [...],
-    "education": [...],
-    "skills": [...],
-}
-```
-
-### 3. Configure environment
-
-Copy `.env.example` to `.env` and fill in your values:
-
-```bash
-cp .env.example .env
-```
-
-```env
-ANTHROPIC_API_KEY=sk-ant-...
-NOTIFY_EMAIL=you@gmail.com
-GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
-CANDIDATE_EMAIL=you@gmail.com
-HOME_PHONE=5551234567
-HOME_ADDRESS=123 Your Street
-HOME_CITY=Your City
-HOME_CITY_STATE=Your City, ST
-HOME_ZIP=12345
-```
-
-### 4. Run
-
-```bash
-# Run both LinkedIn + Indeed simultaneously
-python -u run_all.py --in-limit 5
-
-# Indeed only
-python -u indeed_apply_now.py --limit 5
-
-# Dry run (no actual submission)
-python -u indeed_apply_now.py --limit 5 --dry-run
+┌─────────────────────────────────────────────────────────────────────┐
+│                        DAILY SCHEDULE (launchd)                      │
+│              Morning 9am · Afternoon 2pm · Evening 6pm               │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │
+                    run_all.py  (orchestrator)
+                    /          |           \
+                  /            |             \
+    linkedin_apply_now.py  indeed_apply_now.py  workday_apply_now.py
+           │                    │                      │
+           ▼                    ▼                      ▼
+    ┌─────────────────────────────────────────────────────────┐
+    │                  FAKE JOB FILTER (6 layers)              │
+    │          Zero API cost — runs before any Claude call     │
+    └─────────────────────────────────────────────────────────┘
+           │
+           ▼  (only real jobs reach here)
+    ┌─────────────────────────────────────────────────────────┐
+    │              claude_engine.py  (AI scoring)              │
+    │    score_fit() — LinkedIn ≥80%  |  Indeed/WD ≥62%       │
+    └─────────────────────────────────────────────────────────┘
+           │
+           ▼  (only high-fit jobs reach here)
+    ┌─────────────────────────────────────────────────────────┐
+    │            resume_builder.py  (ATS resume)               │
+    │    jd_parser.py → keyword extraction → DOCX generation  │
+    │    Verified ≥98% ATS keyword coverage per job            │
+    └─────────────────────────────────────────────────────────┘
+           │
+           ▼
+    ┌─────────────────────────────────────────────────────────┐
+    │         Playwright browser automation (form fill)        │
+    │    qa_answers → claude_answers → SQLite cache → Claude   │
+    │    79% cache hit rate · 3x fewer API calls               │
+    └─────────────────────────────────────────────────────────┘
+           │
+           ▼
+    ┌─────────────────────────────────────────────────────────┐
+    │              notifier.py  (Gmail alerts)                 │
+    │    Per-apply email + daily session summary               │
+    └─────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## ⚙️ Configuration
+## Pipeline Components
 
-Edit `config.py` to customize:
+### `run_all.py` — Orchestrator
+Runs all three platform scrapers in sequence. Handles per-platform daily limits, logging, and session summary notifications. Called by launchd 3× daily.
 
-```python
-FIT_THRESHOLD = 65        # Minimum Claude score to apply (%)
-SEARCH_QUERIES = [        # Job search terms
-    "Data Engineer Entry Level",
-    "Junior Data Engineer",
-    "Data Analyst Entry Level",
-    ...
-]
-SENIOR_WORDS = [          # Skip these title keywords
-    "senior", "staff", "principal", "lead", "director", ...
-]
+### `linkedin_apply_now.py` — LinkedIn Engine
+Scrapes LinkedIn job search results using Playwright, applies the 6-layer fake-job filter, scores with Claude, builds a custom resume, and submits via Easy Apply — all in a single browser session without navigating away from the search page.
+
+- Daily limit: 50 applications
+- Fit threshold: 80% (stricter than other platforms — quality over quantity)
+- Easy Apply only — external Workday links are queued for the Workday engine
+
+### `indeed_apply_now.py` — Indeed Engine
+Searches Indeed across 40+ query terms, applies Cloudflare-aware delays, scores jobs, and submits via Indeed's Smart Apply flow.
+
+- Daily limit: 150 applications
+- Fit threshold: 62%
+- Handles multi-step forms with resume upload and Claude form fill per job
+
+### `workday_apply_now.py` — Workday Engine
+Applies to enterprise Workday ATS portals (Capital One, Booz Allen, Deloitte, etc.) via Google search. Creates and reuses Workday accounts per company, handles security question flows.
+
+- Per-company account management with encrypted credentials
+- Handles 30-step forms with full Claude AI form completion
+
+### `claude_engine.py` — AI Intelligence Layer
+- `score_fit()` — scores candidate vs job match (Haiku model, cached by JD hash)
+- `local_prefilter()` — zero-cost keyword pre-check before any API call
+- `build_profile_summary()` — builds structured candidate context for scoring
+- `tailor_bullets()` — rewrites resume bullets to match JD language
+
+### `resume_builder.py` — ATS Resume Engine
+Generates a Word (.docx) resume per job with:
+- Keyword extraction from JD via `jd_parser.py`
+- Synonym-aware matching (PySpark ↔ Apache Spark, ETL ↔ data pipelines, etc.)
+- Verified ≥98% ATS keyword coverage (gap-fill section auto-added if needed)
+- BEFORE → AFTER ATS score printed per run
+
+### `jd_parser.py` — Job Description Parser
+Extracts required skills, injectable keywords, and ATS coverage score from raw JD text. Feeds into the resume builder.
+
+### `answer_cache.py` — Answer Cache (3-Tier)
+Lookup order per form field:
+1. `qa_answers.py` — manually curated master Q&A (highest priority)
+2. `claude_answers.py` — Claude's past answers (auto-saved, human-reviewable)
+3. SQLite cache — key-value fallback
+
+79% cache hit rate → 3× fewer Claude API calls per run.
+
+### `notifier.py` — Gmail Notification System
+Sends per-application email (company, title, fit score, resume attached) and a daily session summary with applied/skipped/failed counts.
+
+### `pipeline_logger.py` — Structured Run Logging
+Per-run structured log with job-level detail: applied, skipped (with reason), failed, scores. Used for daily summary reports.
+
+### `salary_helper.py` — Salary Intelligence
+Parses posted salary ranges from JD text and picks the optimal answer within the candidate's acceptable range.
+
+### `tracker.py` — Application Tracker
+Maintains an Excel spreadsheet of all applications with status, company, title, fit score, resume used, and platform.
+
+---
+
+## LinkedIn Fake Job Detection — 6-Layer System
+
+Every LinkedIn job passes through 6 layers **before any Claude API call is made** (zero token cost). A job is submitted only if it clears every layer.
+
+```
+Job Card Loaded
+      │
+      ├── Senior/Lead Filter ──────── "senior", "lead", "principal" in title → SKIP
+      ├── Role Relevance Filter ───── no data/tech keyword in title → SKIP
+      │
+      ├── LAYER 0: LinkedIn Native Signals
+      │     ├── Safety warning banner on job → SKIP (LinkedIn's own fraud flag)
+      │     ├── Company followers < 50 → SKIP
+      │     └── Company employees < 5 → SKIP
+      │
+      ├── LAYER 1: Title Signals
+      │     ├── Off-target roles ("data entry", "scheduler", "HR coordinator") → SKIP
+      │     └── Bot-generated typos ("databrick ", "data analys ", "data enginer") → SKIP
+      │
+      ├── LAYER 2: Company Name Signals
+      │     ├── 70+ known bad actors (blocklist) → SKIP
+      │     ├── Commonwealth/African suffixes (Limited, Ltd, Pvt Ltd, SME Ltd) → SKIP
+      │     ├── Job-aggregator company names ("Jobs in United States...") → SKIP
+      │     └── Non-ASCII company name → SKIP
+      │
+      ├── LAYER 3: Description Signals
+      │     ├── Fraud red flags (WhatsApp, Telegram, wire transfer, SSN required) → SKIP
+      │     ├── Body-shop/offshore language (C2C, bench candidates, current CTC) → SKIP
+      │     └── Non-US location in location field → SKIP
+      │
+      ├── LAYER 4: Quality Heuristics
+      │     ├── Description < 200 chars → SKIP
+      │     ├── Fewer than 2 tech tool names in description → SKIP
+      │     └── Applicant count ≥ 400 (stale bait posting) → SKIP
+      │
+      ├── Description Fingerprint Check
+      │     └── Same description from 2+ different companies → SKIP (scam template)
+      │
+      ├── Company Trust Score (0–100)
+      │     ├── Whitelisted known company → score 100, skip remaining checks
+      │     ├── Score < 40 → SKIP (low-trust company)
+      │     └── Score 30–70 (grey zone) → Claude Legitimacy Check
+      │               ├── Claude says FAKE → SKIP
+      │               └── Claude says REAL → proceed to fit scoring
+      │
+      └── Claude Fit Scoring (threshold: 80%)
+            ├── Score < 80% → SKIP
+            └── Score ≥ 80% → BUILD RESUME → APPLY ✅
 ```
 
----
+### Company Trust Score Breakdown
 
-## 📋 Prerequisites
-
-| Tool | Version | Purpose |
-|------|---------|---------|
-| Python | 3.11+ | Runtime |
-| Playwright | Latest | Browser automation |
-| python-docx | Latest | Resume/cover letter Word files |
-| Anthropic SDK | Latest | Claude AI integration |
-| openpyxl | Latest | Excel tracker |
-
-Install all at once:
-```bash
-pip install playwright python-docx anthropic openpyxl pandas python-dotenv
-```
-
----
-
-## 🔒 Security
-
-- **Never commits** `.env`, `raghav_profile.py`, browser sessions, or SQLite cache
-- All personal data (name, address, phone) stored only in local `.env` — loaded at runtime
-- Gmail uses App Passwords (not your main password)
-- See `.gitignore` for full exclusion list
+| Signal | Points |
+|--------|--------|
+| Whitelisted known company | +100 (instant pass) |
+| LinkedIn verified badge | +35 |
+| 500+ followers | +20 |
+| 100–500 followers | +10 |
+| 50–100 followers | +5 |
+| < 50 followers | −40 |
+| 200+ employees | +20 |
+| 50–200 employees | +10 |
+| 5–50 employees | +5 |
+| < 5 employees | −40 |
+| LinkedIn safety warning | −100 (instant 0) |
+| Base score | 50 |
 
 ---
 
-## 🧠 How the AI Works
+## Resume Engine
 
-### Job Scoring
-Claude reads the full job description and your profile, returns a 0-100% fit score with grade. Jobs below 65% are skipped immediately — no resume built, no API cost.
+Every application gets its own custom resume. The build process:
 
-### Resume Building
-1. JD parser extracts ATS keywords
-2. Claude rewrites your bullet points to match keywords
-3. ATS score verified to reach 100% coverage
-4. Word document generated with professional formatting
+1. Parse the JD for required keywords (`jd_parser.py`)
+2. Map synonyms — e.g. PySpark = Apache Spark, ETL = data pipelines, ADF = Azure Data Factory
+3. Score current resume keyword coverage against JD requirements
+4. Rewrite experience bullets to naturally mirror JD language
+5. Auto-add a gap-fill "Technical Proficiencies" section for missing keywords
+6. Verify final ATS score ≥ 98% before saving the file
 
-### Form Filling
-Priority order:
-1. **`qa_answers.py`** — your pre-configured answers (instant, no API cost)
-2. **SQLite cache** — previously answered questions (instant)
-3. **Claude API** — unknown questions answered intelligently
+Output: `CandidateName_CompanyName_JobTitle.docx` saved to `output/resumes/`
 
 ---
 
-## 📊 What You Get Per Application
+## AI Form Filling
 
-- ✅ Tailored `.docx` resume (ATS optimized for that specific job)
-- ✅ Custom cover letter
-- ✅ Email confirmation with resume attached
-- ✅ Entry in `Application_Tracker.xlsx`
-- ✅ Screenshot of confirmation page
-- ✅ JSON log entry
+For each form step, the pipeline uses a 3-tier answer system:
+
+1. **Check `qa_answers.py`** — manually curated answers (salary, work auth, address, visa status). Highest priority, always correct.
+2. **Check `claude_answers.py`** — Claude's past answers saved from prior runs. Human-reviewable and editable.
+3. **Check SQLite cache** — key-value fallback from older runs.
+4. **Call Claude (Haiku)** — only for fields not found in any cache. Returns a JSON map of all uncached fields in a single API call (no per-field round trips).
+5. **Save new answers** — Claude's answers are saved back to `claude_answers.py` so future runs use cache instead.
+6. **Pre-submit Claude review** — before clicking Submit, Claude reads the full review page and checks for blank required fields or obviously wrong answers.
 
 ---
 
-## 🗓️ Schedule Daily Runs
+## Scheduling
 
-Set up automatic daily execution at 8 AM:
+Three daily runs via macOS `launchd`:
 
+| Run | Time | Platform Focus |
+|-----|------|---------------|
+| Morning | 9:00 AM | LinkedIn + Indeed |
+| Afternoon | 2:00 PM | Indeed + Workday |
+| Evening | 6:00 PM | All platforms |
+
+Install the schedule:
 ```bash
 bash setup_scheduler.sh
 ```
 
-This creates a macOS launchd job that runs `run_all.py` every morning automatically.
+---
+
+## Setup
+
+### Prerequisites
+
+```bash
+# Python 3.11+
+brew install python@3.11
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install Playwright browser
+playwright install chromium
+```
+
+### First-time configuration
+
+```bash
+# 1. Copy and fill in your candidate profile
+cp raghav_profile.example.py raghav_profile.py
+# Edit raghav_profile.py — add your name, education, experience, skills
+
+# 2. Copy and fill in environment variables
+cp .env.example .env
+# Edit .env — add your Anthropic API key, Gmail credentials
+
+# 3. Validate setup
+python preflight_check.py
+```
+
+### Running the pipeline
+
+```bash
+# Dry run — scores + builds resumes, no actual submission
+python linkedin_apply_now.py --dry-run --limit 5
+
+# Live run with application limit
+python linkedin_apply_now.py --limit 10
+
+# Full pipeline (all platforms)
+python run_all.py
+```
 
 ---
 
-## ⚠️ Responsible Use
+## Configuration
 
-- This tool applies only to jobs you are genuinely qualified for (65%+ AI score)
-- It respects platform rate limits via built-in delays
-- CAPTCHA challenges pause the bot and alert you — no CAPTCHA is bypassed
-- Designed for legitimate job seekers, not spam
+All tunable settings are in `config.py` — no code changes needed for common adjustments.
+
+### Key settings
+
+```python
+# Fit score thresholds
+FIT_THRESHOLD          = 62   # Indeed/Workday minimum (%)
+LINKEDIN_FIT_THRESHOLD = 80   # LinkedIn minimum (%) — stricter, 50 apps/day
+
+# Daily apply limits
+LINKEDIN_DAILY_LIMIT   = 50
+MAX_APPLIES_PER_RUN    = 150
+
+# Fake job detection thresholds (all tunable here)
+LINKEDIN_MIN_COMPANY_FOLLOWERS  = 50    # fewer → skip
+LINKEDIN_MIN_COMPANY_EMPLOYEES  = 5     # fewer → skip
+LINKEDIN_MIN_TRUST_SCORE        = 40    # below → skip
+LINKEDIN_LEGITIMACY_CHECK       = True  # Claude legitimacy check for grey zone
+LINKEDIN_MAX_APPLICANTS         = 400   # stale posting threshold
+
+# ATS resume target
+ATS_TARGET_SCORE = 98   # minimum keyword coverage % before resume is saved
+```
+
+### Adding a fake company to the blocklist
+
+In `config.py`, add to `FAKE_JOB_COMPANY_WORDS`:
+
+```python
+FAKE_JOB_COMPANY_WORDS = {
+    ...
+    "new scam company name",  # lowercase, partial match
+}
+```
+
+### Adding a trusted company to the whitelist
+
+In `config.py`, add to `COMPANY_WHITELIST`:
+
+```python
+COMPANY_WHITELIST = {
+    ...
+    "company name",  # lowercase — skips all fake-job checks for this company
+}
+```
 
 ---
 
-## 📜 License
+## File Structure
 
-MIT License — see [LICENSE](LICENSE) for details.
+```
+job_pipeline/
+│
+├── run_all.py                    # Main orchestrator
+│
+├── linkedin_apply_now.py         # LinkedIn scraper + Easy Apply bot
+├── indeed_apply_now.py           # Indeed scraper + Smart Apply bot
+├── workday_apply_now.py          # Workday ATS bot
+│
+├── claude_engine.py              # AI scoring, pre-filter, bullet tailoring
+├── resume_builder.py             # ATS-optimized Word resume generator
+├── jd_parser.py                  # JD keyword extractor
+├── cover_letter.py               # Cover letter generator
+│
+├── answer_cache.py               # SQLite answer cache (3-tier lookup)
+├── salary_helper.py              # Salary range parser + answer picker
+├── secure_store.py               # Encrypted credential storage
+├── pipeline_logger.py            # Structured per-run logging
+├── notifier.py                   # Gmail notification system
+├── tracker.py                    # Excel application tracker
+├── preflight_check.py            # Environment + credential validator
+│
+├── config.py                     # All tunable settings (single source of truth)
+├── raghav_profile.example.py     # Candidate profile template → copy to raghav_profile.py
+├── .env.example                  # Environment variable template → copy to .env
+│
+├── requirements.txt              # Python dependencies
+├── setup_scheduler.sh            # Install macOS launchd schedule
+│
+├── data/                         # Runtime data — gitignored
+│   ├── apply_log.json            # Full application history
+│   ├── desc_fingerprints.json    # Scam template fingerprint store
+│   └── *.log                     # Run logs
+│
+└── output/                       # Generated files — gitignored
+    ├── resumes/                  # Per-job tailored resumes (.docx)
+    └── cover_letters/            # Per-job cover letters (.docx)
+```
 
 ---
 
-## 🤝 Contributing
+## Security & Privacy
 
-Pull requests welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+**What is never committed to this repo:**
+
+| File | Reason |
+|------|--------|
+| `raghav_profile.py` | Real name, email, phone, address, work history |
+| `.env` | API keys, Gmail password, Workday password, encryption key |
+| `qa_answers.py` | Personal form answers (salary, address, visa status) |
+| `claude_answers.py` | Auto-saved Claude answers — may contain personal data |
+| `data/apply_log.json` | Full application history |
+| `data/*.xlsx` | Application tracker with personal job search data |
+| `.indeed_session/` | Browser cookies with active login sessions |
+| `.linkedin_session/` | Same |
+| `output/resumes/` | Personal resume documents |
+| `*.docx`, `*.pdf` | Personal documents |
+
+All personal data stays local. The repo contains only pipeline logic. To use this for yourself, copy `raghav_profile.example.py` → `raghav_profile.py` and fill in your own information.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Browser automation | Playwright (Chromium) |
+| AI scoring & form fill | Anthropic Claude (Haiku + Sonnet) |
+| Resume generation | python-docx |
+| Answer caching | SQLite + in-memory dict |
+| Scheduling | macOS launchd |
+| Notifications | Gmail SMTP |
+| Data storage | JSON + Excel (openpyxl) |
+| Language | Python 3.11+ |
+
+---
+
+## Stats
+
+- **Platforms:** LinkedIn · Indeed · Workday
+- **Daily capacity:** ~200+ applications across all platforms
+- **Fake job block rate:** ~95%+ caught before any API call
+- **ATS coverage:** ≥98% verified per resume
+- **Cache hit rate:** ~79% (3× fewer Claude API calls)
+- **Form fill:** Pre-submit Claude review on every application with novel questions

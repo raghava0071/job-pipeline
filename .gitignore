@@ -1,26 +1,92 @@
-# Sensitive — never push these
-.env
-raghav_profile.py
+# =============================================================================
+# .GITIGNORE — Job Application Pipeline
+# RULE: if it contains personal data, credentials, or runtime state → exclude
+# =============================================================================
 
-# Browser sessions
-.indeed_session/
-.linkedin_session/
+# ── Credentials & secrets ─────────────────────────────────────────────────────
+.env                        # API keys, email password, Workday password, secret key
+*.enc                       # encrypted credential stores
+workday_accounts.json       # Workday account list with credentials
+workday_accounts.enc        # same, encrypted
+secure_store.key            # encryption key
 
-# Generated data (not needed in repo)
-__pycache__/
-*.pyc
-*.pyo
+# ── Personal profile (contains real name, email, phone, address, experience) ──
+raghav_profile.py           # private — use raghav_profile.example.py as template
+
+# ── Personal Q&A and auto-saved Claude answers ────────────────────────────────
+qa_answers.py               # contains personal answers (salary, address, work auth)
+claude_answers.py           # auto-saved Claude answers — may contain personal data
+
+# ── Application data & logs (personal job search history) ────────────────────
+data/apply_log.json         # full application history — personal
+data/indeed_applied_log.json
+data/workday_applied_log.json
+data/linkedin_applied_log.json
+data/apply_queue.json
+data/Application_Tracker.xlsx
+data/~$Application_Tracker.xlsx  # Excel lock file
+data/stuck_questions.json
 data/answer_cache.db
 data/*.db
-screenshots/
-pipeline_log.txt
+data/desc_fingerprints.json # fingerprint store (runtime state)
 
-# Output files (large, regenerated each run)
+# ── Runtime logs ──────────────────────────────────────────────────────────────
+data/*.log
+data/runs/
+pipeline_log.txt
+pipeline_run_log.txt
+*.log
+*_error.log
+*_error.md
+phase4_errors.md
+evening_pipeline_report_*.txt
+evening_report_*.txt
+afternoon_summary_*.txt
+claude_task_*.log
+
+# ── Browser session files (contain login cookies) ─────────────────────────────
+.indeed_session/
+.linkedin_session/
+.workday_session/
+*.pma                       # Chrome metrics
+SingletonLock
+SingletonCookie
+SingletonSocket
+
+# ── Generated output files (regenerated on each run) ─────────────────────────
 resumes/
 cover_letters/
 output/
+screenshots/
 data/raw_jobs.csv
 data/filtered_jobs.csv
 data/linkedin_jobs.csv
-data/scheduler_out.log
-data/scheduler_err.log
+data/indeed_jobs.csv
+data/scheduler_*.log
+
+# ── Personal documents accidentally committed ──────────────────────────────────
+*.docx                      # resume files — contain real personal data
+*.pdf                       # personal PDFs (LinkedIn carousel etc.)
+*_jo.docx
+
+# ── macOS metadata ────────────────────────────────────────────────────────────
+.DS_Store
+**/.DS_Store
+data/.DS_Store
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ── Claude / IDE metadata ─────────────────────────────────────────────────────
+.claude/
+*.test_persist.txt
+test_persist.txt
+snapshot.sh
+
+# ── Dev scripts not meant for public use ─────────────────────────────────────
+push_to_github.sh
+safe_update.sh

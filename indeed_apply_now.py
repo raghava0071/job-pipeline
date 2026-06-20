@@ -539,29 +539,93 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename="", 
         target = resume_filename or ""
         clicked = page.evaluate("""
             (target) => {
-                // Find radio group for resume selection
+                // ── NEVER click "Build an Indeed Resume" / "Recommended" option ──
+                // Indeed puts it first — falling back to radios[0] would click it.
+                // Instead: always look for the uploaded-file radio (.pdf / .docx label).
+                var BAD_KEYWORDS = ['build', 'create', 'indeed resume', 'recommended'];
+
+                function getLabel(r) {
+                    var lbl = '';
+                    if (r.id) {
+                        var le = document.querySelector('label[for="' + r.id + '"]');
+                        if (le) lbl = le.innerText || le.textContent || '';
+                    }
+                    // Also check parent element text
+                    if (!lbl && r.parentElement) {
+                        lbl = r.parentElement.innerText || r.parentElement.textContent || '';
+                    }
+                    return lbl;
+                }
+
+                function isBadOption(r) {
+                    var lbl = getLabel(r).toLowerCase();
+                    return BAD_KEYWORDS.some(function(k){ return lbl.includes(k); })
+                        && !lbl.includes('.pdf') && !lbl.includes('.docx');
+                }
+
                 var radios = Array.from(document.querySelectorAll('input[type=radio]'))
-                    .filter(function(r){ return r.offsetParent; });
+                    .filter(function(r){ return r.offsetParent && !isBadOption(r); });
+
                 if (!radios.length) return 0;
-                // Try to match target filename, else click first
+
+                // 1. Try exact filename match
                 var pick = target
-                    ? (radios.find(function(r){
-                          var lbl = '';
-                          if (r.id) {
-                              var le = document.querySelector('label[for="'+r.id+'"]');
-                              if (le) lbl = le.innerText;
-                          }
+                    ? radios.find(function(r){
+                          var lbl = getLabel(r);
                           return lbl.includes(target) || (r.value || '').includes(target);
-                      }) || radios[0])
-                    : radios[0];
-                if (pick && !pick.checked) { pick.click(); }
-                ['input','change','blur'].forEach(function(ev){
+                      })
+                    : null;
+
+                // 2. Fall back to any radio whose label has .pdf or .docx
+                if (!pick) {
+                    pick = radios.find(function(r){
+                        var lbl = getLabel(r).toLowerCase();
+                        return lbl.includes('.pdf') || lbl.includes('.docx');
+                    });
+                }
+
+                // 3. Last resort: first non-bad radio
+                if (!pick) pick = radios[0];
+
+                if (!pick) return 0;
+
+                // Click the radio input
+                if (!pick.checked) { pick.click(); }
+                ['input', 'change', 'blur'].forEach(function(ev){
                     pick.dispatchEvent(new Event(ev, {bubbles:true}));
                 });
+
+                // Also click the parent card container (Indeed needs the whole card clicked)
+                // Walk up the DOM looking for the card wrapper — stop before any element
+                // whose text contains "build" / "recommended" to avoid clicking the wrong card.
+                var card = null;
+                var el = pick.parentElement;
+                for (var i = 0; i < 6; i++) {
+                    if (!el) break;
+                    var txt = (el.innerText || el.textContent || '').toLowerCase();
+                    // Stop if we've climbed into a container that includes the bad option text
+                    if (BAD_KEYWORDS.some(function(k){ return txt.includes(k); })
+                        && !txt.includes('.pdf') && !txt.includes('.docx')) break;
+                    var tag = el.tagName;
+                    if (tag === 'LABEL' || tag === 'LI' || tag === 'ARTICLE'
+                        || el.getAttribute('role') === 'radio'
+                        || el.getAttribute('role') === 'option'
+                        || (el.className && /card/i.test(el.className))) {
+                        card = el;
+                        break;
+                    }
+                    el = el.parentElement;
+                }
+                if (card && card !== pick) {
+                    card.click();
+                    ['click','mousedown','mouseup'].forEach(function(ev){
+                        card.dispatchEvent(new MouseEvent(ev, {bubbles:true}));
+                    });
+                }
                 return 1;
             }
         """, target)
-        print(f"          ✔  Resume radio {'clicked' if clicked else 'already selected'}")
+        print(f"          ✔  Resume card + radio {'clicked' if clicked else 'already selected'} (skipped Build Indeed Resume option)")
         return clicked or 1   # count as 1 fill even if already selected
 
     # ── Filter: only fill REQUIRED fields (marked * in label or required=True in HTML) ──
@@ -710,6 +774,9 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename="", 
 CANDIDATE PROFILE:
 {profile_text}
 
+JOB DESCRIPTION (for context):
+{(jd_text or "")[:2000]}
+
 FIELDS TO FILL:
 {fields_desc}
 
@@ -731,13 +798,16 @@ Rules:
 - "have you worked with [any technology]": always "Yes"
 - date fields expecting MM/DD/YYYY format: use today's date + 14 days
 - Never mention Community Dreams Foundation or Mobile Stage Pros
-- For text fields with no obvious answer: leave blank ("")"""
+- CRITICAL: For EVERY required text/textarea field (marked [REQUIRED]), you MUST provide a substantive answer (2-4 sentences minimum). Never leave a required field blank — a blank required field blocks the form and fails the application.
+- For open-ended essay questions (why exploring new opportunity, tell me about yourself, leadership style, team environment, etc.): write a genuine, professional 2-4 sentence answer drawing from the candidate's background, skills, and experience above.
+- For industry-specific questions the candidate has no direct experience in (e.g. senior care, healthcare): answer honestly but positively — highlight transferable skills, eagerness to learn, and relevant adjacent experience.
+- For optional fields with no obvious answer: leave blank ("")"""
 
         print(f"          🤖 Calling Claude API for {len(uncached)} field(s)...")
         try:
             resp = _claude.messages.create(
                 model=os.environ.get("CLAUDE_MODEL","claude-haiku-4-5-20251001"),
-                max_tokens=1500,
+                max_tokens=4096,
                 messages=[{"role":"user","content":prompt}]
             )
             raw = resp.content[0].text.strip()
@@ -981,6 +1051,20 @@ Rules:
                     }
                     fireEvents(el);
                     filled++;
+                } else if (el.type === 'date') {
+                    // input[type="date"] requires YYYY-MM-DD internally.
+                    // Convert MM/DD/YYYY → YYYY-MM-DD so the browser accepts it.
+                    var dateVal = ans;
+                    var dm = ans.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+                    if (dm) dateVal = dm[3] + '-' + dm[1].padStart(2,'0') + '-' + dm[2].padStart(2,'0');
+                    try {
+                        var dProto = window.HTMLInputElement.prototype;
+                        var dSetter = Object.getOwnPropertyDescriptor(dProto, 'value');
+                        if (dSetter && dSetter.set) { dSetter.set.call(el, dateVal); }
+                        else { el.value = dateVal; }
+                    } catch(eDateE) { el.value = dateVal; }
+                    fireEvents(el);
+                    filled++;
                 } else {
                     // Standard input/textarea — fill value and fire React synthetic events.
                     // Uses a safe multi-strategy approach to avoid "Illegal invocation"
@@ -1038,12 +1122,18 @@ Rules:
         typ  = item.get("type", "")
         if not sel or not ans:
             continue
-        if typ in ("text", "number", "textarea", "tel", "email"):
+        if typ in ("text", "number", "textarea", "tel", "email", "date"):
             try:
                 loc = page.locator(sel).first
                 if loc.count() > 0:
+                    fill_val = str(ans)
+                    if typ == "date":
+                        # input[type="date"] needs YYYY-MM-DD; convert from MM/DD/YYYY
+                        _dm = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', ans)
+                        if _dm:
+                            fill_val = f"{_dm.group(3)}-{_dm.group(1).zfill(2)}-{_dm.group(2).zfill(2)}"
                     loc.click(timeout=2000)
-                    loc.fill(str(ans), timeout=3000)
+                    loc.fill(fill_val, timeout=3000)
                     # fire blur so React validators update
                     try:
                         loc.evaluate("el => el.dispatchEvent(new Event('blur', {bubbles:true}))")
@@ -1625,15 +1715,19 @@ def _upload_resume(page, resume_path, done_flag, cover_letter_path="", cover_don
             if not done_flag[0]:
                 fi = fi_all.first
                 print(f"          📎 File input found in frame[{i}] ({frame_url[:50] or 'main'}) — uploading resume...")
-                for _upload_attempt in range(3):
+                for _upload_attempt in range(5):
+                    # Human-like pre-upload pause — avoids instant robotic file injection
+                    time.sleep(random.uniform(1.5, 3.0))
                     fi.set_input_files(str(resume_path))
-                    time.sleep(2)
-                    # Check for Indeed's "couldn't upload" error and retry
+                    # Give Indeed's reCAPTCHA/upload validator time to respond (needs 4-6s)
+                    time.sleep(random.uniform(4.0, 6.0))
+                    # Check for Indeed's "couldn't upload" error and retry with escalating delay
                     try:
                         page_txt = page.evaluate("() => document.body.innerText") or ""
                         if "couldn't upload" in page_txt.lower() or "could not upload" in page_txt.lower():
-                            print(f"          ⚠  Upload rejected by Indeed (attempt {_upload_attempt+1}/3) — retrying in 4s...")
-                            time.sleep(4)
+                            wait_t = 12 + _upload_attempt * 10  # 12s, 22s, 32s, 42s, 52s
+                            print(f"          ⚠  Upload rejected by Indeed (attempt {_upload_attempt+1}/5) — retrying in {wait_t}s...")
+                            time.sleep(wait_t)
                             continue
                     except Exception:
                         pass
@@ -2186,8 +2280,62 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                             """, False)
                             time.sleep(0.5)
 
+                        # ── Special case: Indeed "Build an Indeed Resume" upsell ──
+                        # Indeed pushes a hosted-resume prompt on resume-selection-m.
+                        # The radio click alone doesn't satisfy it — need to click the
+                        # card container. Do that here and skip the generic re-fill loop
+                        # (which would just click the radio again → infinite loop).
+                        if "build" in err_text and ("indeed resume" in err_text or "indeed" in err_text):
+                            print(f"          🎯 Indeed Resume upsell detected — clicking uploaded file card directly")
+                            _safe_eval(apply_page, """
+                                () => {
+                                    // Find the uploaded file card and click it (not just its radio)
+                                    const fileCardSelectors = [
+                                        '[data-testid="FileResumeCard"]',
+                                        '[data-testid="resume-card"]',
+                                        '[class*="FileCard"]', '[class*="fileCard"]',
+                                        '[class*="ResumeCard"]', '[class*="resumeCard"]',
+                                        '[class*="uploadedResume"]', '[class*="fileResume"]',
+                                    ];
+                                    // Find the card whose text contains .pdf or .docx
+                                    // NEVER click cards containing "build"/"recommended" without .pdf/.docx
+                                    const BAD = ['build', 'create', 'recommended'];
+                                    const allCards = Array.from(document.querySelectorAll(
+                                        'label, li, article, [role="option"], [role="radio"], div[class*="resume" i]'
+                                    ));
+                                    const fileCard = allCards.find(el => {
+                                        const txt = (el.innerText || el.textContent || '').toLowerCase();
+                                        const hasFile = txt.includes('.pdf') || txt.includes('.docx');
+                                        const isBad = BAD.some(k => txt.includes(k)) && !hasFile;
+                                        return el.offsetParent && hasFile && !isBad;
+                                    });
+                                    let clicked = null;
+                                    // Try explicit selectors first (these target file cards specifically)
+                                    for (const sel of fileCardSelectors) {
+                                        const el = document.querySelector(sel);
+                                        if (el && el.offsetParent) { el.click(); clicked = sel; break; }
+                                    }
+                                    // Fall back to text-matched card (.pdf/.docx content)
+                                    if (!clicked && fileCard) { fileCard.click(); clicked = 'text-match'; }
+                                    // Click the radio inside the file card (not the "Build resume" radio)
+                                    const radioParent = fileCard || document;
+                                    const radios = Array.from(radioParent.querySelectorAll('input[type=radio]'));
+                                    const radio = radios.find(r => {
+                                        const lbl = (document.querySelector('label[for="'+r.id+'"]') || {}).innerText || '';
+                                        return lbl.includes('.pdf') || lbl.includes('.docx') || fileCard;
+                                    }) || (fileCard ? fileCard.querySelector('input[type=radio]') : null);
+                                    if (radio && !radio.checked) {
+                                        radio.click();
+                                        ['input','change'].forEach(ev => radio.dispatchEvent(new Event(ev,{bubbles:true})));
+                                    }
+                                    return clicked;
+                                }
+                            """, None)
+                            time.sleep(0.8)
+
                         # If field says "required" or "answer this question" — re-run fill
-                        if any(w in err_text for w in ["required", "answer", "enter", "provide", "select", "must"]):
+                        # (but NOT for the Indeed Resume upsell — that's handled above)
+                        elif any(w in err_text for w in ["required", "answer", "enter", "provide", "select", "must"]):
                             print(f"          🔄 Required field error — re-running fill step")
                             smart_fill_step(form_ctx, profile_text, title, company, resume_name,
                                             cover_letter_text=cl_text_for_form, jd_text=jd_for_fill)
@@ -2380,9 +2528,46 @@ def main():
 
         ensure_login(page)
 
-        for query in SEARCH_QUERIES:
+        _cf_delay_min = getattr(cfg, "INDEED_SEARCH_DELAY_MIN",  5)
+        _cf_delay_max = getattr(cfg, "INDEED_SEARCH_DELAY_MAX",  12)
+        _pg_delay_min = getattr(cfg, "INDEED_PAGE_DELAY_MIN",    3)
+        _pg_delay_max = getattr(cfg, "INDEED_PAGE_DELAY_MAX",    7)
+        _cf_retry_wait = getattr(cfg, "INDEED_CF_RETRY_WAIT_SEC", 45)
+        _do_scroll    = getattr(cfg, "INDEED_SCROLL_SEARCHES",   True)
+
+        def _is_cloudflare_page():
+            """Return True if Indeed is showing a Cloudflare challenge page."""
+            try:
+                txt = page.evaluate("() => document.body.innerText") or ""
+                url = page.url or ""
+                return ("additional verification required" in txt.lower()
+                        or "ray id" in txt.lower()
+                        or "cf-browser-verification" in (page.evaluate("() => document.documentElement.innerHTML") or "").lower())
+            except Exception:
+                return False
+
+        def _human_scroll():
+            """Simulate a few human-like scrolls on the current page."""
+            if not _do_scroll:
+                return
+            try:
+                for _ in range(random.randint(2, 4)):
+                    page.evaluate(f"window.scrollBy(0, {random.randint(300, 700)})")
+                    time.sleep(random.uniform(0.3, 0.8))
+                page.evaluate("window.scrollTo(0, 0)")
+                time.sleep(random.uniform(0.3, 0.6))
+            except Exception:
+                pass
+
+        for _qi, query in enumerate(SEARCH_QUERIES):
             if applied_count >= MAX_APPLY:
                 break
+
+            # Human-like inter-query delay (skip before very first query)
+            if _qi > 0:
+                _inter = random.uniform(_cf_delay_min, _cf_delay_max)
+                print(f"\n  ⏳ Waiting {_inter:.1f}s before next search (CF mitigation)...")
+                time.sleep(_inter)
 
             print(f"\n🔍  Query: {query}")
 
@@ -2394,11 +2579,21 @@ def main():
                     break
                 url = build_indeed_url(query, start=_page_start)
 
-                # Retry up to 3 times on network timeout
+                # Retry up to 3 times on network timeout; detect CF challenge and back off
                 loaded = False
                 for _attempt in range(3):
                     try:
                         page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        # Check for Cloudflare challenge immediately after load
+                        if _is_cloudflare_page():
+                            print(f"  🚨 Cloudflare challenge detected — waiting {_cf_retry_wait}s before retry...")
+                            time.sleep(_cf_retry_wait)
+                            page.goto("https://www.indeed.com/", wait_until="domcontentloaded", timeout=20000)
+                            time.sleep(random.uniform(4, 8))
+                            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                            if _is_cloudflare_page():
+                                print(f"  ❌ Cloudflare still blocking after retry — skipping this query")
+                                break
                         loaded = True
                         break
                     except Exception as _nav_err:
@@ -2408,7 +2603,11 @@ def main():
                 if not loaded:
                     print(f"  ❌ Could not load page {_page_start//15+1} — skipping")
                     continue
-                time.sleep(2)
+
+                # Human-like post-load pause + scroll
+                _pg_wait = random.uniform(_pg_delay_min, _pg_delay_max)
+                time.sleep(_pg_wait)
+                _human_scroll()
 
                 _page_cards = page.evaluate("""
                     () => {
