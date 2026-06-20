@@ -11,7 +11,7 @@
 #   4. Returns the code so the pipeline can auto-type it into the browser
 #
 # REQUIRES in .env:
-#   GMAIL_USER=raghavendrakaranam30@gmail.com
+#   GMAIL_USER=your_notify_email@gmail.com
 #   GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx   (same one used by notifier.py)
 #
 # NO extra packages needed — uses Python's built-in imaplib + email modules.

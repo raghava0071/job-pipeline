@@ -797,7 +797,7 @@ def handle_intervention(page, kind: str, company: str, job_title: str) -> bool:
 
     elif kind == "email_verify":
         print(f"\n          📧 EMAIL VERIFICATION REQUIRED for {company}")
-        print(f"          👉 Please CHECK GMAIL (raghavendrakaranam30@gmail.com),")
+        print(f"          👉 Please CHECK GMAIL (your_candidate_email@gmail.com),")
         print(f"             click the Workday verification link, then return here.")
         print(f"          🤖 Meanwhile, auto-searching Gmail for the verify link...")
         result = mail_reader.wait_for_otp(company=company, timeout_secs=300, since_minutes=10)
@@ -831,7 +831,7 @@ def handle_intervention(page, kind: str, company: str, job_title: str) -> bool:
         if not answer:
             q_l = q_text.lower()
             if "work email" in q_l or "email" in q_l:
-                answer = "raghavendrakaranam30@gmail.com"
+                answer = "your_candidate_email@gmail.com"
             elif "city" in q_l and "born" in q_l:
                 answer = "Hyderabad"
             elif "pet" in q_l:
@@ -904,7 +904,6 @@ def _get_wd_password() -> str:
             for line in env.read_text().splitlines():
                 if line.startswith("WORKDAY_PASSWORD="):
                     pwd = line.split("=", 1)[1].strip().strip('"').strip("'")
-    return pwd or "Raghava@2025!"
 
 def workday_sign_in(page, email: str, password: str) -> bool:
     """Sign in to Workday. Returns True once we've left the sign-in page —
@@ -1293,7 +1292,7 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
                            "sent you an email", "please check", "confirm your email"]
         if any(p in body for p in SUCCESS_PHRASES):
             print(f"          ✅ Account created — waiting for Gmail verification link...")
-            print(f"          📧 Check Gmail (raghavendrakaranam30@gmail.com) for verification email")
+            print(f"          📧 Check Gmail (your_candidate_email@gmail.com) for verification email")
             # Auto-fetch and click the verification link from Gmail
             try:
                 result = mail_reader.wait_for_otp(
@@ -1439,8 +1438,7 @@ def ensure_workday_auth(page, job_url: str) -> bool:
                     print(f"          👉 ACTION REQUIRED — Go to the Workday portal and reset your password:")
                     print(f"             1. Open the job URL in your browser")
                     print(f"             2. Click 'Sign In' → 'Forgot Password'")
-                    print(f"             3. Enter raghavendrakaranam30@gmail.com")
-                    print(f"             4. Check Gmail and reset password to Raghava@2025!")
+                    print(f"             3. Enter your_candidate_email@gmail.com")
                     print(f"          ⏭  Skipping this job — run continues with next company\n")
                     return False
             elif not created:
@@ -1509,7 +1507,7 @@ def step_contact_information(page):
     time.sleep(0.2)
 
     # Address — line 1 must be a street address (not city/state)
-    _fill(page, WD["address_line1"], "14401 S Military Trl")
+    _fill(page, WD["address_line1"], "os.environ.get("HOME_ADDRESS","") ")
     time.sleep(0.2)
     _fill(page, WD["city"], "Delray Beach")
     time.sleep(0.2)
@@ -1529,7 +1527,7 @@ def step_contact_information(page):
     time.sleep(0.3)
     _select_country_phone_code(page)   # required dropdown → United States
     time.sleep(0.3)
-    _fill(page, WD["phone_number"], "5618160256")
+    _fill(page, WD["phone_number"], "os.environ.get("HOME_PHONE","") ")
     time.sleep(0.3)
 
     _advance_page(page, "My Information")
@@ -1855,7 +1853,7 @@ Name:          {PROFILE.get('name')}
 Email:         {PROFILE.get('email')}
 Phone:         {PROFILE.get('phone')}
 Location:      {PROFILE.get('location')}
-Address:       14401 S Military Trl, Delray Beach, FL 33484
+Address:       os.environ.get("HOME_ADDRESS","") , Delray Beach, FL 33484
 Work Auth:     {PROFILE.get('work_auth')}
 Visa:          F-1 STEM OPT — no sponsorship needed
 LinkedIn:      https://{PROFILE.get('linkedin')}
@@ -1964,9 +1962,9 @@ RULES (follow exactly):
         "permanent resident":       "No",
         "linkedin":                 "https://www.linkedin.com/in/raghavendra-karanam",
         "github":                   "https://github.com/raghava0071",
-        "phone":                    "5618160256",
+        "phone":                    "os.environ.get("HOME_PHONE","") ",
         "city":                     "Delray Beach",
-        "state":                    "FL",
+        "state":                    "Florida",
         "zip":                      "33484",
         "country":                  "United States of America",
     }
@@ -2268,7 +2266,6 @@ def apply_to_workday_job(page, job: dict, resume_path: str, cover_letter_path: s
                 print(f"\n          ❌ Auth failed after {max_auth_retries} attempts — skipping job")
                 print(f"          🔒 The account for this portal is likely locked.")
                 print(f"          👉 Fix: open the portal in your browser → Forgot Password")
-                print(f"             → enter raghavendrakaranam30@gmail.com → reset to Raghava@2025!")
                 print(f"          ⏭  Moving to next job...\n")
                 return False, "auth_failed_locked"
             print(f"          🔐 Still on auth page (attempt {auth_retries}/{max_auth_retries})")

@@ -14,7 +14,7 @@
 #   2. Sign in → Select App: Mail → Select Device: Mac → Generate
 #   3. Copy the 16-character password (format: xxxx xxxx xxxx xxxx)
 #   4. Add these two lines to ~/job_pipeline/.env:
-#        NOTIFY_EMAIL=raghavendrakaranam30@gmail.com
+#        NOTIFY_EMAIL=your_notify_email@gmail.com
 #        GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
 #
 # Test:  python ~/job_pipeline/notifier.py
@@ -251,7 +251,7 @@ if __name__ == "__main__":
         print()
         print("  To enable, add these 2 lines to ~/job_pipeline/.env:")
         print()
-        print("    NOTIFY_EMAIL=raghavendrakaranam30@gmail.com")
+        print("    NOTIFY_EMAIL=your_notify_email@gmail.com")
         print("    GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx")
         print()
         print("  Get your App Password here:")
