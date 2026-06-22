@@ -1,21 +1,20 @@
 # =============================================================================
-# TRACKER.PY — PRO v5  (Claude Fit Score + Correct Column Mapping)
+# TRACKER.PY — PRO v6  (Claude Fit Score + Funnel Tracking)
 #
 # COLUMNS:
 #   A  #      B  Date Applied    C  Company         D  Job Title
 #   E  Location     F  Claude Score   G  Grade          H  Status
 #   I  Apply Link   J  Follow-Up      K  Fit Reasoning  L  Notes
 #   M  Resume File  N  Cover Letter   O  Salary Range
+#   P  ATS Response     Q  Response Days   R  Interview Stage   S  Rejection Reason
 #
-# Column name mapping from pipeline CSV:
-#   employer_name  → Company
-#   job_title      → Job Title
-#   job_city/state → Location
-#   job_apply_link → Apply Link
-#   job_min/max_salary → Salary Range
-#   fit_score      → Claude Score (0-100)
-#   fit_grade      → Grade (A/B/C/D)
-#   fit_reasoning  → Fit Reasoning
+# Columns P–S are the FUNNEL TRACKER. Update these manually as responses come in:
+#   P: ATS Response  — "Auto-Reject", "No Response", "Callback", "Pending"
+#   Q: Response Days — how many days from apply date to first response
+#   R: Interview Stage — "None", "Phone Screen", "Technical", "Final Round", "Offer"
+#   S: Rejection Reason — "ATS filtered", "Overqualified", "No sponsorship", "Ghosted", etc.
+#
+# Use the Dashboard tab to see funnel drop-off rates (where you're losing candidates)
 # =============================================================================
 
 from __future__ import annotations
@@ -80,12 +79,19 @@ COLUMNS = [
     ("M",  "Resume File",     32),
     ("N",  "Cover Letter",    32),
     ("O",  "Salary Range",    18),
+    # ── Funnel tracking columns — fill these in as responses arrive ──────────
+    ("P",  "ATS Response",    18),   # Auto-Reject | No Response | Callback | Pending
+    ("Q",  "Response Days",   14),   # Days from apply to first response (number)
+    ("R",  "Interview Stage", 18),   # None | Phone Screen | Technical | Final | Offer
+    ("S",  "Rejection Reason",28),   # ATS filtered | Ghosted | Overqualified | No sponsorship
 ]
 
 COL_SCORE  = "F"
 COL_GRADE  = "G"
 COL_STATUS = "H"
 COL_LINK   = "I"
+COL_ATS    = "P"
+COL_STAGE  = "R"
 
 
 # ── style helpers ─────────────────────────────────────────────────────────────
@@ -264,6 +270,10 @@ def create_tracker(jobs_df: pd.DataFrame = None) -> str:
                 os.path.basename(resume_path),     # M: Resume File
                 os.path.basename(cl_path),         # N: Cover Letter
                 salary,                            # O: Salary
+                _get(row, "ats_response", default="Pending"),   # P: ATS Response
+                _get(row, "response_days", default=""),         # Q: Response Days
+                _get(row, "interview_stage", default="None"),   # R: Interview Stage
+                _get(row, "rejection_reason", default=""),      # S: Rejection Reason
             ]
 
             for col_idx, value in enumerate(data, start=1):
@@ -337,10 +347,29 @@ def create_tracker(jobs_df: pd.DataFrame = None) -> str:
                 s = "Needs Manual Apply"
             status_counts[s] = status_counts.get(s, 0) + 1
 
+    # Compute funnel counts from df if available
+    ats_response_counts:  dict[str, int] = {}
+    interview_stage_counts: dict[str, int] = {}
+    rejection_reason_counts: dict[str, int] = {}
+    if jobs_df is not None and not jobs_df.empty:
+        for _, row in jobs_df.iterrows():
+            ats = _get(row, "ats_response", default="Pending")
+            ats_response_counts[ats] = ats_response_counts.get(ats, 0) + 1
+            stage = _get(row, "interview_stage", default="None")
+            interview_stage_counts[stage] = interview_stage_counts.get(stage, 0) + 1
+            rej = _get(row, "rejection_reason", default="")
+            if rej:
+                rejection_reason_counts[rej] = rejection_reason_counts.get(rej, 0) + 1
+
+    callback_rate = 0.0
+    if total > 0:
+        callbacks = ats_response_counts.get("Callback", 0)
+        callback_rate = callbacks / total * 100
+
     stats = [
         ("── PIPELINE STATS ──",                    ""),
-        ("Total Jobs Scored",                        total),
-        ("Good Fits (Claude ≥ 65%)",                 good_fits),
+        ("Total Applications",                       total),
+        ("Good Fits (Claude ≥ 72%)",                 good_fits),
         ("Avg Claude Fit Score",                     f"{avg_score:.1f}%"),
         ("",                                         ""),
         ("── GRADE BREAKDOWN ──",                    ""),
@@ -350,12 +379,27 @@ def create_tracker(jobs_df: pd.DataFrame = None) -> str:
         ("D  Grade  (<55%)  — skipped",              grade_counts.get("D", 0)),
         ("",                                         ""),
         ("── APPLICATION STATUS ──",                 ""),
-        ("Applied (LinkedIn Easy Apply)",            status_counts.get("Applied", 0)),
+        ("Applied (Easy Apply / Submitted)",         status_counts.get("Applied", 0)),
         ("Needs Manual Apply",                       status_counts.get("Needs Manual Apply", 0)),
         ("Phone Screen",                             status_counts.get("Phone Screen", 0)),
         ("Interview",                                status_counts.get("Interview", 0)),
         ("Offer",                                    status_counts.get("Offer", 0)),
         ("Rejected",                                 status_counts.get("Rejected", 0)),
+        ("",                                         ""),
+        ("── FUNNEL (update manually) ──",           ""),
+        ("ATS Auto-Rejected",                        ats_response_counts.get("Auto-Reject", 0)),
+        ("No Response (ghosted)",                    ats_response_counts.get("No Response", 0)),
+        ("Callbacks received",                       ats_response_counts.get("Callback", 0)),
+        ("Callback rate",                            f"{callback_rate:.1f}%"),
+        ("Reached Phone Screen",                     interview_stage_counts.get("Phone Screen", 0)),
+        ("Reached Technical Round",                  interview_stage_counts.get("Technical", 0)),
+        ("Reached Final Round",                      interview_stage_counts.get("Final Round", 0)),
+        ("",                                         ""),
+        ("── WHERE TO LOOK IF 0 CALLBACKS ──",       ""),
+        ("• Update col P with email responses",      "Auto-Reject vs No Response"),
+        ("• If mostly Auto-Reject → ATS issue",      "Resume keywords need work"),
+        ("• If mostly No Response → Recruiter issue","Resume quality / fit score too low"),
+        ("• If Callbacks but no screens → Phone prep","Practice intro + elevator pitch"),
         ("",                                         ""),
         ("Last Updated",                             today.strftime("%Y-%m-%d %H:%M")),
     ]

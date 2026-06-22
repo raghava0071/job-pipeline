@@ -1883,15 +1883,25 @@ def main():
 
                 if submitted:
                     applied_count += 1
-                    # Screenshot confirmation page
+
+                    # Screenshot the confirmation — take it IMMEDIATELY after submit,
+                    # before anything navigates away. Wait a beat for the success modal.
+                    ss_path = None
                     try:
+                        time.sleep(1.5)   # let "Application submitted" modal appear
                         safe_co = re.sub(r'[^\w]', '_', company)[:30]
                         safe_ti = re.sub(r'[^\w]', '_', title)[:30]
-                        ss_path = SCREENSHOTS / f"{safe_co}_{safe_ti}.png"
-                        page.screenshot(path=str(ss_path), full_page=False)
-                    except Exception:
-                        pass
-                    # Email notification — attaches resume + cover letter
+                        _ss_file = SCREENSHOTS / f"LI_{safe_co}_{safe_ti}.png"
+                        page.screenshot(path=str(_ss_file), full_page=False)
+                        if _ss_file.exists() and _ss_file.stat().st_size > 0:
+                            ss_path = _ss_file
+                            print(f"          📸 Screenshot saved → {_ss_file.name}")
+                        else:
+                            print(f"          📸 Screenshot file empty — not attaching")
+                    except Exception as _sse:
+                        print(f"          📸 Screenshot failed: {_sse}")
+
+                    # Email notification — resume + cover letter + screenshot attached
                     notifier.notify_applied(
                         title=title,
                         company=company,
@@ -1900,7 +1910,7 @@ def main():
                         cover_letter_path=cover_letter_path or "",
                         platform="LinkedIn",
                         job_url=live_url or job_url or "",
-                        screenshot_path=str(ss_path) if "ss_path" in dir() else ""
+                        screenshot_path=str(ss_path) if ss_path else ""
                     )
                     time.sleep(3)
 
@@ -1913,12 +1923,15 @@ def main():
         browser.close()
 
     applied = sum(1 for e in log if e.get("status") == "Applied")
+    _cost_summary = ce.get_cost_summary()
     print(f"\n  ── Done: {applied_count} applied this session | {total_processed} scored ──")
+    print(f"  💰 {_cost_summary}")
     _cache.print_stats()
     _run_log.finish(searches_run=len(SEARCH_QUERIES), jobs_found=total_processed)
     notifier.notify_session_done(applied=applied_count,
                                   scored=total_processed,
-                                  skipped=total_processed - applied_count)
+                                  skipped=total_processed - applied_count,
+                                  api_cost_summary=_cost_summary)
 
 
 if __name__ == "__main__":

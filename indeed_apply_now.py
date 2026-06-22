@@ -1179,12 +1179,12 @@ CONFIRM_PHRASES = [
     'application complete',
 ]
 
-def _check_and_handle_captcha(page, title="", company=""):
+def _check_and_handle_captcha(page, title="", company="", job_url=""):
     """
     Detect CAPTCHA (recaptcha bframe) on the page and handle it:
-      1. Send email alert immediately
+      1. Send email alert with direct job URL (openable on phone)
       2. Resize CAPTCHA iframe so Verify button is visible
-      3. Wait up to 90 seconds for user to solve it
+      3. Wait up to 10 minutes for user to solve it on any device
       4. Return True if solved, False if timed out
     Call this at the START of every step loop iteration.
     """
@@ -1195,22 +1195,24 @@ def _check_and_handle_captcha(page, title="", company=""):
         if not captcha_visible:
             return True  # no CAPTCHA, all good
 
-        print(f"\n          🚨🚨🚨  CAPTCHA DETECTED — ACTION REQUIRED  🚨🚨🚨")
-        print(f"          👉 Open the browser on your Mac and solve the CAPTCHA NOW")
-        print(f"          ⏳ Waiting up to 90 seconds...")
-
-        # Send email alert
+        # Get the current page URL if not passed in
+        current_url = job_url or ""
         try:
-            notifier.send_alert(
-                subject=f"🚨 CAPTCHA — {title} @ {company} — Solve NOW",
-                body=(
-                    f"CAPTCHA appeared on job application:\n\n"
-                    f"  Job:     {title}\n"
-                    f"  Company: {company}\n\n"
-                    f"Open the browser on your Mac and solve the image CAPTCHA.\n"
-                    f"Pipeline is paused for 5 minutes waiting for you.\n\n"
-                    f"If you don't solve it in time, this job will be skipped."
-                )
+            current_url = page.url or job_url or ""
+        except Exception:
+            pass
+
+        print(f"\n          🚨🚨🚨  CAPTCHA DETECTED — ACTION REQUIRED  🚨🚨🚨")
+        print(f"          👉 Open the browser on your Mac and solve the CAPTCHA")
+        print(f"          👉 Or open this URL on your PHONE: {current_url}")
+        print(f"          ⏳ Waiting up to 10 minutes...")
+
+        # Send email alert with clickable link — can open on phone
+        try:
+            notifier.send_captcha_alert(
+                title=title,
+                company=company,
+                job_url=current_url,
             )
         except Exception as e:
             print(f"          ⚠  Could not send CAPTCHA email: {e}")
@@ -1937,7 +1939,7 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
 
                         if _action == "captcha":
                             print(f"          👁  Vision sees CAPTCHA — handing off to CAPTCHA handler")
-                            _check_and_handle_captcha(apply_page, title, company)
+                            _check_and_handle_captcha(apply_page, title, company, job_url=job_url)
 
                         elif _action == "fill_field":
                             print(f"          👁  Vision filling {len(_vision.get('fields', []))} field(s)...")
@@ -2020,7 +2022,7 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                 last_url = current_step_url
 
             # ── CAPTCHA check at start of every step ──────────────────────────
-            captcha_ok = _check_and_handle_captcha(apply_page, title, company)
+            captcha_ok = _check_and_handle_captcha(apply_page, title, company, job_url=job_url)
             if not captcha_ok:
                 break  # skip this job — CAPTCHA timed out
 
@@ -2121,7 +2123,7 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                     time.sleep(3)  # wait for CAPTCHA or confirmation to appear
 
                     # Check for CAPTCHA that appeared after clicking Submit
-                    captcha_ok = _check_and_handle_captcha(apply_page, title, company)
+                    captcha_ok = _check_and_handle_captcha(apply_page, title, company, job_url=job_url)
                     if not captcha_ok:
                         print(f"          ❌ CAPTCHA timed out — skipping job")
                         submitted = False
@@ -2395,7 +2397,7 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--limit",   type=int, default=5,     help="Max applications per run")
+    parser.add_argument("--limit",   type=int, default=100,   help="Max applications per run (default 100)")
     parser.add_argument("--dry-run", action="store_true",      help="Score + build but don't submit")
     args = parser.parse_args()
 
@@ -2404,7 +2406,10 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"  Indeed Apply Engine  {'[DRY RUN]' if DRY_RUN else ''}")
-    print(f"  Limit: {MAX_APPLY} applications")
+    print(f"  Target: {MAX_APPLY} applications  |  Fit threshold: {cfg.FIT_THRESHOLD}%")
+    print(f"  Pages per query: {getattr(cfg, 'INDEED_PAGES_PER_QUERY', 2)}"
+          f"  |  Queries: {len(SEARCH_QUERIES)}"
+          f"  |  Potential cards: ~{getattr(cfg, 'INDEED_PAGES_PER_QUERY', 2) * 15 * len(SEARCH_QUERIES)}")
     print(f"{'='*60}\n")
 
     # ── Clear stale Chromium SingletonLock (left over if prior run crashed) ───
@@ -2571,10 +2576,12 @@ def main():
 
             print(f"\n🔍  Query: {query}")
 
-            # Fetch page 1 + page 2 (start=0 and start=15) to double the card pool.
-            # Pool was exhausted because we only scraped the first page per query.
+            # Scrape up to INDEED_PAGES_PER_QUERY pages per query (default 3 = ~45 cards).
+            # Each page has start=0, 15, 30 — Indeed shows 15 results per page.
+            _pages_per_query = getattr(cfg, "INDEED_PAGES_PER_QUERY", 3)
+            _page_starts = [i * 15 for i in range(_pages_per_query)]
             job_cards = []
-            for _page_start in [0, 15]:
+            for _page_start in _page_starts:
                 if applied_count >= MAX_APPLY:
                     break
                 url = build_indeed_url(query, start=_page_start)
@@ -2633,7 +2640,7 @@ def main():
                 if len(_page_cards) < 10:
                     break   # fewer than 10 results on this page = no point fetching next
 
-            print(f"  Found {len(job_cards)} cards (2 pages)")
+            print(f"  Found {len(job_cards)} cards ({_pages_per_query} pages)")
 
             for card in job_cards:
                 if applied_count >= MAX_APPLY:
@@ -2880,10 +2887,13 @@ def main():
     print(f"  ⏭  Skipped:  {skipped_count}")
     print(f"{'='*60}\n")
 
+    _cost_summary = ce.get_cost_summary()
+    print(f"  💰 {_cost_summary}")
     _cache.print_stats()
     _run_log.finish(searches_run=len(SEARCH_QUERIES), jobs_found=scored_count + skipped_count)
 
-    notifier.notify_session_done(applied_count, scored_count, skipped_count)
+    notifier.notify_session_done(applied_count, scored_count, skipped_count,
+                                  api_cost_summary=_cost_summary)
 
 
 if __name__ == "__main__":

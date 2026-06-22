@@ -231,7 +231,7 @@ def _auto_diagnose(errors: dict):
 def main():
     parser = argparse.ArgumentParser(description="Run LinkedIn + Indeed + Workday pipelines in parallel")
     parser.add_argument("--li-limit",       type=int, default=50,  help="LinkedIn max applies (default 50)")
-    parser.add_argument("--in-limit",       type=int, default=50,  help="Indeed max applies (default 50)")
+    parser.add_argument("--in-limit",       type=int, default=100, help="Indeed max applies (default 100)")
     parser.add_argument("--wd-limit",       type=int, default=10,  help="Workday max applies (default 10)")
     parser.add_argument("--dry-run",        action="store_true",   help="Dry run on all platforms")
     parser.add_argument("--linkedin-only",  action="store_true",   help="Run LinkedIn only")

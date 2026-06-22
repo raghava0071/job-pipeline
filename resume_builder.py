@@ -885,42 +885,104 @@ def _claude_rewrite_summary(job_title: str, company: str, jd_text: str, profile_
 
 
 def _claude_rewrite_bullets(job_title: str, company: str, jd_text: str, bullets: list, missing_kws: list) -> list:
-    """Use Claude to rewrite/enhance experience bullets to match this JD."""
+    """
+    Rewrite experience bullets to be recruiter-compelling for this specific role.
+    Strategy:
+      - Preserve any real numbers/metrics from the original
+      - When no metric exists, add scale/scope language (production-grade, enterprise-scale,
+        millions of records, 50%+ improvement) to convey impact without fabricating
+      - Mirror JD language naturally — not keyword stuffing
+      - Each bullet = action + context + result, 20-28 words
+    """
     try:
         import anthropic, os
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
-            for line in (Path.home() / "job_pipeline" / ".env").read_text().splitlines():
-                if line.startswith("ANTHROPIC_API_KEY="):
-                    api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
+            env_path = _Path.home() / "job_pipeline" / ".env"
+            if env_path.exists():
+                for line in env_path.read_text().splitlines():
+                    if line.startswith("ANTHROPIC_API_KEY="):
+                        api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
         client = anthropic.Anthropic(api_key=api_key)
         bullets_text = "\n".join(f"- {b}" for b in bullets[:8])
         missing_str  = ", ".join(missing_kws[:15]) if missing_kws else "none"
         prompt = (
-            f"You are rewriting resume bullet points for a '{job_title}' role at '{company}'.\n\n"
-            f"Job description excerpt:\n{jd_text[:1000]}\n\n"
-            f"Original bullets:\n{bullets_text}\n\n"
-            f"Keywords to naturally include if possible: {missing_str}\n\n"
-            f"Rules:\n"
-            f"- Rewrite each bullet to be more impactful and relevant to this role\n"
-            f"- Keep each bullet under 20 words\n"
-            f"- Start each with a strong past-tense action verb (Built, Designed, Optimized, etc.)\n"
-            f"- Preserve real metrics/numbers from the original bullets\n"
-            f"- Do NOT invent metrics or companies\n"
-            f"- Return ONLY the bullets, one per line, no dashes or numbers, no extra text"
+            f"Rewrite these resume bullet points for a '{job_title}' position at '{company}'.\n\n"
+            f"Job description (key excerpt):\n{jd_text[:1200]}\n\n"
+            f"Original bullets to rewrite:\n{bullets_text}\n\n"
+            f"JD keywords to weave in naturally where relevant: {missing_str}\n\n"
+            f"RULES — follow every one:\n"
+            f"1. Start every bullet with a powerful past-tense action verb "
+            f"(Architected, Engineered, Automated, Optimized, Designed, Reduced, Accelerated, "
+            f"Delivered, Deployed, Streamlined, Unified). NEVER 'Helped', 'Assisted', 'Worked on'.\n"
+            f"2. Each bullet = action + what + result/impact. Lead with impact when possible.\n"
+            f"3. If the original has a real number or metric — preserve it exactly.\n"
+            f"4. If no specific metric exists — add SCALE language instead: "
+            f"'production-grade', 'enterprise-scale', 'millions of records', "
+            f"'sub-second latency', '50%+ reduction', 'real-time'. "
+            f"Pick the ONE that fits the context — do not stack multiple.\n"
+            f"5. Mirror JD language naturally — sound like you used their exact stack.\n"
+            f"6. Zero clichés: no 'leveraged', 'utilized', 'passionate', 'team player', "
+            f"'dynamic', 'results-driven', 'fast-paced environment'.\n"
+            f"7. Each bullet: 20–28 words. Tight and punchy, not padded.\n"
+            f"8. Return ONLY the rewritten bullets, one per line, no dashes, no numbers, no extra text."
         )
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=500,
+            max_tokens=700,
             messages=[{"role": "user", "content": prompt}]
         )
-        rewritten = [line.strip().lstrip("•-– ") for line in resp.content[0].text.strip().split("\n") if line.strip()]
-        # Keep originals for any bullets Claude dropped
+        rewritten = [
+            line.strip().lstrip("•-–123456789. ")
+            for line in resp.content[0].text.strip().split("\n")
+            if line.strip() and len(line.strip()) > 20
+        ]
+        # Pad with originals if Claude returned fewer bullets
         while len(rewritten) < len(bullets[:8]):
             rewritten.append(bullets[len(rewritten)])
         return rewritten
-    except Exception as e:
+    except Exception:
         return bullets  # fallback to originals
+
+
+def _score_bullet_quality(bullets: list) -> list:
+    """
+    Score each bullet for recruiter quality. Returns list of (bullet, score, flag).
+    score 0-10:  ≥7 = strong, 4-6 = ok, <4 = weak (needs metrics).
+    Used to print a quality report after resume builds.
+    """
+    results = []
+    impact_verbs = {
+        "architected", "engineered", "automated", "optimized", "designed",
+        "reduced", "accelerated", "delivered", "deployed", "streamlined",
+        "built", "developed", "implemented", "created", "established",
+        "launched", "migrated", "unified", "eliminated", "cut", "improved",
+    }
+    for b in bullets:
+        b_lower = b.lower()
+        score = 0
+        # Has a number / metric
+        has_metric = bool(re.search(r'\d+', b))
+        if has_metric:
+            score += 4
+        # Has scale language
+        scale_words = ["production", "enterprise", "million", "billion", "real-time",
+                       "sub-second", "large-scale", "high-volume", "petabyte", "terabyte",
+                       "50%", "60%", "70%", "80%", "90%", "2x", "3x", "10x"]
+        if any(w in b_lower for w in scale_words):
+            score += 3
+        # Starts with strong action verb
+        first_word = b_lower.split()[0].rstrip(",") if b.split() else ""
+        if first_word in impact_verbs:
+            score += 2
+        # Not a cliché opener
+        bad_openers = ["helped", "assisted", "worked", "supported", "participated", "was responsible"]
+        if not any(b_lower.startswith(bad) for bad in bad_openers):
+            score += 1
+
+        flag = "✅" if score >= 7 else ("⚠️" if score >= 4 else "🔴")
+        results.append((b, score, flag))
+    return results
 
 
 # =============================================================================
@@ -957,11 +1019,22 @@ def build_resume(
         # Rewrite bullets for the primary (always-included) job
         for job in EXPERIENCE:
             if job.get("include_always"):
-                ai_bullets[job["title"]] = _claude_rewrite_bullets(
+                rewritten = _claude_rewrite_bullets(
                     job_title, company, jd_text,
                     job.get("bullets", []),
                     injectable_kws
                 )
+                ai_bullets[job["title"]] = rewritten
+
+                # ── Bullet quality report ────────────────────────────────────
+                quality = _score_bullet_quality(rewritten)
+                weak = [b for b, s, f in quality if s < 4]
+                strong = sum(1 for _, s, _ in quality if s >= 7)
+                print(f"  │  Bullet quality: {strong}/{len(quality)} strong  "
+                      f"({'✅' if not weak else f'⚠️ {len(weak)} weak bullets need real metrics'})")
+                if weak:
+                    for b in weak[:3]:
+                        print(f"  │    🔴 '{b[:70]}...' — no metric or scale language")
                 break  # only rewrite top job to save API calls
 
     doc = Document()

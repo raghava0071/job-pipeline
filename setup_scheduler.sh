@@ -82,7 +82,7 @@ for i in 0 1 2; do
         <string>--li-limit</string>
         <string>50</string>
         <string>--in-limit</string>
-        <string>50</string>
+        <string>100</string>
         <string>--wd-limit</string>
         <string>10</string>
     </array>
@@ -128,9 +128,9 @@ done
 
 echo ""
 echo "Pipeline runs automatically 3x daily:"
-echo "  8:00 AM  — morning   (50 LinkedIn + 50 Indeed + 10 Workday)"
-echo "  12:00 PM — afternoon (50 LinkedIn + 50 Indeed + 10 Workday)"
-echo "  6:00 PM  — evening   (50 LinkedIn + 50 Indeed + 10 Workday)"
+echo "  8:00 AM  — morning   (50 LinkedIn + 100 Indeed)"
+echo "  12:00 PM — afternoon (50 LinkedIn + 100 Indeed)"
+echo "  6:00 PM  — evening   (50 LinkedIn + 100 Indeed)"
 echo ""
 echo "  NOTE: Mac must be AWAKE at run times."
 echo "        If asleep, that run is skipped — not delayed."
