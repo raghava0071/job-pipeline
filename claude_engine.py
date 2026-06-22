@@ -46,6 +46,24 @@ FIT_THRESHOLD = int(os.environ.get("FIT_THRESHOLD", "65"))
 # Key: sha1(job_title.lower() + jd_text[:400])  Value: score dict
 _SCORE_CACHE: dict = {}
 
+# ── API cost tracker ───────────────────────────────────────────────────────────
+# Tracks every Claude API call this session. Printed in session summary email.
+# Haiku pricing (June 2025): $0.80/MTok input, $4.00/MTok output
+# Sonnet pricing:            $3.00/MTok input, $15.00/MTok output
+_API_STATS = {
+    "calls":           0,    # total API calls
+    "cache_hits":      0,    # score cache hits (saved calls)
+    "input_tokens":    0,    # total input tokens
+    "output_tokens":   0,    # total output tokens
+    "haiku_calls":     0,
+    "sonnet_calls":    0,
+    "estimated_cost":  0.0,  # USD
+}
+_HAIKU_IN_COST  = 0.80 / 1_000_000   # per token
+_HAIKU_OUT_COST = 4.00 / 1_000_000
+_SONNET_IN_COST  = 3.00 / 1_000_000
+_SONNET_OUT_COST = 15.00 / 1_000_000
+
 # ── Candidate skill keywords for local pre-filter ─────────────────────────────
 _LOCAL_SKILLS = {
     "python", "sql", "pyspark", "spark", "kafka", "airflow", "hadoop",
@@ -72,10 +90,40 @@ def _ask(prompt: str, system: str = "", max_tokens: int = 1000, fast: bool = Fal
             system=system or "You are an expert career coach and technical recruiter specializing in data roles.",
             messages=[{"role": "user", "content": prompt}],
         )
+        # ── Track cost ────────────────────────────────────────────────────────
+        try:
+            in_tok  = resp.usage.input_tokens  if hasattr(resp, "usage") else len(prompt) // 4
+            out_tok = resp.usage.output_tokens if hasattr(resp, "usage") else max_tokens // 4
+            is_fast = (model == MODEL_FAST)
+            cost = (in_tok  * (_HAIKU_IN_COST  if is_fast else _SONNET_IN_COST)
+                  + out_tok * (_HAIKU_OUT_COST if is_fast else _SONNET_OUT_COST))
+            _API_STATS["calls"]          += 1
+            _API_STATS["input_tokens"]   += in_tok
+            _API_STATS["output_tokens"]  += out_tok
+            _API_STATS["estimated_cost"] += cost
+            if is_fast:
+                _API_STATS["haiku_calls"] += 1
+            else:
+                _API_STATS["sonnet_calls"] += 1
+        except Exception:
+            pass
         return resp.content[0].text.strip()
     except Exception as e:
         print(f"  ⚠  Claude API error ({model}): {e}")
         return ""
+
+
+def get_cost_summary() -> str:
+    """Return a short string summarising API spend this session."""
+    s = _API_STATS
+    total_tok = s["input_tokens"] + s["output_tokens"]
+    return (
+        f"API calls: {s['calls']}  "
+        f"(haiku: {s['haiku_calls']}, sonnet: {s['sonnet_calls']})  "
+        f"| cache hits: {s['cache_hits']}  "
+        f"| tokens: {total_tok:,}  "
+        f"| est. cost: ${s['estimated_cost']:.4f}"
+    )
 
 
 def local_prefilter(jd_text: str, job_title: str) -> tuple[bool, int]:
@@ -143,28 +191,47 @@ def score_fit(profile_summary: str, jd_text: str,
     ).hexdigest()
     if cache_key in _SCORE_CACHE:
         cached = _SCORE_CACHE[cache_key]
+        _API_STATS["cache_hits"] += 1
         print(f"      ⚡ Score cache hit: {cached.get('score')}% (saved 1 API call)")
         return cached
 
-    prompt = f"""Score this candidate for an entry/mid-level data role. Focus on SKILLS MATCH.
+    prompt = f"""You are a strict technical recruiter screening a resume for an entry/mid-level data role.
+Score the candidate's fit. Be honest — a 72 should mean a real, strong match worth a recruiter's time.
 
-Candidate facts:
-- M.S. Data Science, Florida Atlantic University 2025
-- Python: 4 yrs, SQL: 4 yrs, Data Engineering: 2-3 yrs
-- Skills: ETL/ELT, Azure, AWS, GCP, Spark, Kafka, dbt, Snowflake, Power BI, Tableau,
-  PostgreSQL, MongoDB, Docker, scikit-learn, TensorFlow, NLP, Streamlit
-- Projects: real-time CV pipeline (YOLOv8), NLP job market dashboard, ML CTR prediction (AUC 0.98),
-  PostgreSQL flight price engine, AI automation pipeline (300+ apps/day)
-- Do NOT penalize entry/mid level — this IS an entry/mid role
+CANDIDATE:
+- M.S. Data Science & Analytics, Florida Atlantic University (May 2025)
+- Work authorization: Authorized to work in the US for 3 years — NO sponsorship required
+- Python: 4 yrs · SQL: 4 yrs · Data Engineering: 3 yrs
+- Tech stack: ETL/ELT, Azure (ADF, ADLS, Databricks, Synapse), AWS, GCP, PySpark, Kafka,
+  dbt, Snowflake, Power BI, Tableau, PostgreSQL, MongoDB, Docker, scikit-learn, TensorFlow, NLP
+- Projects delivered: real-time computer vision pipeline (YOLOv8), NLP job-market dashboard,
+  ML click-through model (AUC 0.98), PostgreSQL flight-price engine, AI job-application automation
 
 JOB: {job_title} at {company}
-JD (first 2000 chars): {jd_text[:2000]}
+JD: {jd_text[:2000]}
 
-Reply ONLY in JSON:
-{{"score":72,"grade":"B","reasoning":"one sentence","strengths":["SQL","Python"],"missing":["Snowflake"],"apply":true}}
+SCORING RULES:
+- 85–100 (A): Strong skill alignment — candidate has ≥80% of required tech and matches the role squarely
+- 72–84 (B): Good fit — has core skills, 1-2 nice-to-haves missing but fully closeable
+- 65–71 (C): Borderline — has foundational skills but significant gaps in required tech
+- 50–64 (D): Weak match — role needs tech/domain experience the candidate clearly lacks
+- <50 (F): Skip — wrong domain, wrong level, or requires things candidate doesn't have
 
-Scoring: 85-100=A(excellent), 70-84=B(good), 65-69=C(apply), 50-64=D(skip), <50=F(skip)
-apply=true if score>={FIT_THRESHOLD}"""
+STRICT CRITERIA — score DOWN when:
+- JD lists 3+ specific tools candidate has zero experience with (e.g. Salesforce, SAP, COBOL)
+- Role requires industry domain the candidate has no background in (healthcare, finance compliance, etc.)
+- JD says "5+ years" or specific seniority the candidate doesn't meet
+- Role is clearly senior despite non-senior title (Staff, Principal, architect-level scope)
+
+SCORE UP when:
+- Core data stack (Python/SQL/cloud/ETL) matches the JD directly
+- Candidate's project portfolio demonstrates the exact kind of work the role involves
+- Role is entry/junior/associate level — candidate's 3yr background is ideal
+
+Reply ONLY with valid JSON, single line:
+{{"score":72,"grade":"B","reasoning":"one tight sentence on fit","strengths":["SQL","PySpark"],"missing":["Snowflake"],"apply":true}}
+
+apply=true only if score>={FIT_THRESHOLD}"""
 
     raw  = _ask(prompt, max_tokens=250, fast=True)   # haiku — 20x cheaper than sonnet
     data = _parse_json(raw)
@@ -200,7 +267,7 @@ def tailor_bullets(bullets: list[str], jd_text: str, job_title: str) -> list[str
 
     original = "\n".join(f"- {b}" for b in bullets[:15])
 
-    prompt = f"""Rewrite these resume bullets for a {job_title} role. Make them executive-quality — the kind that get callbacks at top tech companies.
+    prompt = f"""Rewrite these resume bullets for a {job_title} role. Make them the kind that get recruiter callbacks at top tech companies.
 
 Job Description:
 {jd_text[:2000]}
@@ -208,19 +275,18 @@ Job Description:
 Current bullets:
 {original}
 
-Rules:
-- Keep EXACTLY the same number of bullets
-- Start EVERY bullet with a powerful, specific action verb (Architected, Engineered, Delivered, Reduced, Accelerated, Deployed, Automated, Streamlined — NOT "Helped", "Assisted", "Worked on")
-- Each bullet = one achievement with context + action + impact. Lead with the result when possible.
-- Naturally weave in JD keywords — do not keyword-stuff
-- Quantify wherever the original has numbers — preserve and improve them
-- Zero clichés: no "leveraged", "utilized", "passionate", "team player", "fast-paced environment"
-- No dashes, no hyphens as connectors mid-sentence. Use clean, direct prose.
-- Max 20 words per bullet. Tight, punchy, confident.
-- Sound like a senior engineer who ships real systems, not a student describing homework.
+Rules — follow every one:
+1. Keep EXACTLY the same number of bullets.
+2. Start EVERY bullet with a strong past-tense action verb: Architected, Engineered, Automated, Optimized, Designed, Reduced, Accelerated, Deployed, Streamlined, Delivered, Unified. NEVER: "Helped", "Assisted", "Worked on", "Was responsible for".
+3. Each bullet = action + what + measurable result. Lead with the impact.
+4. If the original has a real number — preserve it exactly. If no number exists — add ONE scale descriptor: "production-grade", "enterprise-scale", "millions of records", "sub-second latency", "real-time", "50%+ faster". Do not stack multiple.
+5. Mirror JD language naturally — if the JD says "data pipeline" use "data pipeline", not "ETL workflow".
+6. Zero clichés: no "leveraged", "utilized", "passionate", "team player", "dynamic", "results-driven".
+7. Each bullet: 20–30 words. Punchy and dense — no filler words.
+8. Sound like a mid-level engineer who ships real production systems, not a student doing coursework.
 
 Return ONLY the rewritten bullets, one per line, each starting with "- ".
-No headers, no explanations."""
+No headers, no explanations, no commentary."""
 
     raw   = _ask(prompt, max_tokens=1500, fast=True)   # haiku — 4x cheaper, same structured output quality
     lines = [l.strip().lstrip("- ").strip()

@@ -179,21 +179,57 @@ def notify_applied(title: str, company: str, fit_score: int,
         return False
 
 
-def notify_session_done(applied: int, scored: int, skipped: int) -> bool:
+def notify_session_done(applied: int, scored: int, skipped: int,
+                        api_cost_summary: str = "") -> bool:
     """Send session summary email when pipeline finishes."""
     if not ENABLED or applied == 0:
         return False
     try:
         now     = datetime.now().strftime("%b %d, %Y at %I:%M %p")
         subject = f"📊 Pipeline done — {applied} applied, {scored} scored · {now}"
+
+        cost_row = ""
+        if api_cost_summary:
+            cost_row = f"""
+  <tr style="background:#f0fdf4;">
+    <td colspan="2" style="padding:10px 14px;font-size:13px;color:#166534;">
+      💰 <b>API cost this run:</b> {api_cost_summary}
+    </td>
+  </tr>"""
+
         body    = f"""
-<html><body style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;">
+<html><body style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;">
 <div style="background:white;border-radius:12px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
-  <h2 style="color:#0a66c2;">📊 Pipeline Session Done</h2>
-  <p style="font-size:18px;"><strong>{applied}</strong> applications submitted</p>
-  <p><strong>{scored}</strong> jobs scored by Claude</p>
-  <p><strong>{skipped}</strong> jobs skipped (below 65% gate or senior role)</p>
-  <p style="color:#9ca3af;font-size:13px;">Finished {now}</p>
+
+  <h2 style="color:#0a66c2;margin:0 0 18px;">📊 Pipeline Session Done</h2>
+
+  <table style="width:100%;border-collapse:collapse;font-size:15px;">
+    <tr style="background:#f3f4f6;">
+      <td style="padding:10px 14px;color:#6b7280;width:160px;"><b>Applied</b></td>
+      <td style="padding:10px 14px;font-size:20px;font-weight:bold;color:#0a66c2;">{applied}</td>
+    </tr>
+    <tr>
+      <td style="padding:10px 14px;color:#6b7280;"><b>Scored by Claude</b></td>
+      <td style="padding:10px 14px;color:#374151;">{scored}</td>
+    </tr>
+    <tr style="background:#f3f4f6;">
+      <td style="padding:10px 14px;color:#6b7280;"><b>Skipped</b></td>
+      <td style="padding:10px 14px;color:#374151;">{skipped}
+        <span style="font-size:12px;color:#9ca3af;">(below threshold or senior role)</span>
+      </td>
+    </tr>
+    {cost_row}
+    <tr>
+      <td style="padding:10px 14px;color:#6b7280;"><b>Finished</b></td>
+      <td style="padding:10px 14px;color:#9ca3af;font-size:13px;">{now}</td>
+    </tr>
+  </table>
+
+  <p style="margin-top:16px;font-size:13px;color:#9ca3af;text-align:center;">
+    Check your inbox for per-job emails with resumes attached ·
+    <a href="https://github.com/raghawa0071/job-pipeline" style="color:#0a66c2;">GitHub</a>
+  </p>
+
 </div>
 </body></html>
 """
@@ -207,6 +243,81 @@ def notify_session_done(applied: int, scored: int, skipped: int) -> bool:
             server.sendmail(NOTIFY_EMAIL, NOTIFY_EMAIL, msg.as_string())
         return True
     except Exception:
+        return False
+
+
+def send_captcha_alert(title: str, company: str, job_url: str = "") -> bool:
+    """
+    Send a mobile-friendly CAPTCHA alert email.
+    Includes a big clickable button with the job URL so the user can open it
+    on their phone (if logged into Indeed) and attempt to re-apply directly.
+    Pipeline waits up to 10 minutes for the CAPTCHA to be solved.
+    """
+    if not ENABLED:
+        return False
+    try:
+        _load_env()
+        now = datetime.now().strftime("%b %d at %I:%M %p")
+        subject_line = f"🚨 CAPTCHA — {title} @ {company} — Pipeline waiting 10 min"
+
+        # Big tap-friendly button for mobile
+        job_button = ""
+        if job_url:
+            job_button = f"""
+  <a href="{job_url}"
+     style="display:block;margin:20px 0;padding:16px;background:#0a66c2;color:white;
+            text-decoration:none;border-radius:10px;font-size:17px;font-weight:bold;
+            text-align:center;">
+    👆 Open Job Page on Phone
+  </a>
+  <p style="font-size:12px;color:#6b7280;word-break:break-all;">
+    URL: {job_url}
+  </p>"""
+
+        html = f"""
+<html><body style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:20px;">
+
+<div style="background:#fff3cd;border:3px solid #f59e0b;border-radius:14px;padding:24px;">
+
+  <h2 style="color:#92400e;margin:0 0 12px;">🚨 CAPTCHA on Application</h2>
+
+  <table style="width:100%;font-size:15px;border-collapse:collapse;">
+    <tr><td style="padding:6px 0;color:#6b7280;width:90px;"><b>Job</b></td>
+        <td style="padding:6px 0;color:#111;"><b>{title}</b></td></tr>
+    <tr><td style="padding:6px 0;color:#6b7280;"><b>Company</b></td>
+        <td style="padding:6px 0;color:#111;">{company}</td></tr>
+    <tr><td style="padding:6px 0;color:#6b7280;"><b>Time</b></td>
+        <td style="padding:6px 0;color:#6b7280;">{now}</td></tr>
+  </table>
+
+  {job_button}
+
+  <div style="background:#fef9c3;border-radius:8px;padding:14px;margin-top:14px;">
+    <p style="margin:0;font-size:14px;color:#713f12;">
+      <b>Pipeline is PAUSED — waiting up to 10 minutes.</b><br><br>
+      Option 1: Open your Mac browser and solve the CAPTCHA there.<br>
+      Option 2: Tap the button above → log into Indeed on your phone → solve it.<br><br>
+      If not solved in 10 minutes, this job will be skipped automatically.
+    </p>
+  </div>
+
+</div>
+</body></html>"""
+
+        msg = MIMEMultipart("alternative")
+        msg["From"]    = NOTIFY_EMAIL
+        msg["To"]      = NOTIFY_EMAIL
+        msg["Subject"] = subject_line
+        msg.attach(MIMEText(html, "html"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(NOTIFY_EMAIL, GMAIL_APP_PASSWORD)
+            server.sendmail(NOTIFY_EMAIL, NOTIFY_EMAIL, msg.as_string())
+
+        print(f"          📧 CAPTCHA alert sent → {NOTIFY_EMAIL} (with job link ✅)")
+        return True
+    except Exception as e:
+        print(f"          📧 CAPTCHA alert failed: {e}")
         return False
 
 

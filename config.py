@@ -32,12 +32,15 @@ CLAUDE_MODEL_FAST   = "claude-haiku-4-5-20251001"   # form filling, bullet rewri
 CLAUDE_MODEL_SMART  = "claude-sonnet-4-6"            # fit scoring, cover letters
 
 # ── Fit Gate ───────────────────────────────────────────────────────────────────
-FIT_THRESHOLD        = 62   # Indeed/Workday minimum Claude score (%) — wider net is fine
-LINKEDIN_FIT_THRESHOLD = 80 # LinkedIn minimum — only 50/day so every one must count
+# LinkedIn is 80% — only 50 slots/day, every one must count.
+# Indeed is 72% — bigger pool, can be slightly looser, but no junk.
+FIT_THRESHOLD          = 72   # Indeed/Workday minimum Claude score (%)
+LINKEDIN_FIT_THRESHOLD = 80   # LinkedIn minimum — 50/day hard cap
 
 # ── Apply Limits ───────────────────────────────────────────────────────────────
-MAX_APPLIES_PER_RUN  = 150  # safety cap — 50 per platform × 3 runs/day
-LINKEDIN_DAILY_LIMIT = 50   # hard LinkedIn cap (platform limit)
+MAX_APPLIES_PER_RUN    = 200  # total cap per run across all platforms
+LINKEDIN_DAILY_LIMIT   = 50   # hard LinkedIn cap (platform limit)
+INDEED_DAILY_LIMIT     = 150  # target Indeed applications per day
 APPLY_DELAY_SEC      = 2    # seconds between applications
 FORM_MAX_STEPS       = 30   # max form steps before giving up
 STUCK_THRESHOLD      = 15   # same button clicked this many times → declare stuck
@@ -336,13 +339,16 @@ LINKEDIN_MIN_COMPANY_EMPLOYEES = 5
 # Conservative — set False by default so small legitimate startups aren't excluded.
 LINKEDIN_TRUST_VERIFIED_ONLY = False
 
-# ── Indeed Cloudflare mitigation ───────────────────────────────────────────────
-INDEED_SEARCH_DELAY_MIN  = 5    # minimum seconds between search queries
-INDEED_SEARCH_DELAY_MAX  = 12   # maximum seconds between search queries
-INDEED_PAGE_DELAY_MIN    = 3    # minimum seconds after each page load
-INDEED_PAGE_DELAY_MAX    = 7    # maximum seconds after each page load
+# ── Indeed speed + Cloudflare mitigation ──────────────────────────────────────
+# Tuned for throughput: fast enough to hit 150 apps/day, slow enough to avoid CF blocks.
+INDEED_SEARCH_DELAY_MIN  = 3    # seconds between queries (was 5 — too slow)
+INDEED_SEARCH_DELAY_MAX  = 8    # seconds between queries (was 12 — too slow)
+INDEED_PAGE_DELAY_MIN    = 2    # seconds after each page load (was 3)
+INDEED_PAGE_DELAY_MAX    = 5    # seconds after each page load (was 7)
 INDEED_SCROLL_SEARCHES   = True # simulate human scroll between searches
-INDEED_CF_RETRY_WAIT_SEC = 45   # seconds to wait if Cloudflare challenge detected
+INDEED_CF_RETRY_WAIT_SEC = 30   # seconds to wait if Cloudflare challenge (was 45)
+INDEED_PAGES_PER_QUERY   = 3    # how many result pages to scrape per query (was 2)
+                                 # 3 pages = ~45 job cards per query
 
 # ── Target Roles ───────────────────────────────────────────────────────────────
 TARGET_ROLES = [
@@ -394,8 +400,10 @@ BLOCKED_COMPANIES = {
 }
 
 # ── LinkedIn search queries ────────────────────────────────────────────────────
+# Spread across diverse query forms so LinkedIn returns different card sets per query.
+# More unique queries = more unique job cards = more shots at 50/day.
 LINKEDIN_QUERIES = [
-    # Data Engineering
+    # Data Engineering — core
     "Data Engineer Entry Level",
     "Junior Data Engineer",
     "Associate Data Engineer",
@@ -409,6 +417,11 @@ LINKEDIN_QUERIES = [
     "Data Pipeline Engineer",
     "Cloud Data Engineer",
     "Analytics Engineer Entry Level",
+    "Databricks Data Engineer",
+    "Snowflake Data Engineer",
+    "dbt Analytics Engineer",
+    "Data Engineer Remote",
+    "Data Engineer New Grad",
     # Data Analysis
     "Data Analyst Entry Level",
     "Junior Data Analyst",
@@ -422,6 +435,10 @@ LINKEDIN_QUERIES = [
     "Python Data Analyst",
     "Tableau Data Analyst",
     "Power BI Analyst",
+    "Data Analyst Remote",
+    "Analytics Analyst",
+    "Insights Analyst",
+    "Product Analyst",
     # Data Science / ML
     "Data Scientist Entry Level",
     "Junior Data Scientist",
@@ -430,6 +447,8 @@ LINKEDIN_QUERIES = [
     "AI Engineer Entry Level",
     "Applied Scientist Entry Level",
     "NLP Engineer Entry Level",
+    "Data Scientist Remote",
+    "Machine Learning Analyst",
     # Broader roles
     "Database Analyst",
     "Quantitative Analyst Entry Level",
@@ -439,50 +458,72 @@ LINKEDIN_QUERIES = [
     "Product Analyst Data",
     "Marketing Data Analyst",
     "Financial Data Analyst",
+    "Healthcare Data Analyst",
+    "Operations Research Analyst",
 ]
 
 # ── Indeed-specific search queries (broader than LinkedIn) ─────────────────────
+# Each query scrapes 3 pages (~45 cards). 40 queries × 45 cards = ~1,800 potential cards.
+# After filters (senior, domain, fit≥72%), expect ~100-150 actual applications per day.
 INDEED_QUERIES = [
-    # Data Engineering
+    # Data Engineering — varied query forms to pull different result sets
     "Data Engineer",
     "Junior Data Engineer",
+    "Entry Level Data Engineer",
     "Data Engineer Python SQL",
+    "Data Engineer Python",
     "ETL Developer",
+    "ETL Data Engineer",
     "Data Pipeline Engineer",
     "Analytics Engineer",
     "PySpark Engineer",
+    "PySpark Data Engineer",
     "Azure Data Engineer",
     "AWS Data Engineer",
+    "GCP Data Engineer",
     "Databricks Engineer",
-    "Snowflake Engineer",
-    "dbt Analytics Engineer",
+    "Snowflake Data Engineer",
+    "dbt Engineer",
+    "Cloud Data Engineer",
+    "Data Warehouse Engineer",
+    "Big Data Engineer",
     # Data Analysis
     "Data Analyst",
     "Junior Data Analyst",
+    "Entry Level Data Analyst",
     "Business Intelligence Analyst",
     "BI Analyst",
-    "SQL Analyst",
-    "Python Analyst",
+    "SQL Data Analyst",
+    "Python Data Analyst",
     "Reporting Analyst",
-    "Business Analyst Data Analytics",
+    "Business Analyst Data",
     "Tableau Developer",
     "Power BI Developer",
+    "Tableau Analyst",
+    "Power BI Analyst",
+    "Data Analytics Analyst",
+    "Insights Analyst",
+    "Product Analyst",
     # Data Science / ML
     "Data Scientist",
     "Junior Data Scientist",
+    "Entry Level Data Scientist",
     "Machine Learning Engineer",
     "ML Engineer",
     "AI Engineer",
     "NLP Engineer",
     "Applied Machine Learning",
+    "Machine Learning Analyst",
     # Broad
-    "Data Operations",
+    "Data Operations Engineer",
     "Data Platform Engineer",
     "Database Developer",
+    "Database Analyst",
     "Quantitative Analyst",
-    "Product Analytics",
-    "Marketing Analytics",
-    "Financial Analyst Data",
+    "Product Analytics Engineer",
+    "Marketing Data Analyst",
+    "Financial Data Analyst",
+    "Healthcare Data Analyst",
 ]
 
 # ── Resume builder settings ────────────────────────────────────────────────────
