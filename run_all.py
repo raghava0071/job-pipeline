@@ -22,6 +22,14 @@ from datetime import datetime
 PIPELINE_DIR = Path.home() / "job_pipeline"
 sys.path.insert(0, str(PIPELINE_DIR))
 
+# ── Startup syntax check — catch bad edits before any browser opens ───────────
+import ast
+for _f in ["config.py", "indeed_apply_now.py", "linkedin_apply_now.py", "resume_builder.py"]:
+    try:
+        ast.parse((PIPELINE_DIR / _f).read_text())
+    except SyntaxError as _e:
+        print(f"❌ Syntax error in {_f}: {_e}  — fix before running"); sys.exit(1)
+
 
 def run_linkedin(limit, dry_run, result_queue):
     """Run LinkedIn pipeline in a subprocess."""

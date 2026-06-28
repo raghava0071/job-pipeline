@@ -52,7 +52,7 @@ cfg.RESUMES_DIR.mkdir(parents=True, exist_ok=True)
 cfg.COVER_DIR.mkdir(parents=True, exist_ok=True)
 
 try:
-    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout, Error as PWError
 except ImportError:
     sys.exit("pip install playwright && python -m playwright install chromium")
 
@@ -1287,8 +1287,11 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
             return True
 
     _need_review = False   # track if Claude answered anything new this form
+    _form_start  = time.time()
 
     for step in range(cfg.FORM_MAX_STEPS):
+        if time.time() - _form_start > 120:
+            return False, "form timeout (120s)"
         if confirmed():
             return True, "confirmed via page text"
         if step > 0 and not modal_open():
@@ -1589,6 +1592,9 @@ def main():
             viewport={"width": 1440, "height": 900},
         )
         page = browser.pages[0] if browser.pages else browser.new_page()
+        # Auto-dismiss any JS alert/confirm dialogs — prevents ProtocolError crash
+        # when a dialog fires after navigation and Playwright's driver tries to handle it.
+        browser.on("dialog", lambda d: d.dismiss())
         ensure_login(page)
 
         for qi, kw in enumerate(SEARCH_QUERIES, 1):
@@ -1596,7 +1602,31 @@ def main():
                 break
 
             print(f"\n  [{qi}/{len(SEARCH_QUERIES)}] Searching: '{kw}'")
-            page.goto(build_url(kw), wait_until="domcontentloaded", timeout=30000)
+            try:
+                page.goto(build_url(kw), wait_until="domcontentloaded", timeout=30000)
+            except PWError as _pwe:
+                if "Target page, context or browser has been closed" in str(_pwe):
+                    print(f"  ⚠  Page closed on search navigate — reopening...")
+                    try:
+                        page = browser.new_page()
+                        page.goto(build_url(kw), wait_until="domcontentloaded", timeout=30000)
+                    except Exception as _re:
+                        print(f"  ❌ Could not recover: {_re} — skipping query '{kw}'")
+                        continue
+                elif any(net_err in str(_pwe) for net_err in (
+                    "ERR_INTERNET_DISCONNECTED", "ERR_NETWORK_CHANGED", "ERR_NAME_NOT_RESOLVED"
+                )):
+                    # Network blip — wait and retry once
+                    print(f"  ⚠  Network error, waiting 30s and retrying: {_pwe}")
+                    time.sleep(30)
+                    try:
+                        page.goto(build_url(kw), wait_until="domcontentloaded", timeout=45000)
+                    except Exception as _re2:
+                        print(f"  ❌ Still offline after retry — skipping '{kw}'")
+                        continue
+                else:
+                    print(f"  ⚠  Search navigate error: {_pwe} — skipping")
+                    continue
             time.sleep(4)
 
             # Scroll to load cards
@@ -1634,6 +1664,18 @@ def main():
                         time.sleep(3)
                     else:
                         continue
+                except PWError as _pwe:
+                    if "Target page, context or browser has been closed" in str(_pwe):
+                        print(f"  ⚠  Browser page closed unexpectedly — reopening page and continuing...")
+                        try:
+                            page = browser.new_page()
+                            page.goto(build_url(kw), wait_until="domcontentloaded", timeout=30000)
+                            time.sleep(3)
+                        except Exception as _re:
+                            print(f"  ❌ Could not recover browser page: {_re} — stopping LinkedIn run")
+                            break
+                        continue
+                    continue
                 except:
                     continue
 
@@ -1762,6 +1804,12 @@ def main():
                     print(f"      [{jid}] {company} — {title[:40]} → ⚠ Reposted (applying anyway)")
                 if is_promoted:
                     print(f"      [{jid}] {company} — {title[:40]} → ⚠ Promoted listing")
+
+                # ── Security clearance check ──────────────────────────────────
+                if any(kw in description.lower() for kw in cfg.CLEARANCE_KEYWORDS):
+                    print(f"      [{jid}] {company} — {title[:40]} → SKIP (clearance required)")
+                    _run_log.job_skip(title, company, "clearance required", url=live_url)
+                    continue
 
                 # ── Local pre-filter: zero API cost ───────────────────────────
                 # Skip obvious mismatches before spending any tokens on scoring.
@@ -1915,8 +1963,19 @@ def main():
                     time.sleep(3)
 
                 # Go back to search results
-                page.go_back()
-                time.sleep(2)
+                try:
+                    page.go_back()
+                    time.sleep(2)
+                except PWError as _pwe:
+                    if "Target page, context or browser has been closed" in str(_pwe):
+                        print(f"  ⚠  Page closed after apply — reopening for next job...")
+                        try:
+                            page = browser.new_page()
+                            page.goto(build_url(kw), wait_until="domcontentloaded", timeout=30000)
+                            time.sleep(3)
+                        except Exception:
+                            break
+                    continue
 
             time.sleep(2)
 

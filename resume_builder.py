@@ -531,7 +531,7 @@ Rules for the 3 sentences:
 
 Return ONLY the 3 sentences, nothing else."""
 
-    summary_text = _ce._ask(summary_prompt, max_tokens=200)
+    summary_text = _ce._ask(summary_prompt, max_tokens=200, fast=True)
 
     # Fallback if Claude fails
     if not summary_text or len(summary_text) < 40:
@@ -850,13 +850,7 @@ def add_ats_gap_fill(doc, missing_keywords: list):
 def _claude_rewrite_summary(job_title: str, company: str, jd_text: str, profile_summary: str) -> str:
     """Use Claude to write a tailored professional summary for this specific job."""
     try:
-        import anthropic, os
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            for line in (Path.home() / "job_pipeline" / ".env").read_text().splitlines():
-                if line.startswith("ANTHROPIC_API_KEY="):
-                    api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
-        client = anthropic.Anthropic(api_key=api_key)
+        import claude_engine as _ce
         prompt = (
             f"Write a 3-sentence professional summary for a resume applying to: '{job_title}' at '{company}'.\n\n"
             f"Job description excerpt:\n{jd_text[:1200]}\n\n"
@@ -874,14 +868,9 @@ def _claude_rewrite_summary(job_title: str, company: str, jd_text: str, profile_
             f"- NO clichés. Max 80 words total.\n"
             f"- Return ONLY the 3 sentences, nothing else."
         )
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return resp.content[0].text.strip()
-    except Exception as e:
-        return ""  # fallback to template-based summary
+        return _ce._ask(prompt, max_tokens=300, fast=True)
+    except Exception:
+        return ""
 
 
 def _claude_rewrite_bullets(job_title: str, company: str, jd_text: str, bullets: list, missing_kws: list) -> list:
@@ -895,15 +884,7 @@ def _claude_rewrite_bullets(job_title: str, company: str, jd_text: str, bullets:
       - Each bullet = action + context + result, 20-28 words
     """
     try:
-        import anthropic, os
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            env_path = _Path.home() / "job_pipeline" / ".env"
-            if env_path.exists():
-                for line in env_path.read_text().splitlines():
-                    if line.startswith("ANTHROPIC_API_KEY="):
-                        api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
-        client = anthropic.Anthropic(api_key=api_key)
+        import claude_engine as _ce
         bullets_text = "\n".join(f"- {b}" for b in bullets[:8])
         missing_str  = ", ".join(missing_kws[:15]) if missing_kws else "none"
         prompt = (
@@ -927,14 +908,9 @@ def _claude_rewrite_bullets(job_title: str, company: str, jd_text: str, bullets:
             f"7. Each bullet: 20–28 words. Tight and punchy, not padded.\n"
             f"8. Return ONLY the rewritten bullets, one per line, no dashes, no numbers, no extra text."
         )
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=700,
-            messages=[{"role": "user", "content": prompt}]
-        )
         rewritten = [
             line.strip().lstrip("•-–123456789. ")
-            for line in resp.content[0].text.strip().split("\n")
+            for line in _ce._ask(prompt, max_tokens=700, fast=True).split("\n")
             if line.strip() and len(line.strip()) > 20
         ]
         # Pad with originals if Claude returned fewer bullets

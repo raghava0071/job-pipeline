@@ -239,7 +239,9 @@ apply=true only if score>={FIT_THRESHOLD}"""
     if not data or "score" not in data:
         return _fallback_score()
 
-    data.setdefault("apply", data.get("score", 0) >= FIT_THRESHOLD)
+    # Normalize score to int — Claude occasionally returns it as a string "72"
+    data["score"] = int(data.get("score", 0))
+    data.setdefault("apply", data["score"] >= FIT_THRESHOLD)
 
     # Cache result — if this job appears in another query, skip the API call
     _SCORE_CACHE[cache_key] = data

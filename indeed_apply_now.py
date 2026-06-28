@@ -58,6 +58,18 @@ SESSION_DIR.mkdir(parents=True, exist_ok=True)
 cfg.RESUMES_DIR.mkdir(parents=True, exist_ok=True)
 cfg.COVER_DIR.mkdir(parents=True, exist_ok=True)
 
+# ── Pro-level CAPTCHA tracking ────────────────────────────────────────────────
+# Counts unsolved CAPTCHAs in a row. Reset to 0 on any successful solve.
+# When it hits CAPTCHA_COOLDOWN_THRESHOLD, the pipeline takes a long break.
+_consecutive_captcha_failures = 0
+CAPTCHA_COOLDOWN_THRESHOLD    = 3    # failures in a row before cooldown
+CAPTCHA_COOLDOWN_SECS         = 300  # 5-minute break
+
+# Jobs that failed specifically because CAPTCHA timed out — retried at end of run.
+# Each entry: {"card": {...}, "job_url": "...", "score": int, "jd": "...",
+#              "resume_path": "...", "title": "...", "company": "..."}
+_captcha_retry_queue = []
+
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 except ImportError:
@@ -89,14 +101,11 @@ def is_relevant_domain(title):
 
 def build_indeed_url(kw, start=0):
     import urllib.parse
-    # fromage=14 = last 14 days (was 7 — pool was exhausted after 509 applications)
-    # iafilter=1 = Indeed Apply only (keeps external-redirect jobs out)
     return "https://www.indeed.com/jobs?" + urllib.parse.urlencode({
         "q": kw,
         "l": "United States",
         "sort": "date",
-        "fromage": "14",
-        "iafilter": "1",
+        "fromage": "7",
         "start": start,
     })
 
@@ -1179,23 +1188,134 @@ CONFIRM_PHRASES = [
     'application complete',
 ]
 
+# Phrases that appear on the AI interview page AFTER submission.
+# Application is already in — the interview is an optional add-on.
+AI_INTERVIEW_PHRASES = [
+    'complete your interview', 'start your interview',
+    'complete the interview', 'record your answers',
+    'ai-powered interview', 'ai powered interview',
+    'complete an interview', 'video interview',
+    'recorded interview', 'one-way interview',
+    'interview questions', 'answer interview questions',
+    'take a quick interview', 'spark hire', 'hirevue',
+    'myinterview', 'complete your application interview',
+]
+
+# File that persists AI interview links between sessions
+_AI_INTERVIEW_LOG = cfg.BASE_DIR / "data" / "ai_interviews_pending.json"
+
+
+def _check_ai_interview(page) -> tuple:
+    """
+    Detect if the current page is an AI interview prompt (post-submission).
+    Returns (is_interview: bool, interview_url: str).
+    The application is already submitted at this point.
+    """
+    try:
+        body = page.evaluate("() => document.body.innerText.toLowerCase()") or ""
+        if not any(p in body for p in AI_INTERVIEW_PHRASES):
+            return False, ""
+
+        # Extract the interview link — look for a button/link with interview keywords
+        interview_url = page.evaluate("""
+            () => {
+                const kws = ['interview', 'spark', 'hirevue', 'myinterview', 'recorded'];
+                // Check current URL first
+                if (kws.some(k => location.href.toLowerCase().includes(k))) return location.href;
+                // Check links on page
+                const links = Array.from(document.querySelectorAll('a[href]'));
+                for (const a of links) {
+                    const h = a.getAttribute('href') || '';
+                    if (kws.some(k => h.toLowerCase().includes(k))) return h;
+                }
+                // Fall back to current page URL
+                return location.href;
+            }
+        """) or page.url or ""
+
+        return True, interview_url
+    except Exception:
+        return False, ""
+
+
+def _handle_ai_interview(page, title, company, job_url="") -> bool:
+    """
+    Handle the AI interview prompt that appears after Indeed application submission.
+    - Saves the interview link to ai_interviews_pending.json
+    - Sends email alert with the direct link
+    - Returns True (application was already submitted — treat as success)
+    """
+    is_interview, interview_url = _check_ai_interview(page)
+    if not is_interview:
+        return False
+
+    print(f"\n          🎤 AI INTERVIEW DETECTED — application already submitted!")
+    print(f"          🔗 Interview link: {interview_url[:80]}")
+    print(f"          📧 Sending interview link to your email...")
+
+    # Save to persistent log
+    try:
+        existing = []
+        if _AI_INTERVIEW_LOG.exists():
+            try:
+                existing = json.loads(_AI_INTERVIEW_LOG.read_text())
+            except Exception:
+                existing = []
+        existing.append({
+            "timestamp":     datetime.now().isoformat(),
+            "title":         title,
+            "company":       company,
+            "job_url":       job_url,
+            "interview_url": interview_url,
+            "status":        "pending",
+        })
+        _AI_INTERVIEW_LOG.parent.mkdir(parents=True, exist_ok=True)
+        _AI_INTERVIEW_LOG.write_text(json.dumps(existing, indent=2))
+        print(f"          💾 Saved to data/ai_interviews_pending.json")
+    except Exception as _e:
+        print(f"          ⚠  Could not save interview log: {_e}")
+
+    # Email alert
+    try:
+        notifier.send_ai_interview_alert(
+            title=title,
+            company=company,
+            interview_url=interview_url,
+            job_url=job_url,
+        )
+    except Exception as _e:
+        print(f"          ⚠  Interview email failed: {_e}")
+
+    return True  # application was submitted — count as success
+
 def _check_and_handle_captcha(page, title="", company="", job_url=""):
     """
-    Detect CAPTCHA (recaptcha bframe) on the page and handle it:
-      1. Send email alert with direct job URL (openable on phone)
-      2. Resize CAPTCHA iframe so Verify button is visible
-      3. Wait up to 10 minutes for user to solve it on any device
-      4. Return True if solved, False if timed out
-    Call this at the START of every step loop iteration.
+    Detect reCAPTCHA (bframe iframe) on the page and handle it.
+
+    Pro-level behaviour:
+      1. Alert email — instructs user to solve on the MAC browser (not phone)
+      2. Mac system notification with sound
+      3. Resize CAPTCHA iframe so Verify button is fully visible
+      4. Wait up to 10 minutes; auto-click Submit after solve
+      5. On timeout:
+         - Reset browser to Indeed homepage (clears broken page state)
+         - Increment consecutive-failure counter
+         - If counter hits CAPTCHA_COOLDOWN_THRESHOLD → take a 5-min cooldown
+      6. On successful solve → reset consecutive-failure counter
+      7. Returns True if solved (or no CAPTCHA), False if timed out
+
+    Call at the START of every step loop iteration AND after every Submit click.
     """
+    global _consecutive_captcha_failures
+
     try:
         captcha_visible = any(
             "bframe" in (f.url or "") for f in list(page.frames)
         )
         if not captcha_visible:
-            return True  # no CAPTCHA, all good
+            return True  # no CAPTCHA — all good
 
-        # Get the current page URL if not passed in
+        # Get the current page URL
         current_url = job_url or ""
         try:
             current_url = page.url or job_url or ""
@@ -1203,11 +1323,11 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
             pass
 
         print(f"\n          🚨🚨🚨  CAPTCHA DETECTED — ACTION REQUIRED  🚨🚨🚨")
-        print(f"          👉 Open the browser on your Mac and solve the CAPTCHA")
-        print(f"          👉 Or open this URL on your PHONE: {current_url}")
+        print(f"          👉 Go to your Mac and solve the CAPTCHA in the browser window")
+        print(f"          ⚠️  Opening the link on your phone will NOT solve it — wrong session")
         print(f"          ⏳ Waiting up to 10 minutes...")
 
-        # Send email alert with clickable link — can open on phone
+        # Email alert — clear Mac-only instructions
         try:
             notifier.send_captcha_alert(
                 title=title,
@@ -1217,12 +1337,14 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         except Exception as e:
             print(f"          ⚠  Could not send CAPTCHA email: {e}")
 
-        # Mac system notification popup — visible even when terminal is behind other windows
+        # Mac system notification — visible even when terminal is behind other windows
         try:
             import subprocess
+            safe_title   = (title or "job").replace('"', "'")
+            safe_company = (company or "company").replace('"', "'")
             subprocess.run([
                 "osascript", "-e",
-                f'display notification "Solve CAPTCHA for {title} @ {company}. Browser is open. You have 5 minutes." with title "🚨 Pipeline CAPTCHA Alert" sound name "Ping"'
+                f'display notification "Go to your Mac browser and solve the CAPTCHA for {safe_title} @ {safe_company}. You have 10 minutes." with title "🚨 CAPTCHA — Solve on Mac" sound name "Ping"'
             ], timeout=5)
             print(f"          🔔 Mac system notification sent")
         except Exception as e:
@@ -1237,26 +1359,26 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                         .find(f => f.src && f.src.includes('bframe'));
                     if (!bframe) return;
 
-                    // Step 2: Walk up to parent elements and remove overflow:hidden / clipping
+                    // Step 2: Walk up and remove overflow:hidden / clipping on parent chain
                     let el = bframe;
                     for (let i = 0; i < 10; i++) {
                         el = el.parentElement;
                         if (!el || el === document.body) break;
-                        el.style.overflow = 'visible';
-                        el.style.height = 'auto';
+                        el.style.overflow  = 'visible';
+                        el.style.height    = 'auto';
                         el.style.maxHeight = 'none';
-                        el.style.clip = 'none';
-                        el.style.clipPath = 'none';
+                        el.style.clip      = 'none';
+                        el.style.clipPath  = 'none';
                     }
 
-                    // Step 3: Position the iframe itself — large, centered, always on top
+                    // Step 3: Pin the iframe — large, centered, always on top
                     bframe.style.cssText = [
                         'position: fixed !important',
                         'top: 10px !important',
                         'left: 50% !important',
                         'transform: translateX(-50%) !important',
                         'width: 330px !important',
-                        'height: 650px !important',   /* taller so Verify is always visible */
+                        'height: 650px !important',
                         'z-index: 2147483647 !important',
                         'border: 4px solid #ff0000 !important',
                         'border-radius: 10px !important',
@@ -1265,7 +1387,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                         'overflow: visible !important',
                     ].join(';');
 
-                    // Step 4: Also fix the reCAPTCHA anchor checkbox if present
+                    // Step 4: Also surface the anchor checkbox iframe
                     document.querySelectorAll('iframe').forEach(f => {
                         if (f.src && f.src.includes('anchor')) {
                             f.style.zIndex = '2147483646';
@@ -1273,18 +1395,18 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                     });
                 }
             """)
-            print(f"          🔲 CAPTCHA window fixed — Verify button is now fully visible")
-            print(f"          💡 TIP: If still stuck, click CAPTCHA area then press Tab+Enter")
+            print(f"          🔲 CAPTCHA window pinned — Verify button is fully visible")
+            print(f"          💡 TIP: If still stuck, click the CAPTCHA area then press Tab → Enter")
         except Exception as e:
             print(f"          ⚠  CAPTCHA resize failed: {e}")
 
-        # Also maximize the browser viewport so there's more room
+        # Widen viewport so there's more room
         try:
             page.set_viewport_size({"width": 1440, "height": 900})
-        except:
+        except Exception:
             pass
 
-        # Wait up to 10 minutes for CAPTCHA to be solved
+        # ── Wait loop — up to 10 minutes ─────────────────────────────────────
         CAPTCHA_TIMEOUT = 600
         for i in range(CAPTCHA_TIMEOUT):
             time.sleep(1)
@@ -1292,7 +1414,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                 frames = list(page.frames)
                 still_captcha = any("bframe" in (f.url or "") for f in frames)
 
-                # Also check if page already confirmed — user may have clicked Submit manually
+                # Check if the page already confirmed (user may have clicked Submit manually)
                 page_text = ""
                 try:
                     page_text = page.evaluate("() => document.body.innerText || ''").lower()
@@ -1308,12 +1430,12 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
 
                 if already_confirmed:
                     print(f"          ✅ Confirmation detected during CAPTCHA wait — application submitted!")
+                    _consecutive_captcha_failures = 0  # success — reset streak
                     return True
 
                 if not still_captcha:
-                    print(f"          ✅ CAPTCHA solved! Clicking Submit and waiting 6s...")
-                    time.sleep(2)  # brief settle
-                    # Click Submit automatically so user doesn't have to
+                    print(f"          ✅ CAPTCHA solved! Auto-clicking Submit...")
+                    time.sleep(2)
                     try:
                         for frame in page.frames:
                             clicked = _safe_eval(frame, """
@@ -1333,7 +1455,8 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                                 break
                     except Exception:
                         pass
-                    time.sleep(6)  # let Indeed process the submit
+                    time.sleep(6)
+                    _consecutive_captcha_failures = 0  # success — reset streak
                     return True
 
             except Exception:
@@ -1343,14 +1466,45 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                 remaining = CAPTCHA_TIMEOUT - i - 1
                 mins = remaining // 60
                 secs = remaining % 60
-                print(f"          ⏳ Still waiting for CAPTCHA... ({mins}m {secs}s left) — solve it in the browser window")
+                print(f"          ⏳ Still waiting for CAPTCHA... ({mins}m {secs}s left) — solve in Mac browser")
 
+        # ── Timeout path ──────────────────────────────────────────────────────
         print(f"          ❌ CAPTCHA not solved in 10 minutes — skipping this job")
+
+        # RESET browser to Indeed homepage so the next job starts from a clean page
+        print(f"          🔄 Resetting browser to Indeed homepage (clearing broken page state)...")
+        try:
+            page.goto("https://www.indeed.com/", wait_until="domcontentloaded", timeout=15000)
+            time.sleep(random.uniform(3, 5))
+        except Exception as _nav_err:
+            print(f"          ⚠  Homepage reset failed ({_nav_err}) — pipeline will still continue")
+
+        # Track consecutive failures
+        _consecutive_captcha_failures += 1
+        print(f"          📊 Consecutive unsolved CAPTCHAs: {_consecutive_captcha_failures}")
+
+        # Cooldown if streak is too high — Indeed is rate-limiting the session
+        if _consecutive_captcha_failures >= CAPTCHA_COOLDOWN_THRESHOLD:
+            print(f"\n          ⏸  {_consecutive_captcha_failures} CAPTCHAs in a row — taking {CAPTCHA_COOLDOWN_SECS//60}-minute cooldown to let reCAPTCHA settle...")
+            try:
+                notifier.send_alert(
+                    subject=f"⏸ Pipeline cooldown — {_consecutive_captcha_failures} consecutive CAPTCHAs (Indeed)",
+                    body=(
+                        f"The Indeed pipeline hit {_consecutive_captcha_failures} unsolved CAPTCHAs in a row.\n"
+                        f"Taking a {CAPTCHA_COOLDOWN_SECS//60}-minute break to let reCAPTCHA cool down, then resuming automatically."
+                    ),
+                )
+            except Exception:
+                pass
+            time.sleep(CAPTCHA_COOLDOWN_SECS)
+            _consecutive_captcha_failures = 0  # reset after cooldown
+            print(f"          ▶  Cooldown done — resuming pipeline")
+
         return False
 
     except Exception as e:
         print(f"          ⚠  CAPTCHA check error (continuing): {e}")
-        return True  # don't crash — assume no CAPTCHA if check itself fails
+        return True  # don't crash — assume no CAPTCHA if the check itself blows up
 
 
 def _safe_eval(ctx, js, default=None):
@@ -1818,6 +1972,7 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
     """
     title       = job.get("title", "")
     company     = job.get("company", "")
+    job_url     = job.get("url", "") or job.get("job_url", "") or ""
     jd_for_fill = ""   # safe default — overwritten below
     jd_for_fill = job.get("description", "") or job.get("jd_text", "") or ""
 
@@ -1897,7 +2052,7 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
 
     # ── Walk multi-step form ───────────────────────────────────────────────────
     step           = 0
-    max_steps      = 20
+    max_steps      = 12   # was 20 — 12 steps × ~4s = ~50s max per form, fail fast
     last_btn       = None
     same_btn_count = 0
     submitted      = False
@@ -1905,9 +2060,14 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
     cover_done     = [False]
     last_url       = ""
     same_url_count = 0
+    _form_start    = time.time()
+    _form_timeout  = 90   # hard 90-second cap per application form
 
     try:
         while step < max_steps and not submitted:
+            if time.time() - _form_start > _form_timeout:
+                print(f"          ⏱  Form timeout ({_form_timeout}s) — moving on")
+                break
             step += 1
             time.sleep(2)
 
@@ -1949,14 +2109,88 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                                 if not _lbl or not _val:
                                     continue
                                 try:
-                                    # Try to fill by placeholder, label, or aria-label
-                                    _sel = f"[placeholder*='{_lbl}' i],[aria-label*='{_lbl}' i],textarea"
-                                    _el = apply_page.query_selector(_sel)
-                                    if _el:
-                                        _el.fill(_val)
-                                        print(f"             ✔ Vision filled '{_lbl}' = '{_val}'")
+                                    _filled = False
+
+                                    # ── Radio / checkbox — MUST use click(), not fill() ──────
+                                    # .fill() silently no-ops on radio inputs. The DOM value
+                                    # never changes, the form stays blocked, and Vision enters
+                                    # an infinite retry loop. Use JS click on the matching option.
+                                    try:
+                                        import json as _json_vf
+                                        _radio_clicked = apply_page.evaluate(f"""
+                                            () => {{
+                                                const lbl = {_json_vf.dumps(_lbl)}.toLowerCase();
+                                                const val = {_json_vf.dumps(_val)}.toLowerCase().trim();
+                                                const inputs = Array.from(document.querySelectorAll(
+                                                    'input[type=radio], input[type=checkbox]'
+                                                ));
+                                                for (const inp of inputs) {{
+                                                    const labelEl = document.querySelector('label[for="' + inp.id + '"]');
+                                                    const groupEl = inp.closest('fieldset, [role="group"], div[class*="question"], div[class*="field"]');
+                                                    const groupTxt = (groupEl ? groupEl.innerText : '').toLowerCase();
+                                                    const optTxt = (labelEl ? labelEl.innerText : (inp.value || '')).toLowerCase().trim();
+                                                    const groupMatch = groupTxt.includes(lbl) || lbl.includes(groupTxt.slice(0,30));
+                                                    const valMatch = optTxt === val || optTxt.startsWith(val) || val.startsWith(optTxt.slice(0,6));
+                                                    if (groupMatch && valMatch && !inp.checked) {{
+                                                        inp.click();
+                                                        ['input','change'].forEach(ev => inp.dispatchEvent(new Event(ev, {{bubbles:true}})));
+                                                        return optTxt;
+                                                    }}
+                                                }}
+                                                return null;
+                                            }}
+                                        """)
+                                        if _radio_clicked:
+                                            _filled = True
+                                            print(f"             ✔ Vision radio '{_lbl[:40]}' → clicked '{_radio_clicked}'")
+                                    except Exception:
+                                        pass
+
+                                    # ── Text / select — use Playwright locators ───────────────
+                                    if not _filled:
+                                        try:
+                                            _loc = apply_page.get_by_placeholder(_lbl, exact=False).first
+                                            if _loc.count() > 0:
+                                                _loc.fill(_val, timeout=5000)
+                                                _filled = True
+                                        except Exception:
+                                            pass
+                                    if not _filled:
+                                        try:
+                                            _loc = apply_page.get_by_label(_lbl, exact=False).first
+                                            if _loc.count() > 0:
+                                                _tag = ""
+                                                try:
+                                                    _tag = _loc.evaluate("el => el.type || ''")
+                                                except Exception:
+                                                    pass
+                                                if _tag in ("radio", "checkbox"):
+                                                    if _val.lower() in ("yes", "true", "1"):
+                                                        _loc.check(timeout=5000)
+                                                    else:
+                                                        _loc.uncheck(timeout=5000)
+                                                else:
+                                                    _loc.fill(_val, timeout=5000)
+                                                _filled = True
+                                        except Exception:
+                                            pass
+                                    if not _filled:
+                                        import re as _re2
+                                        _safe = _re2.sub(r"[\"'\\]", "", _lbl)[:60]
+                                        if _safe:
+                                            try:
+                                                _el = apply_page.query_selector(
+                                                    f"[placeholder*='{_safe}' i],[aria-label*='{_safe}' i]"
+                                                )
+                                                if _el:
+                                                    _el.fill(_val)
+                                                    _filled = True
+                                            except Exception:
+                                                pass
+                                    if _filled:
+                                        print(f"             ✔ Vision filled '{_lbl[:50]}' = '{_val}'")
                                     else:
-                                        print(f"             · Vision could not find field '{_lbl}'")
+                                        print(f"             · Vision could not find field '{_lbl[:50]}'")
                                 except Exception as _fe:
                                     print(f"             ⚠ Vision fill error: {_fe}")
                             # Click the button Vision recommended
@@ -2024,10 +2258,16 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
             # ── CAPTCHA check at start of every step ──────────────────────────
             captcha_ok = _check_and_handle_captcha(apply_page, title, company, job_url=job_url)
             if not captcha_ok:
-                break  # skip this job — CAPTCHA timed out
+                return False, "captcha-timeout"  # caller queues for retry
 
             if _is_confirmed(apply_page):
                 print(f"          🎉 Confirmation text detected — application submitted!")
+                submitted = True
+                break
+
+            # ── AI interview prompt (post-submission) ──────────────────────
+            if _handle_ai_interview(apply_page, title, company, job_url=job_url):
+                print(f"          ✅ AI interview handled — counting as submitted")
                 submitted = True
                 break
 
@@ -2125,21 +2365,29 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                     # Check for CAPTCHA that appeared after clicking Submit
                     captcha_ok = _check_and_handle_captcha(apply_page, title, company, job_url=job_url)
                     if not captcha_ok:
-                        print(f"          ❌ CAPTCHA timed out — skipping job")
-                        submitted = False
-                        break
+                        print(f"          ❌ CAPTCHA timed out — queuing for retry")
+                        return False, "captcha-timeout"  # caller queues for retry
 
-                    # Check for confirmation
+                    # Check for confirmation or AI interview
                     time.sleep(3)
                     if _is_confirmed(apply_page):
                         print(f"          🎉 Application submitted and confirmed!")
                         submitted = True
                         break
+                    if _handle_ai_interview(apply_page, title, company, job_url=job_url):
+                        print(f"          ✅ AI interview detected post-submit — counting as submitted")
+                        submitted = True
+                        break
 
                     current_url = apply_page.url or ""
                     if "review" not in current_url and "smartapply" not in current_url:
-                        print(f"          🎉 Navigated away from review — submitted!")
-                        submitted = True
+                        # One more AI interview check after navigation
+                        if _handle_ai_interview(apply_page, title, company, job_url=job_url):
+                            print(f"          ✅ AI interview page — counting as submitted")
+                            submitted = True
+                        else:
+                            print(f"          🎉 Navigated away from review — submitted!")
+                            submitted = True
                         break
 
                     if attempt < MAX_SUBMIT_ATTEMPTS:
@@ -2530,6 +2778,8 @@ def main():
             viewport={"width": 1280, "height": 900},
         )
         page = browser.pages[0] if browser.pages else browser.new_page()
+        # Auto-dismiss any JS alert/confirm dialogs — prevents ProtocolError crash
+        browser.on("dialog", lambda d: d.dismiss())
 
         ensure_login(page)
 
@@ -2667,10 +2917,15 @@ def main():
                     continue
 
                 # ── Local pre-filter — zero token cost ────────────────────────
-                # Run before loading job page or calling any API.
-                # Uses description from card (short) — enough for keyword check.
-                _skip_early, _match_ct = ce.local_prefilter(title, title)  # title-only fast check
-                if _skip_early:
+                # NOTE: only run domain check on title — prefilter needs full JD text
+                # to count skill matches accurately. Title-only check was incorrectly
+                # skipping valid jobs (e.g. "Junior Data Engineer" only has 1 skill match).
+                # The full JD prefilter runs later at line 3015 after page load.
+                _domain_words = {"data", "sql", "python", "analytics", "engineer",
+                                 "analyst", "scientist", "bi", "etl", "pipeline",
+                                 "database", "reporting", "intelligence", "ml",
+                                 "cloud", "spark", "databricks", "snowflake"}
+                if not any(w in title.lower() for w in _domain_words):
                     skipped_count += 1
                     continue
 
@@ -2763,6 +3018,12 @@ def main():
                 jd = details.get("description","")
                 live_url = details.get("jobUrl", job_url)
 
+                # ── Security clearance check — kill immediately, no API cost ──
+                if any(kw in jd.lower() for kw in cfg.CLEARANCE_KEYWORDS):
+                    print(f"  🚫 Clearance required — skipping {company}")
+                    skipped_count += 1
+                    continue
+
                 # ── Full JD pre-filter — runs after page load, before API call ─
                 _skip_jd, _jd_matches = ce.local_prefilter(jd, title)
                 if _skip_jd:
@@ -2776,7 +3037,7 @@ def main():
 
                 # ── Score with Claude ──────────────────────────────────────────
                 result = ce.score_fit(profile_summary, jd, title, company)
-                score  = result.get("score", 0) if isinstance(result, dict) else int(result)
+                score  = int(result.get("score", 0)) if isinstance(result, dict) else int(result)
                 scored_count += 1
                 grade  = result.get("grade", "") if isinstance(result, dict) else ""
                 print(f"  🎯 Fit score: {score}%  {grade}  {'✅' if score >= cfg.FIT_THRESHOLD else '❌'}")
@@ -2819,7 +3080,8 @@ def main():
                 print(f"  🚀 Applying via Indeed Apply...")
                 # Include full JD so apply_to_job can use it for salary + contextual answers
                 job_info = {"title": title, "company": company,
-                            "description": jd, "jd_text": jd}
+                            "description": jd, "jd_text": jd,
+                            "url": live_url or job_url}
 
                 try:
                     success, reason = apply_to_job(
@@ -2828,6 +3090,19 @@ def main():
                     )
                 except Exception as e:
                     success, reason = False, str(e)
+
+                # Queue CAPTCHA-timed-out jobs for a retry pass after the main loop
+                if not success and reason == "captcha-timeout":
+                    _captcha_retry_queue.append({
+                        "title":       title,
+                        "company":     company,
+                        "job_url":     live_url or job_url,
+                        "score":       score,
+                        "grade":       grade,
+                        "jd":          jd,
+                        "resume_path": resume_path,
+                    })
+                    print(f"  🔁 Queued for CAPTCHA retry ({len(_captcha_retry_queue)} in queue)")
 
                 status = "Applied" if (success and not DRY_RUN) else ("Dry-Run" if DRY_RUN else "Failed")
                 icon   = "✅" if success else "❌"
@@ -2875,6 +3150,81 @@ def main():
                 if success and not DRY_RUN:
                     applied_count += 1
 
+                time.sleep(2)
+
+        # ── CAPTCHA retry pass ────────────────────────────────────────────────
+        # Jobs that timed out on CAPTCHA get one more attempt after the main loop.
+        # By then reCAPTCHA has cooled down and the user may be at their Mac.
+        if _captcha_retry_queue and applied_count < MAX_APPLY:
+            retry_count = min(len(_captcha_retry_queue), MAX_APPLY - applied_count)
+            print(f"\n{'='*60}")
+            print(f"  🔁 CAPTCHA RETRY PASS — {retry_count} job(s) to retry")
+            print(f"  Sleeping 3 minutes to let reCAPTCHA cool down...")
+            time.sleep(180)
+
+            for retry_item in _captcha_retry_queue[:retry_count]:
+                if applied_count >= MAX_APPLY:
+                    break
+
+                r_title       = retry_item["title"]
+                r_company     = retry_item["company"]
+                r_job_url     = retry_item["job_url"]
+                r_score       = retry_item["score"]
+                r_grade       = retry_item["grade"]
+                r_resume_path = retry_item["resume_path"]
+                r_jd          = retry_item["jd"]
+
+                print(f"\n  🔁 Retry: {r_company} — {r_title}")
+                try:
+                    page.goto(r_job_url, wait_until="domcontentloaded", timeout=20000)
+                    time.sleep(random.uniform(3, 5))
+                except Exception as _re:
+                    print(f"  ⚠  Retry nav failed: {_re} — skipping")
+                    continue
+
+                r_job_info = {
+                    "title": r_title, "company": r_company,
+                    "description": r_jd, "jd_text": r_jd,
+                    "url": r_job_url,
+                }
+                try:
+                    r_success, r_reason = apply_to_job(
+                        page, browser, r_job_info, r_resume_path, "",
+                        profile_text=profile_summary, dry_run=DRY_RUN
+                    )
+                except Exception as _re:
+                    r_success, r_reason = False, str(_re)
+
+                r_status = "Applied" if (r_success and not DRY_RUN) else ("Dry-Run" if DRY_RUN else "Failed")
+                r_icon   = "✅" if r_success else "❌"
+                print(f"  {r_icon} Retry {r_status}: {r_reason}")
+
+                _run_log.job_start(r_title, r_company, r_job_url, fit_score=r_score, grade=r_grade)
+                _run_log.job_result(r_status, reason=f"retry:{r_reason}",
+                                    resume_file=Path(r_resume_path).name if r_resume_path else "")
+
+                if r_success and not DRY_RUN:
+                    notifier.notify_applied(
+                        title=r_title, company=r_company, fit_score=r_score,
+                        resume_path=r_resume_path or "",
+                        cover_letter_path="",
+                        platform="Indeed",
+                        job_url=r_job_url,
+                    )
+                    applied_count += 1
+
+                log.append({
+                    "status":    r_status,
+                    "title":     r_title,
+                    "company":   r_company,
+                    "score":     r_score,
+                    "url":       r_job_url,
+                    "resume":    r_resume_path or "",
+                    "timestamp": datetime.now().isoformat(),
+                    "platform":  "Indeed",
+                    "reason":    f"captcha-retry:{r_reason}",
+                })
+                save_log(log)
                 time.sleep(2)
 
         browser.close()

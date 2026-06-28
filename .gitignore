@@ -85,8 +85,7 @@ __pycache__/
 .claude/
 *.test_persist.txt
 test_persist.txt
-snapshot.sh
 
 # ── Dev scripts not meant for public use ─────────────────────────────────────
 push_to_github.sh
-safe_update.sh
+_push.sh
