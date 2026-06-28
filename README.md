@@ -420,6 +420,56 @@ All personal data stays local. The repo contains only pipeline logic. To use thi
 
 ---
 
+## Change Management & Safety Net
+
+The pipeline uses a local-first safety workflow — no internet required for day-to-day protection. GitHub is a secondary backup used when explicitly triggered.
+
+### Before making any change
+
+```bash
+bash safe_update.sh start "describe what you're trying"
+# Creates an experiment branch — main stays untouched
+```
+
+### After the change works
+
+```bash
+# 1. Bump PIPELINE_VERSION in config.py  (e.g. 1.0.0 → 1.0.1)
+# 2. Log it in CHANGELOG.md
+# 3. Merge back to main:
+bash safe_update.sh keep
+```
+
+### If the change breaks something
+
+```bash
+bash safe_update.sh discard
+# Back to last working state instantly — no data lost
+```
+
+### Save to GitHub (second line of defense)
+
+```bash
+bash snapshot.sh --push
+```
+
+### Quick reference
+
+| Command | What it does |
+|---|---|
+| `bash safe_update.sh start "desc"` | Create experiment branch, protect main |
+| `bash safe_update.sh keep` | Merge experiment → main (local only) |
+| `bash safe_update.sh discard` | Throw away experiment, back to main |
+| `bash safe_update.sh status` | See current branch + last commit |
+| `bash snapshot.sh` | Save locally (no internet needed) |
+| `bash snapshot.sh --push` | Save locally + push to GitHub |
+| `python preflight_check.py` | Health check before any run |
+| `python run_all.py --dry-run` | Test run — no actual submissions |
+
+`PIPELINE_VERSION` in `config.py` is printed in every log so you always know which version ran. Bump it with every meaningful change and record it in `CHANGELOG.md`.
+
+---
+
 ## Stats
 
 - **Platforms:** LinkedIn · Indeed · Workday

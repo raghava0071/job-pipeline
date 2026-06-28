@@ -3,6 +3,21 @@
 # Edit this file to change any behaviour across the whole system.
 # =============================================================================
 
+# ── Version ────────────────────────────────────────────────────────────────────
+# Bump this whenever you make a meaningful change so the morning log shows
+# which version ran. Format: MAJOR.MINOR.PATCH
+#   MAJOR — big structural change (new platform, new flow)
+#   MINOR — new feature or filter added
+#   PATCH — small fix or tuning
+PIPELINE_VERSION = "1.0.0"
+
+# ── Platform switches — turn a platform off without touching its code ──────────
+# Set to False to skip that platform entirely for the current run.
+# Useful when testing a fix on one platform while keeping others live.
+INDEED_ENABLED   = True
+LINKEDIN_ENABLED = True
+WORKDAY_ENABLED  = True
+
 from pathlib import Path
 import os
 
@@ -32,17 +47,17 @@ CLAUDE_MODEL_FAST   = "claude-haiku-4-5-20251001"   # form filling, bullet rewri
 CLAUDE_MODEL_SMART  = "claude-sonnet-4-6"            # fit scoring, cover letters
 
 # ── Fit Gate ───────────────────────────────────────────────────────────────────
-# LinkedIn is 80% — only 50 slots/day, every one must count.
-# Indeed is 72% — bigger pool, can be slightly looser, but no junk.
-FIT_THRESHOLD          = 72   # Indeed/Workday minimum Claude score (%)
-LINKEDIN_FIT_THRESHOLD = 80   # LinkedIn minimum — 50/day hard cap
+# 65% = good throughput sweet spot. 72% was too strict — only 2-3 apps per run.
+# Claude engine default also uses 65%, so these are now in sync.
+FIT_THRESHOLD          = 60   # Indeed/Workday minimum Claude score (%)
+LINKEDIN_FIT_THRESHOLD = 60   # LinkedIn minimum — 72% was killing throughput
 
 # ── Apply Limits ───────────────────────────────────────────────────────────────
 MAX_APPLIES_PER_RUN    = 200  # total cap per run across all platforms
 LINKEDIN_DAILY_LIMIT   = 50   # hard LinkedIn cap (platform limit)
 INDEED_DAILY_LIMIT     = 150  # target Indeed applications per day
 APPLY_DELAY_SEC      = 2    # seconds between applications
-FORM_MAX_STEPS       = 30   # max form steps before giving up
+FORM_MAX_STEPS       = 15   # max form steps before giving up
 STUCK_THRESHOLD      = 15   # same button clicked this many times → declare stuck
 
 # ── LinkedIn speed settings ────────────────────────────────────────────────────
@@ -87,6 +102,11 @@ FAKE_JOB_TITLE_WORDS = {
     "teacher", "tutor", "instructor",
 }
 
+CLEARANCE_KEYWORDS = {
+    "security clearance", "secret clearance", "top secret", "ts/sci",
+    "dod clearance", "clearance required", "public trust", "polygraph",
+}
+
 # ── Title typo signals — spam postings routinely misspell role names ──────────
 # These exact substrings in the job title (lowercased) mark it as bot-generated.
 FAKE_JOB_TITLE_TYPOS = {
@@ -114,6 +134,12 @@ FAKE_JOB_COMPANY_WORDS = {
     "it staffing", "tech staffing", "global staffing", "us staffing",
     "placement services", "manpower", "adecco", "randstad", "kelly services",
     "spherion", "aerotek", "apex group", "teksystems", "insight global",
+    # Body-shops confirmed from apply log — keep adding as seen
+    "beaconfire", "contractstaffingrecruiters", "american unit",
+    "legacy ai tech", "legacy ai", "vcmax", "zb group", "prosum",
+    "net2source", "n2s global", "morgan mckinley", "akkodis",
+    "synchrony systems", "synergy ventures", "raas infotek", "vertex elite",
+    "washon", "aliando", "foresight works", "ursus", "system one",
     # Mid-tier body-shops / bench-sales firms from actual apply log
     "smart it frame",       # body shop / C2C mill
     "abacus service",       # staffing body shop
@@ -280,6 +306,9 @@ COMPANY_WHITELIST = {
     "affirm", "coinbase", "robinhood",
     # Staffing / contracting (real ones — not body-shops)
     "dexian", "kforce", "robert half", "beacon hill",
+    # Large Indian IT / global consulting firms with US operations
+    "tata consultancy", "tcs", "infosys", "wipro", "cognizant", "hcl",
+    "tech mahindra", "capgemini", "ltimindtree", "mphasis", "hexaware",
 }
 
 # ── Company trust scoring ──────────────────────────────────────────────────────
@@ -377,12 +406,14 @@ SENIOR_WORDS = {
 # data/ML/analytics/engineering, skip it. Prevents "Junior Analyst" at a
 # shipping company, "AI Engineer" from a Gulf job board, etc.
 TARGET_ROLE_KEYWORDS = {
-    "data", "analytics", "analyst", "engineer", "scientist",
-    "ml", "machine learning", "ai ", "artificial intelligence",
-    "bi ", "business intelligence", "etl", "pipeline",
-    "database", "sql", "python", "cloud", "platform",
-    "reporting", "insight", "intelligence", "quantitative",
-    "nlp", "deep learning", "modeling",
+    "data analyst", "data engineer", "data scientist", "data platform",
+    "analytics engineer", "analytics analyst", "analytics ",
+    "ml engineer", "machine learning", "ai engineer", "applied scientist",
+    "bi analyst", "bi developer", "business intelligence",
+    "etl", "pipeline engineer", "database analyst", "database developer",
+    "reporting analyst", "insights analyst", "quantitative analyst",
+    "nlp engineer", "deep learning", "data modeling",
+    "databricks", "snowflake", "dbt ", "spark engineer",
 }
 
 # ── Blocked companies — skip entirely, don't even attempt ─────────────────────

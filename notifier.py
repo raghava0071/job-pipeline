@@ -248,38 +248,34 @@ def notify_session_done(applied: int, scored: int, skipped: int,
 
 def send_captcha_alert(title: str, company: str, job_url: str = "") -> bool:
     """
-    Send a mobile-friendly CAPTCHA alert email.
-    Includes a big clickable button with the job URL so the user can open it
-    on their phone (if logged into Indeed) and attempt to re-apply directly.
-    Pipeline waits up to 10 minutes for the CAPTCHA to be solved.
+    Send a CAPTCHA alert email.
+    The CAPTCHA lives in the Playwright browser on the Mac — it cannot be solved
+    from a phone or any other device. The email tells the user which job triggered
+    it and instructs them to switch to the Mac browser to solve it there.
+    Pipeline waits up to 10 minutes.
     """
     if not ENABLED:
         return False
     try:
         _load_env()
         now = datetime.now().strftime("%b %d at %I:%M %p")
-        subject_line = f"🚨 CAPTCHA — {title} @ {company} — Pipeline waiting 10 min"
+        subject_line = f"🚨 CAPTCHA — {title} @ {company} — Open your Mac browser NOW"
 
-        # Big tap-friendly button for mobile
-        job_button = ""
+        # Job reference block (read-only — do NOT tap to solve, just for context)
+        job_ref = ""
         if job_url:
-            job_button = f"""
-  <a href="{job_url}"
-     style="display:block;margin:20px 0;padding:16px;background:#0a66c2;color:white;
-            text-decoration:none;border-radius:10px;font-size:17px;font-weight:bold;
-            text-align:center;">
-    👆 Open Job Page on Phone
-  </a>
-  <p style="font-size:12px;color:#6b7280;word-break:break-all;">
-    URL: {job_url}
-  </p>"""
+            job_ref = f"""
+  <div style="background:#f3f4f6;border-radius:8px;padding:12px;margin:16px 0;">
+    <p style="margin:0 0 6px;font-size:13px;color:#6b7280;font-weight:bold;">JOB REFERENCE (for context only):</p>
+    <p style="margin:0;font-size:12px;color:#374151;word-break:break-all;">{job_url}</p>
+  </div>"""
 
         html = f"""
 <html><body style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:20px;">
 
 <div style="background:#fff3cd;border:3px solid #f59e0b;border-radius:14px;padding:24px;">
 
-  <h2 style="color:#92400e;margin:0 0 12px;">🚨 CAPTCHA on Application</h2>
+  <h2 style="color:#92400e;margin:0 0 12px;">🚨 CAPTCHA Detected — Action Required on Mac</h2>
 
   <table style="width:100%;font-size:15px;border-collapse:collapse;">
     <tr><td style="padding:6px 0;color:#6b7280;width:90px;"><b>Job</b></td>
@@ -290,14 +286,20 @@ def send_captcha_alert(title: str, company: str, job_url: str = "") -> bool:
         <td style="padding:6px 0;color:#6b7280;">{now}</td></tr>
   </table>
 
-  {job_button}
+  {job_ref}
 
   <div style="background:#fef9c3;border-radius:8px;padding:14px;margin-top:14px;">
-    <p style="margin:0;font-size:14px;color:#713f12;">
-      <b>Pipeline is PAUSED — waiting up to 10 minutes.</b><br><br>
-      Option 1: Open your Mac browser and solve the CAPTCHA there.<br>
-      Option 2: Tap the button above → log into Indeed on your phone → solve it.<br><br>
-      If not solved in 10 minutes, this job will be skipped automatically.
+    <p style="margin:0;font-size:15px;color:#713f12;">
+      <b>⚠️ You MUST solve this on your Mac — not your phone.</b><br><br>
+      The CAPTCHA is running inside the pipeline's browser window on your Mac.
+      Opening the link on your phone opens a separate session and does <u>nothing</u>
+      to the CAPTCHA the pipeline is waiting on.<br><br>
+      <b>Steps:</b><br>
+      1. Go to your Mac<br>
+      2. Open the Chromium/pipeline browser window (check Dock)<br>
+      3. Solve the reCAPTCHA checkbox that's on screen<br>
+      4. Pipeline will continue automatically<br><br>
+      <span style="color:#92400e;">⏳ If not solved in 10 minutes, this job is skipped and the pipeline moves on.</span>
     </p>
   </div>
 
@@ -318,6 +320,84 @@ def send_captcha_alert(title: str, company: str, job_url: str = "") -> bool:
         return True
     except Exception as e:
         print(f"          📧 CAPTCHA alert failed: {e}")
+        return False
+
+
+def send_ai_interview_alert(title: str, company: str, interview_url: str, job_url: str = "") -> bool:
+    """
+    Alert email when Indeed shows an AI interview prompt after application submission.
+    Application is already submitted — AI interview is optional/extra.
+    Sends the direct interview link so the user can complete it later.
+    """
+    if not ENABLED:
+        return False
+    try:
+        _load_env()
+        now = datetime.now().strftime("%b %d at %I:%M %p")
+        subject_line = f"🎤 AI Interview Ready — {title} @ {company} — Complete when you can"
+
+        interview_btn = ""
+        if interview_url:
+            interview_btn = f"""
+  <a href="{interview_url}"
+     style="display:block;margin:20px 0;padding:16px;background:#16a34a;color:white;
+            text-decoration:none;border-radius:10px;font-size:17px;font-weight:bold;
+            text-align:center;">
+    🎤 Start AI Interview
+  </a>
+  <p style="font-size:12px;color:#6b7280;word-break:break-all;">
+    Direct link: {interview_url}
+  </p>"""
+
+        job_ref = ""
+        if job_url and job_url != interview_url:
+            job_ref = f'<p style="font-size:12px;color:#6b7280;">Job posting: <a href="{job_url}">{job_url[:80]}</a></p>'
+
+        html = f"""
+<html><body style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:20px;">
+
+<div style="background:#f0fdf4;border:3px solid #16a34a;border-radius:14px;padding:24px;">
+
+  <h2 style="color:#15803d;margin:0 0 12px;">✅ Applied + 🎤 AI Interview Pending</h2>
+
+  <table style="width:100%;font-size:15px;border-collapse:collapse;">
+    <tr><td style="padding:6px 0;color:#6b7280;width:90px;"><b>Job</b></td>
+        <td style="padding:6px 0;color:#111;"><b>{title}</b></td></tr>
+    <tr><td style="padding:6px 0;color:#6b7280;"><b>Company</b></td>
+        <td style="padding:6px 0;color:#111;">{company}</td></tr>
+    <tr><td style="padding:6px 0;color:#6b7280;"><b>Time</b></td>
+        <td style="padding:6px 0;color:#6b7280;">{now}</td></tr>
+  </table>
+
+  {interview_btn}
+  {job_ref}
+
+  <div style="background:#dcfce7;border-radius:8px;padding:14px;margin-top:14px;">
+    <p style="margin:0;font-size:14px;color:#14532d;">
+      <b>✅ Your application was submitted successfully.</b><br><br>
+      Indeed also wants you to complete a short AI interview (recorded video/audio responses).
+      This is optional but increases your chances — complete it when you have 10–15 minutes.<br><br>
+      The pipeline saved the link above and skipped the interview so it could keep applying to more jobs.
+    </p>
+  </div>
+
+</div>
+</body></html>"""
+
+        msg = MIMEMultipart("alternative")
+        msg["From"]    = NOTIFY_EMAIL
+        msg["To"]      = NOTIFY_EMAIL
+        msg["Subject"] = subject_line
+        msg.attach(MIMEText(html, "html"))
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(NOTIFY_EMAIL, GMAIL_APP_PASSWORD)
+            server.sendmail(NOTIFY_EMAIL, NOTIFY_EMAIL, msg.as_string())
+
+        print(f"          📧 AI interview alert sent → {NOTIFY_EMAIL}")
+        return True
+    except Exception as e:
+        print(f"          📧 AI interview alert failed: {e}")
         return False
 
 
