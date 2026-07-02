@@ -2826,11 +2826,22 @@ def main():
     profile_summary = ce.build_profile_summary(full_profile)
 
     log = load_log()
-    # Cross-platform dedup: merge LinkedIn log so Indeed skips jobs already applied there
+    # Cross-platform dedup: merge LinkedIn log so Indeed skips jobs already applied there.
+    # IMPORTANT: kept in a SEPARATE dedup_log, never merged into `log` itself.
+    # `log` is what gets appended-to and saved back to indeed_applied_log.json — merging
+    # LinkedIn's ~8-16k entries into it directly (old behavior) meant every save during
+    # an Indeed run rewrote the entire LinkedIn history back out under the wrong schema
+    # (LinkedIn logs use a "note" field for the skip/fail reason, Indeed uses "reason"),
+    # which is why indeed_applied_log.json ballooned to 119k+ records (only ~3% actually
+    # Indeed) and why most "Failed" entries looked reason-less when reviewed.
+    dedup_log = list(log)
     _li_log = cfg.BASE_DIR / "data" / "apply_log.json"
     if _li_log.exists():
         import json as _j
-        log = log + _j.loads(_li_log.read_text())
+        try:
+            dedup_log = dedup_log + _j.loads(_li_log.read_text())
+        except Exception:
+            pass
     applied_count  = 0
     scored_count   = 0
     skipped_count  = 0
@@ -3040,7 +3051,7 @@ def main():
                     continue
 
                 # Quick dedup check
-                if already_applied(job_url, log, title, company):
+                if already_applied(job_url, dedup_log, title, company):
                     print(f"  ↩  {company} — {title} → already applied (dedup)")
                     skipped_count += 1
                     continue
