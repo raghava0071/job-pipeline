@@ -41,6 +41,7 @@ except ImportError:
     _pick_salary = lambda jd, title: "75000"
     _salary_rule = lambda jd, title: "- salary: answer 75000 (plain number only)"
 import notifier                  # Gmail notifications on each apply (optional)                        # ← global values for the whole project
+import staffing_filter as _staffing  # skip staffing agencies / consulting firms (user preference)
 
 DATA_DIR    = cfg.DATA_DIR
 SESSION_DIR = cfg.SESSION_LI
@@ -899,7 +900,7 @@ Rules:
 - For radio: return the EXACT option id to click
 - For checkbox: return "check" if it should be checked (e.g. agreement/terms), else "skip"
 - Work authorization: candidate IS authorized (OPT), does NOT need sponsorship → answer Yes/authorized
-- For "years of X experience" questions: use the per-skill years in the profile above (Python=4, SQL=4, etc.)
+- For "years of X experience" questions: use the per-skill years in the profile above (Python=4, SQL=4, etc.) — always a WHOLE number, never a decimal like "2.5"
 - Salary: 75000 (or 75000-90000 if a range is needed)
 - For industry-specific questions where candidate has no direct experience (e.g. healthcare, senior care): answer honestly but positively — highlight transferable skills and eagerness to learn
 - For unknown/unclear questions: use best professional judgment from the profile context; never leave required fields blank
@@ -1027,13 +1028,25 @@ Rules:
 
             try:
                 if ftype in ("text","tel","number","url","email","textarea"):
+                    _ans_str = str(ans)
+                    if ftype == "number" and _ans_str:
+                        # Some sites' number fields reject decimals (e.g. Indeed's
+                        # "Answer must be a valid number (no decimals)") — round
+                        # any fractional years-of-experience answer to a whole number.
+                        import re as _re3
+                        _num_match = _re3.search(r'-?\d+(?:\.\d+)?', _ans_str)
+                        if _num_match:
+                            try:
+                                _ans_str = str(round(float(_num_match.group(0))))
+                            except ValueError:
+                                pass
                     if fid:
                         el = page.locator(f"#{fid}").first
                     else:
                         el = page.locator(f"[aria-label='{field.get('label','')}']").first
                     if el.count() and el.is_visible():
-                        el.fill(str(ans))
-                        print(f"          ✏  '{field.get('label','?')[:40]}' → '{str(ans)[:50]}'")
+                        el.fill(_ans_str)
+                        print(f"          ✏  '{field.get('label','?')[:40]}' → '{_ans_str[:50]}'")
                         time.sleep(0.1)
 
                 elif ftype == "select":
@@ -1594,7 +1607,10 @@ def main():
         page = browser.pages[0] if browser.pages else browser.new_page()
         # Auto-dismiss any JS alert/confirm dialogs — prevents ProtocolError crash
         # when a dialog fires after navigation and Playwright's driver tries to handle it.
-        browser.on("dialog", lambda d: d.dismiss())
+        def _safe_dismiss(d):
+            try: d.dismiss()
+            except Exception: pass
+        browser.on("dialog", _safe_dismiss)
         ensure_login(page)
 
         for qi, kw in enumerate(SEARCH_QUERIES, 1):
@@ -1634,16 +1650,38 @@ def main():
                 page.keyboard.press("End"); time.sleep(1.2)
             page.keyboard.press("Home"); time.sleep(1)
 
-            job_ids = page.evaluate("""
-                () => {
-                    const seen = new Set(), res = [];
-                    for (const a of document.querySelectorAll('a[href*="/jobs/view/"]')) {
-                        const m = a.href.match(/jobs\\/view\\/(\\d+)/);
-                        if (m && !seen.has(m[1])) { seen.add(m[1]); res.push(m[1]); }
+            def _scrape_job_ids():
+                return page.evaluate("""
+                    () => {
+                        const seen = new Set(), res = [];
+                        for (const a of document.querySelectorAll('a[href*="/jobs/view/"]')) {
+                            const m = a.href.match(/jobs\\/view\\/(\\d+)/);
+                            if (m && !seen.has(m[1])) { seen.add(m[1]); res.push(m[1]); }
+                        }
+                        return res;
                     }
-                    return res;
-                }
-            """) or []
+                """) or []
+
+            # Guard: a JS dialog (e.g. "leave site?") firing right after navigation
+            # can kill the page/driver between goto() and here — this crashed whole
+            # runs before (uncaught "Page.evaluate: ...browser has been closed").
+            try:
+                job_ids = _scrape_job_ids()
+            except PWError as _pwe:
+                if "Target page, context or browser has been closed" in str(_pwe) or \
+                   "Not attached to an active page" in str(_pwe):
+                    print(f"  ⚠  Browser session died reading job cards — reopening page...")
+                    try:
+                        page = browser.new_page()
+                        page.goto(build_url(kw), wait_until="domcontentloaded", timeout=30000)
+                        time.sleep(3)
+                        job_ids = _scrape_job_ids()
+                    except Exception as _re:
+                        print(f"  ❌ Could not recover after browser crash: {_re} — skipping query '{kw}'")
+                        continue
+                else:
+                    print(f"  ⚠  Error reading job cards: {_pwe} — skipping query")
+                    continue
 
             print(f"    Found {len(job_ids)} job cards")
 
@@ -1679,7 +1717,25 @@ def main():
                 except:
                     continue
 
-                details = extract_right_panel(page)
+                # Guard: same browser-closed race as the job-cards scrape above,
+                # but far more frequent since this runs once per job card.
+                try:
+                    details = extract_right_panel(page)
+                except PWError as _pwe:
+                    if "Target page, context or browser has been closed" in str(_pwe) or \
+                       "Not attached to an active page" in str(_pwe):
+                        print(f"      [{jid}] ⚠  Browser session died reading job details — reopening page...")
+                        try:
+                            page = browser.new_page()
+                            page.goto(build_url(kw), wait_until="domcontentloaded", timeout=30000)
+                            time.sleep(3)
+                        except Exception as _re:
+                            print(f"      [{jid}] ❌ Could not recover: {_re} — stopping LinkedIn run")
+                            break
+                        continue
+                    else:
+                        print(f"      [{jid}] ⚠  Error reading job details: {_pwe} — skip")
+                        continue
                 # Second dedup: company+title (catches same job across search queries)
                 if already_applied(job_url, log,
                                    title=details.get("title",""),
@@ -1699,7 +1755,11 @@ def main():
                 if len(description) < 100:
                     print(f"      [{jid}] {company} — description too short, retrying...")
                     time.sleep(2)
-                    details     = extract_right_panel(page)
+                    try:
+                        details = extract_right_panel(page)
+                    except PWError as _pwe:
+                        print(f"      [{jid}] ⚠  Error re-reading description: {_pwe} — skip")
+                        continue
                     description = details.get("description", "").strip()
                     if len(description) < 100:
                         print(f"      [{jid}] still no description — skip")
@@ -1745,6 +1805,13 @@ def main():
                 if fake:
                     print(f"      [{jid}] {company} — {title[:40]} → SKIP fake/spam ({fake_reason})")
                     _run_log.job_skip(title, company, f"fake job: {fake_reason}", url=live_url)
+                    continue
+
+                # ── Staffing / consultancy exclusion — user preference, not fraud ──
+                is_staffing, staffing_reason = _staffing.is_staffing_or_consultancy(company, description)
+                if is_staffing:
+                    print(f"      [{jid}] {company} — {title[:40]} → SKIP staffing/consultancy ({staffing_reason})")
+                    _run_log.job_skip(title, company, f"staffing/consultancy: {staffing_reason}", url=live_url)
                     continue
 
                 # ── Description fingerprint check — catches scam templates ─────
@@ -1983,6 +2050,7 @@ def main():
 
     applied = sum(1 for e in log if e.get("status") == "Applied")
     _cost_summary = ce.get_cost_summary()
+    _cost_stats   = ce.get_cost_dict()
     print(f"\n  ── Done: {applied_count} applied this session | {total_processed} scored ──")
     print(f"  💰 {_cost_summary}")
     _cache.print_stats()
@@ -1990,7 +2058,7 @@ def main():
     notifier.notify_session_done(applied=applied_count,
                                   scored=total_processed,
                                   skipped=total_processed - applied_count,
-                                  api_cost_summary=_cost_summary)
+                                  cost_stats=_cost_stats)
 
 
 if __name__ == "__main__":

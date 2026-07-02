@@ -40,11 +40,33 @@ except ImportError:
     MODEL      = None
     MODEL_FAST = None
 
-FIT_THRESHOLD = int(os.environ.get("FIT_THRESHOLD", "65"))
+import config as _cfg
+FIT_THRESHOLD = int(os.environ.get("FIT_THRESHOLD", str(_cfg.FIT_THRESHOLD)))
 
-# ── In-process score cache — survives the whole run, not just one job ──────────
+# ── Disk-backed score cache — survives across runs (same job not re-scored daily)
 # Key: sha1(job_title.lower() + jd_text[:400])  Value: score dict
-_SCORE_CACHE: dict = {}
+# TTL: 7 days — old entries purged on load so stale jobs don't block re-scoring
+_SCORE_CACHE_FILE = Path(__file__).parent / "data" / "score_cache.json"
+_SCORE_CACHE_TTL  = 7   # days
+
+def _load_score_cache() -> dict:
+    try:
+        if not _SCORE_CACHE_FILE.exists():
+            return {}
+        raw   = json.loads(_SCORE_CACHE_FILE.read_text())
+        cutoff = __import__("time").time() - _SCORE_CACHE_TTL * 86400
+        return {k: v for k, v in raw.items() if v.get("_ts", 0) > cutoff}
+    except Exception:
+        return {}
+
+def _save_score_cache(cache: dict) -> None:
+    try:
+        _SCORE_CACHE_FILE.parent.mkdir(exist_ok=True)
+        _SCORE_CACHE_FILE.write_text(json.dumps(cache))
+    except Exception:
+        pass
+
+_SCORE_CACHE: dict = _load_score_cache()
 
 # ── API cost tracker ───────────────────────────────────────────────────────────
 # Tracks every Claude API call this session. Printed in session summary email.
@@ -57,7 +79,9 @@ _API_STATS = {
     "output_tokens":   0,    # total output tokens
     "haiku_calls":     0,
     "sonnet_calls":    0,
-    "estimated_cost":  0.0,  # USD
+    "estimated_cost":  0.0,  # USD — total
+    "scoring_calls":   0,    # score_fit() calls only
+    "scoring_cost":    0.0,  # cost of scoring calls only
 }
 _HAIKU_IN_COST  = 0.80 / 1_000_000   # per token
 _HAIKU_OUT_COST = 4.00 / 1_000_000
@@ -124,6 +148,27 @@ def get_cost_summary() -> str:
         f"| tokens: {total_tok:,}  "
         f"| est. cost: ${s['estimated_cost']:.4f}"
     )
+
+
+def get_cost_dict() -> dict:
+    """Return full API stats dict for detailed reporting."""
+    s = _API_STATS
+    other_cost = s["estimated_cost"] - s["scoring_cost"]
+    avg_score_cost = s["scoring_cost"] / max(1, s["scoring_calls"])
+    saved_cost = s["cache_hits"] * avg_score_cost
+    return {
+        "total_calls":    s["calls"],
+        "cache_hits":     s["cache_hits"],
+        "scoring_calls":  s["scoring_calls"],
+        "scoring_cost":   round(s["scoring_cost"], 4),
+        "other_cost":     round(other_cost, 4),
+        "total_cost":     round(s["estimated_cost"], 4),
+        "saved_cost":     round(saved_cost, 4),
+        "input_tokens":   s["input_tokens"],
+        "output_tokens":  s["output_tokens"],
+        "haiku_calls":    s["haiku_calls"],
+        "sonnet_calls":   s["sonnet_calls"],
+    }
 
 
 def local_prefilter(jd_text: str, job_title: str) -> tuple[bool, int]:
@@ -208,7 +253,7 @@ CANDIDATE:
   ML click-through model (AUC 0.98), PostgreSQL flight-price engine, AI job-application automation
 
 JOB: {job_title} at {company}
-JD: {jd_text[:2000]}
+JD: {jd_text[:1000]}
 
 SCORING RULES:
 - 85–100 (A): Strong skill alignment — candidate has ≥80% of required tech and matches the role squarely
@@ -233,7 +278,10 @@ Reply ONLY with valid JSON, single line:
 
 apply=true only if score>={FIT_THRESHOLD}"""
 
-    raw  = _ask(prompt, max_tokens=250, fast=True)   # haiku — 20x cheaper than sonnet
+    _cost_before = _API_STATS["estimated_cost"]
+    raw  = _ask(prompt, max_tokens=150, fast=True)   # haiku — 20x cheaper than sonnet
+    _API_STATS["scoring_calls"] += 1
+    _API_STATS["scoring_cost"]  += _API_STATS["estimated_cost"] - _cost_before
     data = _parse_json(raw)
 
     if not data or "score" not in data:
@@ -243,8 +291,10 @@ apply=true only if score>={FIT_THRESHOLD}"""
     data["score"] = int(data.get("score", 0))
     data.setdefault("apply", data["score"] >= FIT_THRESHOLD)
 
-    # Cache result — if this job appears in another query, skip the API call
+    # Cache result to disk — survives across runs so same job isn't re-scored tomorrow
+    data["_ts"] = __import__("time").time()
     _SCORE_CACHE[cache_key] = data
+    _save_score_cache(_SCORE_CACHE)
     return data
 
 
@@ -491,8 +541,8 @@ Rules:
 
     try:
         resp = _client.messages.create(
-            model=MODEL,
-            max_tokens=800,
+            model=MODEL_FAST,   # haiku — vision works fine, no need for sonnet here
+            max_tokens=400,
             messages=[{
                 "role": "user",
                 "content": [

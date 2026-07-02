@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "1.0.0"
+PIPELINE_VERSION = "1.0.9"
 
 # ── Platform switches — turn a platform off without touching its code ──────────
 # Set to False to skip that platform entirely for the current run.
@@ -105,6 +105,11 @@ FAKE_JOB_TITLE_WORDS = {
 CLEARANCE_KEYWORDS = {
     "security clearance", "secret clearance", "top secret", "ts/sci",
     "dod clearance", "clearance required", "public trust", "polygraph",
+    # Citizenship / visa ineligibility
+    "must be a us citizen", "must be us citizen", "us citizens only",
+    "green card required", "green card holder", "permanent resident only",
+    "no opt", "no cpt", "no visa", "no sponsorship", "itar",
+    "us person", "us persons only",
 }
 
 # ── Title typo signals — spam postings routinely misspell role names ──────────
@@ -141,6 +146,11 @@ FAKE_JOB_COMPANY_WORDS = {
     "synchrony systems", "synergy ventures", "raas infotek", "vertex elite",
     "washon", "aliando", "foresight works", "ursus", "system one",
     # Mid-tier body-shops / bench-sales firms from actual apply log
+    "russell tobin",        # staffing — 19x form failures in apply log
+    "glocomms",             # staffing — 17x form failures
+    "come near",            # staffing — 15x form failures
+    "allied resources technical consultants",  # staffing — 5x failures
+    "bayone solutions",     # staffing — 5x failures
     "smart it frame",       # body shop / C2C mill
     "abacus service",       # staffing body shop
     "tpi global",           # offshore staffing
@@ -310,6 +320,60 @@ COMPANY_WHITELIST = {
     "tata consultancy", "tcs", "infosys", "wipro", "cognizant", "hcl",
     "tech mahindra", "capgemini", "ltimindtree", "mphasis", "hexaware",
 }
+# NOTE: several entries above (staffing firms, Indian IT/consulting firms,
+# deloitte/ey/pwc/kpmg/accenture) are ALSO in STAFFING_CONSULTANCY_COMPANY_WORDS
+# below and get skipped by staffing_filter.py regardless of being whitelisted
+# here. This whitelist means "not a scam" for LinkedIn's trust score — it does
+# NOT mean "apply to it"; the staffing/consultancy exclusion is independent
+# and takes priority (Raghav's preference: no staffing or consulting jobs,
+# even from legitimate firms).
+
+# ── Staffing / consultancy exclusion (user preference, not fraud detection) ───
+# Raghav doesn't want staffing-agency or consulting-firm jobs on LinkedIn or
+# Indeed, period — these are typically real, legitimate employers, just not
+# the kind of direct-hire role he's looking for. Checked in staffing_filter.py,
+# independent of COMPANY_WHITELIST above and independent of the fake-job/fraud
+# checks — a company can be "not a scam" and still get skipped here.
+SKIP_STAFFING_CONSULTANCY = True
+
+STAFFING_CONSULTANCY_COMPANY_WORDS = {
+    # Generic keywords — catches staffing/consulting firms not on any list below
+    "staffing", "consulting", "consultancy", "consultants",
+    "recruiting", "recruitment", "talent acquisition", "talent solutions",
+    "workforce solutions", "professional services", "resource management",
+    "managed services", "outsourcing", "body shop", "bench sales",
+    "placement services", "hr solutions", "human capital", "staff augmentation",
+    # Named staffing agencies — real companies, still staffing
+    "manpower", "adecco", "randstad", "kelly services", "spherion",
+    "aerotek", "apex systems", "teksystems", "insight global",
+    "dexian", "kforce", "robert half", "beacon hill", "actalent",
+    "cybercoders", "modis", "artech", "collabera", "mastech",
+    "volt", "kelly ocg", "yoh", "hays", "michael page", "cornerstone staffing",
+    # Global IT-services / body-shop-style firms — direct-hire FTE but still
+    # a "you work at whatever client we place you at" consulting model
+    "tata consultancy", "tcs", "infosys", "wipro", "cognizant", "hcl",
+    "tech mahindra", "capgemini", "ltimindtree", "mphasis", "hexaware",
+    "mindtree", "persistent systems", "zensar", "birlasoft", "l&t infotech",
+    "sonata software", "cigniti", "virtusa", "syntel", "genpact",
+    # Big management / professional-services consulting
+    # NOTE: deliberately no bare "ey" — as a 2-letter substring it would
+    # false-positive on "money", "key", "turkey", etc. "ernst & young" below
+    # covers the real cases; a posting under the bare "EY" brand name alone
+    # is a known gap, accepted to avoid false positives elsewhere.
+    "deloitte", "ernst & young", "pwc", "kpmg", "accenture",
+    "bcg", "mckinsey", "bain & company", "slalom", "west monroe",
+    "guidehouse", "grant thornton",
+}
+
+# Description-level signals — the posting talks like a staffing/consulting
+# engagement ("our client", "bench", C2C/W2 contract language) even when the
+# company name itself doesn't give it away.
+STAFFING_CONSULTANCY_DESC_SIGNALS = {
+    "on behalf of our client", "one of our clients", "our client is seeking",
+    "our client is looking for", "client of ours", "for our client",
+    "our client, a", "multiple client engagements", "client site",
+    "consulting engagement", "staff augmentation",
+}
 
 # ── Company trust scoring ──────────────────────────────────────────────────────
 # Minimum trust score (0-100) to proceed to Claude fit scoring.
@@ -379,6 +443,13 @@ INDEED_CF_RETRY_WAIT_SEC = 30   # seconds to wait if Cloudflare challenge (was 4
 INDEED_PAGES_PER_QUERY   = 3    # how many result pages to scrape per query (was 2)
                                  # 3 pages = ~45 job cards per query
 
+# ── Indeed block detection — stop early instead of grinding for hours ─────────
+# Unattended (scheduled) runs can't solve CAPTCHAs, so repeated CAPTCHA cooldowns
+# or repeated zero-result searches almost always mean the session is blocked,
+# not just rate-limited. Give up after this many rather than looping all day.
+CAPTCHA_MAX_COOLDOWNS_PER_RUN     = 2   # unsolved-CAPTCHA cooldown cycles before stopping the run
+INDEED_EMPTY_QUERY_BAIL_THRESHOLD = 4   # consecutive 0-card searches before stopping the run
+
 # ── Target Roles ───────────────────────────────────────────────────────────────
 TARGET_ROLES = [
     "Data Engineer",
@@ -434,63 +505,30 @@ BLOCKED_COMPANIES = {
 # Spread across diverse query forms so LinkedIn returns different card sets per query.
 # More unique queries = more unique job cards = more shots at 50/day.
 LINKEDIN_QUERIES = [
-    # Data Engineering — core
+    # Data Engineering — broad queries first (highest card volume)
     "Data Engineer Entry Level",
     "Junior Data Engineer",
     "Associate Data Engineer",
-    "Data Engineer Python",
-    "Data Engineer SQL",
-    "PySpark Data Engineer",
-    "Azure Data Engineer",
-    "AWS Data Engineer",
-    "GCP Data Engineer",
-    "ETL Developer Entry Level",
-    "Data Pipeline Engineer",
-    "Cloud Data Engineer",
-    "Analytics Engineer Entry Level",
-    "Databricks Data Engineer",
-    "Snowflake Data Engineer",
-    "dbt Analytics Engineer",
-    "Data Engineer Remote",
     "Data Engineer New Grad",
+    "Data Engineer Remote",
+    "Analytics Engineer Entry Level",
+    "Data Platform Engineer",
+    "Data Operations Analyst",
     # Data Analysis
     "Data Analyst Entry Level",
     "Junior Data Analyst",
     "Associate Data Analyst",
     "Business Intelligence Analyst",
-    "BI Analyst Entry Level",
     "BI Developer Entry Level",
-    "Reporting Analyst Entry Level",
-    "Business Analyst Data",
-    "SQL Data Analyst",
-    "Python Data Analyst",
-    "Tableau Data Analyst",
     "Power BI Analyst",
-    "Data Analyst Remote",
-    "Analytics Analyst",
-    "Insights Analyst",
-    "Product Analyst",
     # Data Science / ML
     "Data Scientist Entry Level",
     "Junior Data Scientist",
     "ML Engineer Entry Level",
-    "Machine Learning Engineer",
     "AI Engineer Entry Level",
-    "Applied Scientist Entry Level",
-    "NLP Engineer Entry Level",
-    "Data Scientist Remote",
-    "Machine Learning Analyst",
     # Broader roles
     "Database Analyst",
-    "Quantitative Analyst Entry Level",
-    "Data Operations Analyst",
-    "Data Platform Engineer",
-    "Decision Scientist",
-    "Product Analyst Data",
-    "Marketing Data Analyst",
-    "Financial Data Analyst",
-    "Healthcare Data Analyst",
-    "Operations Research Analyst",
+    "Product Analyst",
 ]
 
 # ── Indeed-specific search queries (broader than LinkedIn) ─────────────────────

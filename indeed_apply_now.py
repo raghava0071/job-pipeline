@@ -46,6 +46,7 @@ try:
 except ImportError:
     _pick_salary = lambda jd, title: "75000"
     _salary_rule = lambda jd, title: "- salary: answer 75000 (plain number only)"
+import staffing_filter as _staffing  # skip staffing agencies / consulting firms (user preference)
 
 DATA_DIR      = cfg.DATA_DIR
 SESSION_DIR   = cfg.BASE_DIR / ".indeed_session"
@@ -64,6 +65,20 @@ cfg.COVER_DIR.mkdir(parents=True, exist_ok=True)
 _consecutive_captcha_failures = 0
 CAPTCHA_COOLDOWN_THRESHOLD    = 3    # failures in a row before cooldown
 CAPTCHA_COOLDOWN_SECS         = 300  # 5-minute break
+
+# Total cooldown cycles taken this run with zero successful solves in between.
+# An unattended (scheduled) run has nobody to solve a CAPTCHA, so if we're
+# still hitting them after a full cooldown, the session is very likely
+# blocked — not just rate-limited. _indeed_blocked stops the run cleanly
+# instead of repeating the cooldown loop for hours (seen: 596m/607m stalls).
+_total_cooldowns_this_run = 0
+_indeed_blocked           = False
+
+# Fields scanned by the most recent smart_fill_step() call — the stuck-question
+# logger below reads this. (It used to reference a variable, form_fields_last_seen,
+# that was never actually assigned anywhere, so every stuck_questions.json entry
+# logged "fields": [] with no way to see which question actually blocked the form.)
+_last_seen_fields = []
 
 # Jobs that failed specifically because CAPTCHA timed out — retried at end of run.
 # Each entry: {"card": {...}, "job_url": "...", "score": int, "jd": "...",
@@ -392,6 +407,7 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename="", 
       3. Uncached → Claude API → save to cache
       4. JS fills each element by its stored CSS selector — no label re-detection
     """
+    global _last_seen_fields
     # Cover letter field label patterns — when we see these, paste the cover letter
     COVER_LETTER_LABELS = {
         "cover letter", "cover note", "why are you interested",
@@ -666,6 +682,11 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename="", 
     required_fields = [f for f in fields if is_required_field(f)]
     optional_fields = [f for f in fields if not is_required_field(f)]
 
+    # Expose the raw scanned fields for the stuck-question logger (see
+    # apply_to_job's same_url_count >= 4 branch), so a "stuck" entry actually
+    # records which question(s) blocked the form instead of an empty list.
+    _last_seen_fields = fields
+
     print(f"          📋 Found {len(fields)} field(s): {len(required_fields)} required, {len(optional_fields)} optional (skipping optional)")
     for fi in fields:
         opts_str = f"  options={fi['options'][:4]}" if fi.get("options") else ""
@@ -794,7 +815,7 @@ Return ONLY a JSON object keyed by the EXACT label text:
 
 Rules:
 - select/radio/checkbox: copy one option EXACTLY as written
-- years of experience questions: answer with a number
+- years of experience questions: answer with a WHOLE number only (e.g. "2", "3") — never a decimal like "2.5", Indeed's number fields reject decimals
 - work authorization: "Yes"
 - {salary_rule}
 - notice period / start date: if the field expects plain text use "2 weeks", if it expects MM/DD/YYYY format use today + 14 days
@@ -952,15 +973,28 @@ Rules:
                 if ll and (ll in kl or kl in ll):
                     ans = v
                     break
+        _f_type = f.get("type", "text")
+        _ans_str = str(ans) if ans is not None else ""
+        if _f_type == "number" and _ans_str:
+            # Indeed's number fields often reject decimals
+            # ("Answer must be a valid number (no decimals)") — Claude sometimes
+            # answers "2.5" for fractional years of experience. Round to a whole
+            # number so the field actually validates instead of blocking the form.
+            _num_match = re.search(r'-?\d+(?:\.\d+)?', _ans_str)
+            if _num_match:
+                try:
+                    _ans_str = str(round(float(_num_match.group(0))))
+                except ValueError:
+                    pass
         fill_items.append({
             "sel":     f.get("sel", ""),
             "label":   lbl,
-            "type":    f.get("type", "text"),
+            "type":    _f_type,
             "options": f.get("options", []),
             "gname":   f.get("gname", ""),
-            "answer":  str(ans) if ans is not None else "",
+            "answer":  _ans_str,
         })
-        print(f"             → fill '{lbl}' = '{ans}'  sel={f.get('sel','')[:50]}")
+        print(f"             → fill '{lbl}' = '{_ans_str}'  sel={f.get('sel','')[:50]}")
 
     # ── Step 4: Fill DOM elements by CSS selector (live refs, no re-labeling) ──
     filled = page.evaluate("""
@@ -1306,7 +1340,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
 
     Call at the START of every step loop iteration AND after every Submit click.
     """
-    global _consecutive_captcha_failures
+    global _consecutive_captcha_failures, _total_cooldowns_this_run, _indeed_blocked
 
     try:
         captcha_visible = any(
@@ -1485,13 +1519,38 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
 
         # Cooldown if streak is too high — Indeed is rate-limiting the session
         if _consecutive_captcha_failures >= CAPTCHA_COOLDOWN_THRESHOLD:
-            print(f"\n          ⏸  {_consecutive_captcha_failures} CAPTCHAs in a row — taking {CAPTCHA_COOLDOWN_SECS//60}-minute cooldown to let reCAPTCHA settle...")
+            _total_cooldowns_this_run += 1
+            _max_cooldowns = getattr(cfg, "CAPTCHA_MAX_COOLDOWNS_PER_RUN", 2)
+
+            if _total_cooldowns_this_run > _max_cooldowns:
+                # Already cooled down _max_cooldowns times and still hitting CAPTCHAs
+                # right after — nobody's here to solve them (unattended run). This is
+                # a block, not noise. Stop instead of repeating the loop for hours.
+                print(f"\n          🛑 {_total_cooldowns_this_run} CAPTCHA cooldowns this run with no solve — "
+                      f"session is very likely blocked. Stopping Indeed instead of looping for hours.")
+                try:
+                    notifier.send_alert(
+                        subject=f"🛑 Indeed run stopped — {_total_cooldowns_this_run} CAPTCHA cooldowns, likely blocked",
+                        body=(
+                            f"The Indeed pipeline hit {_total_cooldowns_this_run} CAPTCHA cooldown cycles "
+                            f"this run with no successful solve. Stopping early instead of wasting hours.\n"
+                            f"Try running while at your Mac to solve CAPTCHAs manually, or check if "
+                            f"Indeed has flagged this session."
+                        ),
+                    )
+                except Exception:
+                    pass
+                _indeed_blocked = True
+                return False
+
+            print(f"\n          ⏸  {_consecutive_captcha_failures} CAPTCHAs in a row — taking {CAPTCHA_COOLDOWN_SECS//60}-minute cooldown ({_total_cooldowns_this_run}/{_max_cooldowns} for this run) to let reCAPTCHA settle...")
             try:
                 notifier.send_alert(
                     subject=f"⏸ Pipeline cooldown — {_consecutive_captcha_failures} consecutive CAPTCHAs (Indeed)",
                     body=(
                         f"The Indeed pipeline hit {_consecutive_captcha_failures} unsolved CAPTCHAs in a row.\n"
-                        f"Taking a {CAPTCHA_COOLDOWN_SECS//60}-minute break to let reCAPTCHA cool down, then resuming automatically."
+                        f"Taking a {CAPTCHA_COOLDOWN_SECS//60}-minute break to let reCAPTCHA cool down, then resuming automatically.\n"
+                        f"({_total_cooldowns_this_run}/{_max_cooldowns} cooldowns used this run before it stops itself.)"
                     ),
                 )
             except Exception:
@@ -2239,7 +2298,7 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                             "page_text_snippet": _page_txt[:1000],
                             "fields":     [
                                 {"label": f.get("label",""), "type": f.get("type",""), "options": f.get("options",[])}
-                                for f in (form_fields_last_seen if 'form_fields_last_seen' in dir() else [])
+                                for f in _last_seen_fields
                             ],
                             "status": "stuck — needs manual review"
                         }
@@ -2447,8 +2506,10 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                 continue
 
             # Fill using the correct frame
-            # Track last-seen fields for stuck-questions logging
-            form_fields_last_seen = form_ctx.get("fields", []) if isinstance(form_ctx, dict) else []
+            # (smart_fill_step sets the module-level _last_seen_fields global
+            # for the stuck-questions logger below — form_ctx is a Playwright
+            # Frame/Page, never a dict, so the old form_ctx.get(...) here always
+            # produced an empty list regardless of what was actually on screen.)
             filled = smart_fill_step(form_ctx, profile_text, title, company, resume_name,
                                      cover_letter_text=cl_text_for_form, jd_text=jd_for_fill)
             print(f"          ✏️  Step {step} TOTAL: filled {filled} fields")
@@ -2765,6 +2826,11 @@ def main():
     profile_summary = ce.build_profile_summary(full_profile)
 
     log = load_log()
+    # Cross-platform dedup: merge LinkedIn log so Indeed skips jobs already applied there
+    _li_log = cfg.BASE_DIR / "data" / "apply_log.json"
+    if _li_log.exists():
+        import json as _j
+        log = log + _j.loads(_li_log.read_text())
     applied_count  = 0
     scored_count   = 0
     skipped_count  = 0
@@ -2779,7 +2845,10 @@ def main():
         )
         page = browser.pages[0] if browser.pages else browser.new_page()
         # Auto-dismiss any JS alert/confirm dialogs — prevents ProtocolError crash
-        browser.on("dialog", lambda d: d.dismiss())
+        def _safe_dismiss(d):
+            try: d.dismiss()
+            except Exception: pass
+        browser.on("dialog", _safe_dismiss)
 
         ensure_login(page)
 
@@ -2814,8 +2883,15 @@ def main():
             except Exception:
                 pass
 
+        global _indeed_blocked
+        _consecutive_empty_queries = 0
+        _empty_query_bail = getattr(cfg, "INDEED_EMPTY_QUERY_BAIL_THRESHOLD", 4)
+
         for _qi, query in enumerate(SEARCH_QUERIES):
             if applied_count >= MAX_APPLY:
+                break
+            if _indeed_blocked:
+                print(f"\n  🛑 Stopping remaining searches — session flagged as blocked earlier this run.")
                 break
 
             # Human-like inter-query delay (skip before very first query)
@@ -2892,8 +2968,23 @@ def main():
 
             print(f"  Found {len(job_cards)} cards ({_pages_per_query} pages)")
 
+            # Repeated zero-card searches almost always mean the session is
+            # blocked (e.g. every page load aborting) rather than a real lack
+            # of results — bail instead of burning the rest of the run on it.
+            if len(job_cards) == 0:
+                _consecutive_empty_queries += 1
+                if _consecutive_empty_queries >= _empty_query_bail:
+                    print(f"\n  🛑 {_consecutive_empty_queries} consecutive searches returned 0 cards — "
+                          f"Indeed is likely blocking this session. Stopping Indeed run early.")
+                    _indeed_blocked = True
+                    break
+            else:
+                _consecutive_empty_queries = 0
+
             for card in job_cards:
                 if applied_count >= MAX_APPLY:
+                    break
+                if _indeed_blocked:
                     break
 
                 title   = card.get("title","")
@@ -2926,6 +3017,15 @@ def main():
                                  "database", "reporting", "intelligence", "ml",
                                  "cloud", "spark", "databricks", "snowflake"}
                 if not any(w in title.lower() for w in _domain_words):
+                    skipped_count += 1
+                    continue
+
+                # ── Staffing / consultancy exclusion — cheap company-name check
+                # before spending a page load on it (full JD-text check happens
+                # again after the job page loads, further down).
+                _is_staffing, _staffing_reason = _staffing.is_staffing_or_consultancy(company)
+                if _is_staffing:
+                    print(f"  ⏭  {company} — {title} → SKIP staffing/consultancy ({_staffing_reason})")
                     skipped_count += 1
                     continue
 
@@ -3021,6 +3121,15 @@ def main():
                 # ── Security clearance check — kill immediately, no API cost ──
                 if any(kw in jd.lower() for kw in cfg.CLEARANCE_KEYWORDS):
                     print(f"  🚫 Clearance required — skipping {company}")
+                    skipped_count += 1
+                    continue
+
+                # ── Staffing / consultancy exclusion — full JD text this time,
+                # catches "on behalf of our client" style postings that don't
+                # give it away in the company name (already checked above).
+                _is_staffing2, _staffing_reason2 = _staffing.is_staffing_or_consultancy(company, jd)
+                if _is_staffing2:
+                    print(f"  🚫 {company} — staffing/consultancy ({_staffing_reason2}) — skipping")
                     skipped_count += 1
                     continue
 
@@ -3238,12 +3347,13 @@ def main():
     print(f"{'='*60}\n")
 
     _cost_summary = ce.get_cost_summary()
+    _cost_stats   = ce.get_cost_dict()
     print(f"  💰 {_cost_summary}")
     _cache.print_stats()
     _run_log.finish(searches_run=len(SEARCH_QUERIES), jobs_found=scored_count + skipped_count)
 
     notifier.notify_session_done(applied_count, scored_count, skipped_count,
-                                  api_cost_summary=_cost_summary)
+                                  cost_stats=_cost_stats)
 
 
 if __name__ == "__main__":

@@ -180,7 +180,8 @@ def notify_applied(title: str, company: str, fit_score: int,
 
 
 def notify_session_done(applied: int, scored: int, skipped: int,
-                        api_cost_summary: str = "") -> bool:
+                        api_cost_summary: str = "",
+                        cost_stats: dict = None) -> bool:
     """Send session summary email when pipeline finishes."""
     if not ENABLED or applied == 0:
         return False
@@ -188,51 +189,91 @@ def notify_session_done(applied: int, scored: int, skipped: int,
         now     = datetime.now().strftime("%b %d, %Y at %I:%M %p")
         subject = f"📊 Pipeline done — {applied} applied, {scored} scored · {now}"
 
-        cost_row = ""
-        if api_cost_summary:
-            cost_row = f"""
-  <tr style="background:#f0fdf4;">
-    <td colspan="2" style="padding:10px 14px;font-size:13px;color:#166534;">
-      💰 <b>API cost this run:</b> {api_cost_summary}
-    </td>
-  </tr>"""
+        # ── Cost report block ──────────────────────────────────────────────────
+        cost_block = ""
+        if cost_stats:
+            c       = cost_stats
+            per_app = c["total_cost"] / max(1, applied)
+            cost_block = f"""
+  <h3 style="margin:24px 0 10px;color:#111827;font-size:15px;">💰 API Cost Report</h3>
+  <table style="width:100%;border-collapse:collapse;font-size:14px;">
+    <tr style="background:#f3f4f6;">
+      <td style="padding:8px 12px;color:#6b7280;font-weight:bold;">Category</td>
+      <td style="padding:8px 12px;color:#6b7280;font-weight:bold;text-align:center;">Calls</td>
+      <td style="padding:8px 12px;color:#6b7280;font-weight:bold;text-align:right;">Cost</td>
+    </tr>
+    <tr>
+      <td style="padding:8px 12px;color:#374151;">Job Scoring</td>
+      <td style="padding:8px 12px;text-align:center;color:#374151;">{c["scoring_calls"]}</td>
+      <td style="padding:8px 12px;text-align:right;color:#374151;">${c["scoring_cost"]:.4f}</td>
+    </tr>
+    <tr style="background:#f3f4f6;">
+      <td style="padding:8px 12px;color:#374151;">Resume Build + Form Fill</td>
+      <td style="padding:8px 12px;text-align:center;color:#374151;">{c["total_calls"] - c["scoring_calls"]}</td>
+      <td style="padding:8px 12px;text-align:right;color:#374151;">${c["other_cost"]:.4f}</td>
+    </tr>
+    <tr style="border-top:2px solid #e5e7eb;">
+      <td style="padding:8px 12px;font-weight:bold;color:#111827;">Total This Run</td>
+      <td style="padding:8px 12px;text-align:center;font-weight:bold;color:#111827;">{c["total_calls"]}</td>
+      <td style="padding:8px 12px;text-align:right;font-weight:bold;color:#111827;">${c["total_cost"]:.4f}</td>
+    </tr>
+    <tr style="background:#f0fdf4;">
+      <td style="padding:8px 12px;color:#166534;">✅ Saved by Cache</td>
+      <td style="padding:8px 12px;text-align:center;color:#166534;">{c["cache_hits"]} hits</td>
+      <td style="padding:8px 12px;text-align:right;color:#166534;">~${c["saved_cost"]:.4f}</td>
+    </tr>
+    <tr style="background:#eff6ff;">
+      <td style="padding:8px 12px;color:#1d4ed8;">Cost Per Application</td>
+      <td style="padding:8px 12px;"></td>
+      <td style="padding:8px 12px;text-align:right;font-weight:bold;color:#1d4ed8;">${per_app:.4f}</td>
+    </tr>
+  </table>
+  <p style="margin:8px 0 0;font-size:12px;color:#9ca3af;">
+    Tokens: {c["input_tokens"]:,} in / {c["output_tokens"]:,} out &nbsp;·&nbsp;
+    Haiku: {c["haiku_calls"]} &nbsp;·&nbsp; Sonnet: {c["sonnet_calls"]}
+  </p>"""
+        elif api_cost_summary:
+            cost_block = f"""
+  <div style="margin-top:16px;padding:10px 14px;background:#f0fdf4;border-radius:8px;font-size:13px;color:#166534;">
+    💰 <b>API cost this run:</b> {api_cost_summary}
+  </div>"""
 
-        body    = f"""
-<html><body style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;">
+        body = f"""
+<html><body style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;">
 <div style="background:white;border-radius:12px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
 
-  <h2 style="color:#0a66c2;margin:0 0 18px;">📊 Pipeline Session Done</h2>
+  <h2 style="color:#0a66c2;margin:0 0 18px;">📊 Pipeline Run Complete</h2>
 
   <table style="width:100%;border-collapse:collapse;font-size:15px;">
     <tr style="background:#f3f4f6;">
-      <td style="padding:10px 14px;color:#6b7280;width:160px;"><b>Applied</b></td>
-      <td style="padding:10px 14px;font-size:20px;font-weight:bold;color:#0a66c2;">{applied}</td>
+      <td style="padding:10px 14px;color:#6b7280;width:160px;"><b>✅ Applied</b></td>
+      <td style="padding:10px 14px;font-size:22px;font-weight:bold;color:#0a66c2;">{applied}</td>
     </tr>
     <tr>
       <td style="padding:10px 14px;color:#6b7280;"><b>Scored by Claude</b></td>
       <td style="padding:10px 14px;color:#374151;">{scored}</td>
     </tr>
     <tr style="background:#f3f4f6;">
-      <td style="padding:10px 14px;color:#6b7280;"><b>Skipped</b></td>
+      <td style="padding:10px 14px;color:#6b7280;"><b>Skipped / Filtered</b></td>
       <td style="padding:10px 14px;color:#374151;">{skipped}
-        <span style="font-size:12px;color:#9ca3af;">(below threshold or senior role)</span>
+        <span style="font-size:12px;color:#9ca3af;">(fake, senior, or below fit threshold)</span>
       </td>
     </tr>
-    {cost_row}
     <tr>
       <td style="padding:10px 14px;color:#6b7280;"><b>Finished</b></td>
       <td style="padding:10px 14px;color:#9ca3af;font-size:13px;">{now}</td>
     </tr>
   </table>
 
-  <p style="margin-top:16px;font-size:13px;color:#9ca3af;text-align:center;">
-    Check your inbox for per-job emails with resumes attached ·
+  {cost_block}
+
+  <p style="margin-top:20px;font-size:13px;color:#9ca3af;text-align:center;">
+    Per-job emails with resumes are in your inbox ·
     <a href="https://github.com/raghawa0071/job-pipeline" style="color:#0a66c2;">GitHub</a>
   </p>
-
 </div>
-</body></html>
-"""
+</body></html>"""
+
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"]    = NOTIFY_EMAIL
