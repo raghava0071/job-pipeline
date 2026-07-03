@@ -2990,12 +2990,29 @@ def main():
                             const titleEl = c.querySelector('h2 a, [data-testid="job-title"], .jobTitle a');
                             const coEl    = c.querySelector('[data-testid="company-name"], .companyName');
                             const locEl   = c.querySelector('[data-testid="text-location"], .companyLocation');
+                            const title   = titleEl ? titleEl.innerText.trim() : '';
+                            const company = coEl    ? coEl.innerText.trim()    : '';
+                            // Short snippet Indeed already shows under each card — used for a
+                            // coarse pre-filter before opening the full job page. Selectors
+                            // drift over time, so fall back to the card's own text (minus the
+                            // bits we already captured) if none of the known ones match.
+                            const snipEl = c.querySelector(
+                                '.job-snippet, [data-testid="jobsnippet_footer"], ' +
+                                '.underShelfFooter, ul.job-snippet, [class*="snippet"]'
+                            );
+                            let snippet = snipEl ? snipEl.innerText.trim() : '';
+                            if (!snippet) {
+                                snippet = (c.innerText || '')
+                                    .replace(title, '').replace(company, '')
+                                    .replace(/\\s+/g, ' ').trim().slice(0, 300);
+                            }
                             return {
                                 jk:      jk,
-                                title:   titleEl ? titleEl.innerText.trim() : '',
-                                company: coEl    ? coEl.innerText.trim()    : '',
+                                title:   title,
+                                company: company,
                                 location:locEl   ? locEl.innerText.trim()   : '',
                                 href:    titleEl ? (titleEl.getAttribute('href') || '') : '',
+                                snippet: snippet.slice(0, 300),
                             };
                         }).filter(c => c.title.length > 2);
                     }
@@ -3031,6 +3048,63 @@ def main():
             else:
                 _consecutive_empty_queries = 0
 
+            # Domain keyword set used both by the pre-filter pass below and the
+            # per-card loop further down — kept in one place so the two can't
+            # silently drift apart.
+            _domain_words = {"data", "sql", "python", "analytics", "engineer",
+                             "analyst", "scientist", "bi", "etl", "pipeline",
+                             "database", "reporting", "intelligence", "ml",
+                             "cloud", "spark", "databricks", "snowflake"}
+
+            # ── Batched snippet pre-filter — one Claude call for the whole query
+            # instead of opening every surviving card's job page one at a time.
+            # Only cards that already pass the free, zero-cost filters (title
+            # level/domain/staffing/dedup) are sent — this never spends tokens
+            # on cards that would've been skipped anyway. The real, strict
+            # score_fit() check on the full JD still runs afterward for anything
+            # this doesn't filter out — see claude_engine.prefilter_cards_batch().
+            _snippet_skip_keys = set()
+            _prefilter_survivors = []
+            for _c in job_cards:
+                _t   = _c.get("title", "")
+                _co  = _c.get("company", "")
+                _jk  = _c.get("jk", "")
+                _hrf = _c.get("href", "")
+                if not _t or not is_good_level(_t) or not is_relevant_domain(_t):
+                    continue
+                if not any(w in _t.lower() for w in _domain_words):
+                    continue
+                _is_staff, _ = _staffing.is_staffing_or_consultancy(_co)
+                if _is_staff:
+                    continue
+                if _hrf.startswith("http"):
+                    _u = _hrf
+                elif _hrf.startswith("/"):
+                    _u = "https://www.indeed.com" + _hrf
+                elif _jk:
+                    _u = f"https://www.indeed.com/viewjob?jk={_jk}"
+                else:
+                    continue
+                if already_applied(_u, dedup_log, _t, _co):
+                    continue
+                _prefilter_survivors.append({
+                    "jk": _jk, "url": _u, "title": _t, "company": _co,
+                    "snippet": _c.get("snippet", ""),
+                })
+
+            if _prefilter_survivors:
+                try:
+                    _verdicts = ce.prefilter_cards_batch(_prefilter_survivors)
+                    _snippet_skip_keys = {
+                        k for k, keep in _verdicts.items() if not keep
+                    }
+                    if _snippet_skip_keys:
+                        print(f"  🔎 Snippet pre-filter: {len(_snippet_skip_keys)}/"
+                              f"{len(_prefilter_survivors)} skipped without opening the job page")
+                except Exception as _pf_err:
+                    print(f"  ⚠  Snippet pre-filter failed (opening all candidates instead): {_pf_err}")
+                    _snippet_skip_keys = set()
+
             for card in job_cards:
                 if applied_count >= MAX_APPLY:
                     break
@@ -3062,10 +3136,8 @@ def main():
                 # to count skill matches accurately. Title-only check was incorrectly
                 # skipping valid jobs (e.g. "Junior Data Engineer" only has 1 skill match).
                 # The full JD prefilter runs later at line 3015 after page load.
-                _domain_words = {"data", "sql", "python", "analytics", "engineer",
-                                 "analyst", "scientist", "bi", "etl", "pipeline",
-                                 "database", "reporting", "intelligence", "ml",
-                                 "cloud", "spark", "databricks", "snowflake"}
+                # (_domain_words is defined once above, before this loop, so it
+                # can't drift out of sync with the pre-filter pass that uses it too.)
                 if not any(w in title.lower() for w in _domain_words):
                     skipped_count += 1
                     continue
@@ -3092,6 +3164,14 @@ def main():
                 # Quick dedup check
                 if already_applied(job_url, dedup_log, title, company):
                     print(f"  ↩  {company} — {title} → already applied (dedup)")
+                    skipped_count += 1
+                    continue
+
+                # Snippet pre-filter verdict (computed once for the whole query,
+                # above) — skip without a page load if Claude flagged this one
+                # as an obvious miss from the listing snippet alone.
+                if (jk or job_url) in _snippet_skip_keys:
+                    print(f"  ⏭  {company} — {title} → SKIP (snippet pre-filter)")
                     skipped_count += 1
                     continue
 
