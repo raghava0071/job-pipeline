@@ -890,6 +890,8 @@ CLAUDE_QA: dict[str, str] = {
     "how many years of microsoft excel experience do you have? *": "3",
     "how many years of sql (preferred not required) experience do you have? *": "4",
     "how many years of business data analyst experience do you have? *": "3",
+    "immediately": "2 Weeks",
+    "2 weeks": "2 Weeks",
 }
 
 

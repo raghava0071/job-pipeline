@@ -1342,10 +1342,33 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
     """
     global _consecutive_captcha_failures, _total_cooldowns_this_run, _indeed_blocked
 
+    def _captcha_actually_visible():
+        """
+        True only if the reCAPTCHA bframe iframe is currently visible — not just
+        attached to the DOM. reCAPTCHA never removes the bframe after a solve, it
+        only hides it, so a plain "is this frame present" check stays True forever
+        once a CAPTCHA has ever appeared on this page. That staleness was causing
+        every subsequent Submit-retry to re-trigger the full alert+email flow even
+        when nothing was actually showing.
+        """
+        try:
+            return bool(page.evaluate("""
+                () => {
+                    const bframe = Array.from(document.querySelectorAll('iframe'))
+                        .find(f => f.src && f.src.includes('bframe'));
+                    if (!bframe) return false;
+                    const style = window.getComputedStyle(bframe);
+                    if (style.display === 'none' || style.visibility === 'hidden') return false;
+                    if (!bframe.offsetParent && style.position !== 'fixed') return false;
+                    const rect = bframe.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                }
+            """))
+        except Exception:
+            return any("bframe" in (f.url or "") for f in list(page.frames))
+
     try:
-        captcha_visible = any(
-            "bframe" in (f.url or "") for f in list(page.frames)
-        )
+        captcha_visible = _captcha_actually_visible()
         if not captcha_visible:
             return True  # no CAPTCHA — all good
 
@@ -1446,24 +1469,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
             time.sleep(1)
             try:
                 frames = list(page.frames)
-                # reCAPTCHA leaves the bframe iframe attached (just hidden) after a
-                # successful solve — presence alone never goes False. Check whether
-                # it's actually visible instead of merely attached to the DOM.
-                try:
-                    still_captcha = bool(page.evaluate("""
-                        () => {
-                            const bframe = Array.from(document.querySelectorAll('iframe'))
-                                .find(f => f.src && f.src.includes('bframe'));
-                            if (!bframe) return false;
-                            const style = window.getComputedStyle(bframe);
-                            if (style.display === 'none' || style.visibility === 'hidden') return false;
-                            if (!bframe.offsetParent && style.position !== 'fixed') return false;
-                            const rect = bframe.getBoundingClientRect();
-                            return rect.width > 0 && rect.height > 0;
-                        }
-                    """))
-                except Exception:
-                    still_captcha = any("bframe" in (f.url or "") for f in frames)
+                still_captcha = _captcha_actually_visible()
 
                 # Check if the page already confirmed (user may have clicked Submit
                 # manually). Indeed's apply UI runs inside a nested iframe, not the
