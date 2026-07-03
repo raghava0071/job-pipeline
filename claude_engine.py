@@ -308,6 +308,75 @@ def _fallback_score() -> dict:
         "strengths": [], "missing": [],
     }
 
+
+# ── 2b. BATCHED LISTING-PAGE PRE-FILTER ────────────────────────────────────────
+def prefilter_cards_batch(cards: list[dict]) -> dict:
+    """
+    Coarse pre-filter over a whole page/query of search-result cards using only
+    their title + company + short snippet — NOT the full JD (that isn't
+    available until the job page is actually opened). One haiku call replaces
+    what would otherwise be a full page-open for every card, which is the
+    expensive step this exists to avoid.
+
+    IMPORTANT — this is NOT a replacement for score_fit(). It's intentionally
+    permissive (biased toward "open") since a 1-2 line snippet is a much
+    weaker signal than the full JD. Only obviously-wrong cards (senior/lead
+    titles, clearly unrelated domain, staffing/consulting agencies) should get
+    filtered here; score_fit() still runs the real, strict check on the full
+    JD for anything this marks open.
+
+    Returns {key: True/False} where key is each card's "jk" if present, else
+    "url", else "title" — True = worth opening the full job page.
+    Fails OPEN (returns True for everything) if Claude is unavailable or the
+    response can't be parsed, so an API hiccup can never silently drop a job
+    that would otherwise have been a real fit.
+    """
+    def _key(c: dict) -> str:
+        return c.get("jk") or c.get("url") or c.get("title", "")
+
+    if not cards:
+        return {}
+    if not CLAUDE_AVAILABLE:
+        return {_key(c): True for c in cards}
+
+    listing = "\n".join(
+        f'{i+1}. {c.get("title","")} @ {c.get("company","")} — '
+        f'{(c.get("snippet","") or "(no snippet)")[:200]}'
+        for i, c in enumerate(cards)
+    )
+
+    prompt = f"""Fast, COARSE first pass over a page of job search results for an entry/mid-level data
+professional. You only have the title, company, and a 1-2 line snippet for each job — NOT the full
+description. Be permissive: only mark a job "skip" when it's obviously wrong — senior/lead/staff/principal/
+director/manager level, a clearly unrelated domain (e.g. sales, nursing, retail, hospitality), or an
+obvious staffing/consulting agency posting. When in doubt, mark it "open" — a stricter check against the
+full job description runs afterward for anything you mark open here, so this step only needs to catch the
+clear misses.
+
+CANDIDATE: entry/mid-level data engineer/analyst/scientist — Python, SQL, ETL/ELT, Azure/AWS/GCP, PySpark,
+Databricks, Snowflake, Power BI/Tableau, ML fundamentals.
+
+JOBS:
+{listing}
+
+Reply ONLY with valid JSON mapping each number (as a string) to true (open) or false (skip). Single line,
+no commentary, one entry per job listed above:
+{{"1": true, "2": false}}"""
+
+    raw = _ask(prompt, max_tokens=max(200, len(cards) * 15), fast=True)
+    data = _parse_json(raw)
+
+    if not isinstance(data, dict) or not data:
+        # Couldn't parse a verdict — fail open rather than risk dropping jobs.
+        return {_key(c): True for c in cards}
+
+    result = {}
+    for i, c in enumerate(cards):
+        verdict = data.get(str(i + 1))
+        result[_key(c)] = True if verdict is None else bool(verdict)
+    return result
+
+
 # ── 3. RESUME BULLET TAILORING ────────────────────────────────────────────────
 def tailor_bullets(bullets: list[str], jd_text: str, job_title: str) -> list[str]:
     """
