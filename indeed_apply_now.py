@@ -1446,14 +1446,35 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
             time.sleep(1)
             try:
                 frames = list(page.frames)
-                still_captcha = any("bframe" in (f.url or "") for f in frames)
-
-                # Check if the page already confirmed (user may have clicked Submit manually)
-                page_text = ""
+                # reCAPTCHA leaves the bframe iframe attached (just hidden) after a
+                # successful solve — presence alone never goes False. Check whether
+                # it's actually visible instead of merely attached to the DOM.
                 try:
-                    page_text = page.evaluate("() => document.body.innerText || ''").lower()
+                    still_captcha = bool(page.evaluate("""
+                        () => {
+                            const bframe = Array.from(document.querySelectorAll('iframe'))
+                                .find(f => f.src && f.src.includes('bframe'));
+                            if (!bframe) return false;
+                            const style = window.getComputedStyle(bframe);
+                            if (style.display === 'none' || style.visibility === 'hidden') return false;
+                            if (!bframe.offsetParent && style.position !== 'fixed') return false;
+                            const rect = bframe.getBoundingClientRect();
+                            return rect.width > 0 && rect.height > 0;
+                        }
+                    """))
                 except Exception:
-                    pass
+                    still_captcha = any("bframe" in (f.url or "") for f in frames)
+
+                # Check if the page already confirmed (user may have clicked Submit
+                # manually). Indeed's apply UI runs inside a nested iframe, not the
+                # top-level document, so scan every frame — not just page.body.
+                page_text = ""
+                for _f in frames:
+                    try:
+                        page_text += " " + (_f.evaluate("() => document.body ? document.body.innerText : ''") or "")
+                    except Exception:
+                        pass
+                page_text = page_text.lower()
 
                 already_confirmed = any(phrase in page_text for phrase in [
                     "application submitted", "successfully applied",
@@ -2987,6 +3008,18 @@ def main():
                 if _consecutive_empty_queries >= _empty_query_bail:
                     print(f"\n  🛑 {_consecutive_empty_queries} consecutive searches returned 0 cards — "
                           f"Indeed is likely blocking this session. Stopping Indeed run early.")
+                    try:
+                        notifier.send_alert(
+                            subject=f"🛑 Indeed run stopped — {_consecutive_empty_queries} empty searches in a row, likely blocked",
+                            body=(
+                                f"The Indeed pipeline hit {_consecutive_empty_queries} consecutive searches "
+                                f"returning 0 cards (Cloudflare challenge or other block) and stopped itself "
+                                f"early instead of burning the rest of the query list.\n"
+                                f"Check the session manually — Indeed may be flagging this browser/IP."
+                            ),
+                        )
+                    except Exception as _notify_err:
+                        print(f"          ⚠  Could not send blocked-session email: {_notify_err}")
                     _indeed_blocked = True
                     break
             else:
