@@ -3,6 +3,8 @@
 All changes to the pipeline are logged here.
 Format: `[VERSION] YYYY-MM-DD — What changed and why`
 
+[1.1.1] 2026-07-06 — Diagnosed why applications dropped from ~20-30/day (mid-June) to near 0: (1) Indeed's session was logged out and every search got Cloudflare-blocked — needs a fresh manual login, not a code fix. (2) LinkedIn's `build_url()` in `linkedin_apply_now.py` had no LinkedIn-native experience-level filter (`f_E`) — queries like "Data Engineer Entry Level" are fuzzy keyword matches, so LinkedIn kept returning Senior/Lead postings anyway (61/137 cards skipped as senior/lead in one run, 65/137 off-domain, only 8 ever reached scoring). Added `f_E=2,3` (Entry level + Associate) to the search URL so filtering happens at LinkedIn's end instead of relying on keyword luck. Syntax-checked (`py_compile`) and URL-encoding verified; a live browser dry-run (`python3 linkedin_apply_now.py --dry-run`) should be run on the next LinkedIn pass to confirm card counts/quality improve before a live run.
+
 ---
 
 [1.0.1] 2026-06-28 — Added citizenship/visa ineligibility keywords to CLEARANCE_KEYWORDS in config.py. Jobs requiring US citizenship, green card, permanent residency, or blocking OPT/CPT/visa holders are now skipped immediately, same as clearance jobs.

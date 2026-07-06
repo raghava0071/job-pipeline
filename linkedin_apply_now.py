@@ -349,6 +349,10 @@ def build_url(kw):
     return "https://www.linkedin.com/jobs/search/?" + urllib.parse.urlencode({
         "keywords": kw, "location": "United States",
         "sortBy": "DD", "f_TPR": "r604800", "f_LF": "f_AL",
+        # f_E = LinkedIn's own experience-level filter: 2=Entry level, 3=Associate.
+        # Without this, keyword-only queries like "Data Engineer Entry Level" still
+        # return Senior/Lead postings — LinkedIn's search is fuzzy, not exact-phrase.
+        "f_E": "2,3",
     })
 
 FINGERPRINT_FILE = cfg.DATA_DIR / "desc_fingerprints.json"
