@@ -6,6 +6,14 @@
 
 cd /Users/raghava/job_pipeline
 
+# Auto-save full run output so failures can be diagnosed without manual
+# copy-paste (added 2026-07-08 at Raghav's request). Keeps the last 10 runs.
+mkdir -p data/debug_logs
+LOG_FILE="data/debug_logs/run_$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+ls -1t data/debug_logs/run_*.log 2>/dev/null | tail -n +11 | xargs -r rm -f
+echo "📝 Full output being saved to: $LOG_FILE"
+
 echo ""
 echo "╔══════════════════════════════════════════╗"
 echo "║       Job Application Pipeline           ║"

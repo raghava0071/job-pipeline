@@ -964,6 +964,7 @@ CLAUDE_QA: dict[str, str] = {
     "have you built with n8n, supabase, or similar workflow/database tools?": "No",
     "how many years of work experience do you have with pl/sql?": "2",
     "please confirm you currently reside within a commutable distance to brea, ca.": "No",
+    "select resume raghavendra_karanam_avery_products_corporation_data_analyst.docx": "jobsDocumentCardToggle-ember755",
 }
 
 

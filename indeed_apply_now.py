@@ -1109,6 +1109,7 @@ Rules:
                         ? Array.from(document.querySelectorAll('input[name="' + gname + '"]'))
                         : (item.sel ? Array.from(document.querySelectorAll(item.sel)) : []);
                     var ansL = ans.toLowerCase().trim();
+                    var _matched = false;
                     for (var i = 0; i < opts.length; i++) {
                         var opt = opts[i];
                         var optVal = (opt.value || '').toLowerCase();
@@ -1120,6 +1121,7 @@ Rules:
                         if (optVal === ansL || optLbl === ansL ||
                             optVal.includes(ansL) || ansL.includes(optVal) ||
                             (optLbl && (optLbl.includes(ansL) || ansL.includes(optLbl)))) {
+                            _matched = true;
                             if (!opt.checked) {
                                 try { opt.click(); } catch(ec) {}
                                 // Fire React synthetic events so state updates
@@ -1169,6 +1171,48 @@ Rules:
                             fireEvents(opt);
                             filled++;
                             break;
+                        }
+                    }
+                    // Added 2026-07-08: single-checkbox "agree to terms" widgets
+                    // (Indeed's "SINGLE" group name, one option, e.g. Winsupply's
+                    // 'Agree' checkbox) sometimes have no <label for> text and an
+                    // empty/non-matching value attribute, so the text-matching loop
+                    // above never matches and the box never gets checked — the form
+                    // then silently blocks Continue and the run stalls/loops on this
+                    // page. If there's exactly one option and the cached answer is
+                    // clearly affirmative, check it directly rather than requiring
+                    // a text match that this widget variant can't provide.
+                    if (!_matched && opts.length === 1) {
+                        var AFFIRM = ['agree', 'yes', 'i agree', 'i understand', 'accept', 'confirm'];
+                        if (AFFIRM.indexOf(ansL) !== -1) {
+                            var soleOpt = opts[0];
+                            if (!soleOpt.checked) {
+                                try { soleOpt.click(); } catch(ec2) {}
+                                ['click','change','input'].forEach(function(ev) {
+                                    try { soleOpt.dispatchEvent(new Event(ev, {bubbles:true, cancelable:true})); }
+                                    catch(e) { try { soleOpt.dispatchEvent(new Event(ev)); } catch(e2) {} }
+                                });
+                                if (!soleOpt.checked) {
+                                    var soleLe = soleOpt.id ? document.querySelector('label[for="' + soleOpt.id + '"]') : null;
+                                    if (soleLe) {
+                                        soleLe.click();
+                                        ['click','mousedown','mouseup'].forEach(function(ev) {
+                                            soleLe.dispatchEvent(new MouseEvent(ev, {bubbles:true}));
+                                        });
+                                    }
+                                    if (!soleOpt.checked) {
+                                        var soleWrap = soleOpt.closest('label, li, [role="checkbox"], [class*="card" i]');
+                                        if (soleWrap && soleWrap !== soleLe) {
+                                            soleWrap.click();
+                                            ['click','mousedown','mouseup'].forEach(function(ev) {
+                                                soleWrap.dispatchEvent(new MouseEvent(ev, {bubbles:true}));
+                                            });
+                                        }
+                                    }
+                                }
+                                fireEvents(soleOpt);
+                                filled++;
+                            }
                         }
                     }
                     continue;
@@ -1341,6 +1385,15 @@ CONFIRM_PHRASES = [
     'your application has been', 'application received',
     'thanks for applying', 'thank you for applying',
     'application complete',
+    # Added 2026-07-08: several real jobs (Sun River Health, Proteam Solutions,
+    # shark analytics, Atlantic IT Solutions) had their submit button vanish
+    # (a strong success signal) but the confirmation page used wording not in
+    # the original list, so _is_confirmed() never caught it and the run
+    # eventually gave up and mis-reported "Failed" after a real success.
+    'application has been submitted', 'thank you for your application',
+    'your application was submitted', 'we received your application',
+    "you're all set", 'you have applied', "you've applied",
+    'application sent', 'good luck with your application',
 ]
 
 # Phrases that appear on the AI interview page AFTER submission.
@@ -1880,10 +1933,14 @@ def _click_nav(frame, hint="continue", verbose=True):
         print(f"          ↩  Playwright failed — JS click fallback")
     result = _safe_eval(frame, """
         () => {
-            const kws = ['continue','next','submit','review','apply','send'];
+            // NOTE: bare 'review' as a keyword used to match inside 'preview' (e.g.
+            // "preview what the employer sees" contains "review"), causing the JS
+            // fallback to click Preview instead of Submit on the final review page.
+            // Fixed 2026-07-08: use the full phrase, and explicitly exclude 'preview'.
+            const kws = ['continue','next','submit','review your application','apply','send'];
             const BACK = ['back','previous','cancel','unable to','report','feedback',
                           'issue','problem','submit feedback','report an issue',
-                          'give feedback','accessibility','skip'];
+                          'give feedback','accessibility','skip','preview'];
             const btns = Array.from(document.querySelectorAll(
                 'button, input[type=submit], [role=button]'
             ));
@@ -2606,6 +2663,41 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                     else:
                         print(f"          ❌ Gave up after {MAX_SUBMIT_ATTEMPTS} submit attempts")
                         submitted = False
+                        # Added 2026-07-08: previously this branch captured NO diagnostics —
+                        # when the submit button disappears (possible real success) but
+                        # neither _is_confirmed() nor the URL-drift check catches it, we had
+                        # zero data to tell "actually failed" apart from "actually succeeded,
+                        # confirmation page just used unrecognized wording". Save page state
+                        # so this is debuggable from data/ instead of a black box.
+                        try:
+                            import json as _json_stuck_submit
+                            _ss_file = cfg.BASE_DIR / "data" / "stuck_submits.json"
+                            _ss_file.parent.mkdir(parents=True, exist_ok=True)
+                            _ss_existing = []
+                            if _ss_file.exists():
+                                try:
+                                    _ss_existing = _json_stuck_submit.loads(_ss_file.read_text())
+                                except Exception:
+                                    _ss_existing = []
+                            _ss_page_txt = ""
+                            try:
+                                _ss_page_txt = apply_page.evaluate("() => document.body.innerText")
+                            except Exception:
+                                pass
+                            _ss_existing.append({
+                                "timestamp": datetime.now().isoformat(),
+                                "company": company,
+                                "job_title": title,
+                                "url": apply_page.url,
+                                "page_text_snippet": _ss_page_txt[:4000],
+                                "note": "submit attempts exhausted — button may have vanished "
+                                        "(possible real success with unrecognized confirmation "
+                                        "wording) or a real dead-end. Check page_text_snippet.",
+                            })
+                            _ss_file.write_text(_json_stuck_submit.dumps(_ss_existing, indent=2))
+                            print(f"          📝 Submit give-up diagnostics saved → data/stuck_submits.json")
+                        except Exception as _sse:
+                            print(f"          ⚠  Could not save submit diagnostics: {_sse}")
 
                 break
 
