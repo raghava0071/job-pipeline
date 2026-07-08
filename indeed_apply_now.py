@@ -2788,7 +2788,17 @@ def main():
     _indeed_session_busy = False
     for _lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
         _lock_path = SESSION_DIR / _lock_name
-        if _lock_path.exists():
+        # NOTE: these are symlinks whose *target* is a plain "hostname-pid" or
+        # numeric string, not a real path — Path.exists() follows the symlink
+        # and resolves the target, so it's always False for SingletonLock/
+        # SingletonCookie even when the symlink itself is sitting right here.
+        # That silently disabled this whole cleanup for those two files since
+        # v1.1.5 (only SingletonSocket, whose target happens to be a real
+        # path, was ever actually being cleared). Use is_symlink() too so a
+        # stale SingletonLock left over from a real crash gets cleared, since
+        # Chromium's own instance check gets confused (and self-terminates)
+        # when Lock is present but Socket is already gone.
+        if _lock_path.exists() or _lock_path.is_symlink():
             _owner_pid = _lock_owner_pid(_lock_path)
             if _owner_pid and _pid_alive(_owner_pid):
                 print(f"  🚫 {_lock_name} is held by a still-running process (PID {_owner_pid}) "
