@@ -565,7 +565,7 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename="", 
     ):
         print(f"          📄 Resume-selection page detected — auto-selecting uploaded resume")
         target = resume_filename or ""
-        clicked = page.evaluate("""
+        _resume_card_click_js = """
             (target) => {
                 // ── NEVER click "Build an Indeed Resume" / "Recommended" option ──
                 // Indeed puts it first — falling back to radios[0] would click it.
@@ -652,7 +652,56 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename="", 
                 }
                 return 1;
             }
-        """, target)
+        """
+        clicked = page.evaluate(_resume_card_click_js, target)
+
+        if not clicked:
+            # No resume radio found at all. Two possibilities: it's already
+            # selected some other way (harmless — the old "return clicked or 1"
+            # behavior), or Indeed's own upload silently failed on THIS page
+            # and there's no resume attached to select at all. Confirmed live
+            # 2026-07-08 (Winsupply/Business Intelligence Analyst,
+            # data/stuck_questions.json): the page showed "We couldn't upload
+            # your resume file. Wait a moment and then try again." with an
+            # empty file-upload widget, and the old code reported success
+            # anyway — Continue then clicked against an empty widget forever
+            # (4-step stuck loop, job abandoned). Detect that specific case
+            # and actually retry the upload instead of assuming success.
+            try:
+                _page_txt_now = page.evaluate("() => document.body.innerText") or ""
+            except Exception:
+                _page_txt_now = ""
+            _has_file_input = False
+            try:
+                _has_file_input = page.locator('input[type="file"]').count() > 0
+            except Exception:
+                pass
+            _upload_failed_text = ("couldn't upload" in _page_txt_now.lower()
+                                    or "could not upload" in _page_txt_now.lower())
+            if _has_file_input and (_upload_failed_text or "add a resume" in _page_txt_now.lower()):
+                _resume_full_path = (cfg.RESUMES_DIR / resume_filename) if resume_filename else None
+                if _resume_full_path and _resume_full_path.exists():
+                    print(f"          📎 No resume card found — Indeed's upload widget looks empty, retrying upload...")
+                    for _rt in range(3):
+                        try:
+                            time.sleep(random.uniform(1.5, 3.0))
+                            page.locator('input[type="file"]').first.set_input_files(str(_resume_full_path))
+                            time.sleep(random.uniform(4.0, 6.0))
+                            _retry_txt = page.evaluate("() => document.body.innerText") or ""
+                            if "couldn't upload" not in _retry_txt.lower() and "could not upload" not in _retry_txt.lower():
+                                print(f"          📎 Retry upload accepted")
+                                break
+                            _wait_t = 12 + _rt * 10
+                            print(f"          ⚠  Retry upload rejected again (attempt {_rt+1}/3) — waiting {_wait_t}s...")
+                            time.sleep(_wait_t)
+                        except Exception as _re:
+                            print(f"          ⚠  Retry upload error: {_re}")
+                    # Re-scan now that a fresh upload was attempted
+                    clicked = page.evaluate(_resume_card_click_js, target)
+                    print(f"          ✔  Post-retry resume card {'clicked' if clicked else 'still not found'}")
+                else:
+                    print(f"          ⚠  Resume file not found at {_resume_full_path} — can't retry upload")
+
         print(f"          ✔  Resume card + radio {'clicked' if clicked else 'already selected'} (skipped Build Indeed Resume option)")
         return clicked or 1   # count as 1 fill even if already selected
 
@@ -2359,7 +2408,10 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                             "company":    company,
                             "job_title":  title,
                             "url":        apply_page.url,
-                            "page_text_snippet": _page_txt[:1000],
+                            # 1000 chars wasn't enough — the 2026-07-08 demographic-questions-
+                            # module capture cut off right before the actual required-field
+                            # asterisks and options, making the stuck entry undiagnosable.
+                            "page_text_snippet": _page_txt[:4000],
                             "fields":     [
                                 {"label": f.get("label",""), "type": f.get("type",""), "options": f.get("options",[])}
                                 for f in _last_seen_fields
