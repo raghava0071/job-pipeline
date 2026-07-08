@@ -734,9 +734,37 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename="", 
     answers = {}       # label → answer string
     uncached = []
 
+    def _answer_valid_for_options(ans, options) -> bool:
+        """Radio/checkbox groups can only be filled by clicking an option whose
+        value/label text matches the answer (see the fill pass below, which uses
+        this same contains-either-way match). If a field has a known options
+        list, a cached answer that doesn't match ANY option is worthless — it
+        will never actually get clicked, and the form is left stuck with a
+        'Select an option' validation error forever (never re-tried, never sent
+        to Claude, since a cache "hit" short-circuits before Claude is asked).
+        This mainly bites hash-labeled fields (e.g. 'q_b74adbe8...') — Indeed
+        reuses that ID pattern for both simple Yes/No gates AND multi-option
+        questions (degree level, clearance checkboxes, contact preference), and
+        qa_answers.py's blanket 'q_ prefix -> Yes' default only holds for the
+        former. Confirmed live 2026-07-08: Interactive Process Technology LLC
+        job stuck 4 steps on exactly this ('Yes' cached for a degree-level
+        radio group with no 'Yes' option).
+        """
+        if not options:
+            return True  # no options to check against — trust the cache as before
+        ans_l = str(ans).lower().strip()
+        if not ans_l:
+            return False
+        for opt in options:
+            opt_l = str(opt).lower().strip()
+            if ans_l == opt_l or ans_l in opt_l or opt_l in ans_l:
+                return True
+        return False
+
     print(f"          🗄  Cache lookup...")
     for f in fields:
         lbl = f.get("label","")
+        _opts = f.get("options")
 
         # 0. Cover letter fields — paste actual cover letter text
         lbl_lower = lbl.lower().strip().rstrip(" *:?")
@@ -754,26 +782,32 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename="", 
 
         # 1. qa_answers.py — master Q&A (manually curated, highest priority)
         qa_hit = _qa.get_answer(lbl) if (_qa and lbl) else None
-        if qa_hit is not None:
+        if qa_hit is not None and _answer_valid_for_options(qa_hit, _opts):
             print(f"             ✔ QA FILE    '{lbl}' → '{str(qa_hit)[:60]}'")
             answers[lbl] = qa_hit
             continue
+        elif qa_hit is not None:
+            print(f"             ✗ QA FILE answer '{qa_hit}' doesn't match any option for '{lbl}' — treating as miss")
 
         # 2. claude_answers.py — Claude's past answers (auto-saved, human-reviewable)
         ca_hit = _claude_ans.get(lbl) if (_claude_ans and lbl) else None
-        if ca_hit is not None:
+        if ca_hit is not None and _answer_valid_for_options(ca_hit, _opts):
             print(f"             ✔ SAVED      '{lbl}' → '{str(ca_hit)[:60]}'")
             answers[lbl] = ca_hit
             continue
+        elif ca_hit is not None:
+            print(f"             ✗ SAVED answer '{ca_hit}' doesn't match any option for '{lbl}' — treating as miss")
 
         # 3. SQLite cache (legacy)
         cached = _cache.get(lbl) if lbl else None
-        if cached is not None:
+        if cached is not None and _answer_valid_for_options(cached, _opts):
             print(f"             ✔ CACHE HIT  '{lbl}' → '{str(cached)[:60]}'")
             answers[lbl] = cached
             # Promote to claude_answers.py so it's visible and editable
             if _claude_ans: _claude_ans.save(lbl, cached)
         else:
+            if cached is not None:
+                print(f"             ✗ CACHE HIT answer '{cached}' doesn't match any option for '{lbl}' — treating as miss")
             print(f"             ✗ cache miss '{lbl}'")
             uncached.append(f)
 
