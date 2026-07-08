@@ -956,6 +956,14 @@ CLAUDE_QA: dict[str, str] = {
     "q_2930e24f20f6e31100ba47bd0a2bdf04": "None",
     "q_f1e6ea9b2a90a866b7b788fee5908842": "Email",
     "q_a24db0b23c7ff424cb52b38d7b454c7b": "I understand",
+    "single": "Agree",
+    "how long have you been living in the us?": "Less than 1 year",
+    "what is your level of proficiency in english?": "Professional",
+    "select resume raghavendra_karanam_healthcare_it_leaders_meditech_revenue_cycle__a.docx": "on",
+    "select resume raghavendra_karanam_trebecon_llc_healthcare_data_analyst__.docx": "on",
+    "have you built with n8n, supabase, or similar workflow/database tools?": "No",
+    "how many years of work experience do you have with pl/sql?": "2",
+    "please confirm you currently reside within a commutable distance to brea, ca.": "No",
 }
 
 
