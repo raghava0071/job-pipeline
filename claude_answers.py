@@ -951,6 +951,11 @@ CLAUDE_QA: dict[str, str] = {
     "dod iat/iam level iii": "No",
     "no-remote only": "No-remote only",
     "hybrid": "Hybrid",
+    "q_b74adbe8ed1ce66a90511cc535d5a422": "Master's Degree",
+    "q_ec3103228fe93674bc140f9e2283d218": "None",
+    "q_2930e24f20f6e31100ba47bd0a2bdf04": "None",
+    "q_f1e6ea9b2a90a866b7b788fee5908842": "Email",
+    "q_a24db0b23c7ff424cb52b38d7b454c7b": "I understand",
 }
 
 
