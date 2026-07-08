@@ -942,6 +942,8 @@ CLAUDE_QA: dict[str, str] = {
     "how many years of hands-on experience do you have with ediscovery tools such as relativity or microsoft purview?": "2",
     "select resume raghavendra_karanam_applicantz_ediscovery_data_analyst__.docx": "jobsDocumentCardToggle-ember478",
     "select resume raghavendra_karanam_gyansys_inc_marketing_analytics_-_con.docx": "jobsDocumentCardToggle-ember865",
+    "select resume raghavendra_karanam_premium_health_center_healthcare_business_intel.docx": "jobsDocumentCardToggle-ember541",
+    "how many years of work experience do you have with programming languages?": "4",
 }
 
 
