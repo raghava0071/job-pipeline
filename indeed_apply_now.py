@@ -23,7 +23,7 @@
 #   python indeed_apply_now.py --dry-run
 # =============================================================================
 
-import os, sys, time, json, argparse, re, random
+import os, sys, time, json, argparse, re, random, atexit
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -122,6 +122,9 @@ def build_indeed_url(kw, start=0):
         "sort": "date",
         "fromage": "7",
         "start": start,
+        # Indeed's own experience-level filter — same fix as LinkedIn's f_E:
+        # keyword-only queries still return Senior/Lead and off-target roles.
+        "explvl": "entry_level",
     })
 
 def load_log():
@@ -2750,14 +2753,69 @@ def main():
 
     # ── Clear stale Chromium SingletonLock (left over if prior run crashed) ───
     # Without this, the morning scheduler run fails entirely with ProcessSingleton error.
+    # IMPORTANT: only delete these if the owning process is actually dead. Deleting
+    # a live process's lock and launching a second Chrome on the same profile
+    # doesn't recover anything — Chrome's own instance check rejects the new one,
+    # which crashes with "TargetClosedError: browser has been closed" (seen
+    # 2026-07-06: an earlier dry-run's Chrome was still alive when a fresh
+    # `runjobs` cleared its "stale" lock and launched straight into a collision).
+    def _lock_owner_pid(lock_path):
+        """Best-effort read of the PID a Singleton* lock file points to.
+        These are usually a symlink target formatted 'hostname-pid'."""
+        try:
+            target = os.readlink(str(lock_path))
+        except OSError:
+            try:
+                target = lock_path.read_text()
+            except Exception:
+                return None
+        _m = re.search(r'-(\d+)\s*$', target.strip())
+        return int(_m.group(1)) if _m else None
+
+    def _pid_alive(pid):
+        if not pid:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True   # process exists, just owned by someone else
+        except Exception:
+            return False
+
+    _indeed_session_busy = False
     for _lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
         _lock_path = SESSION_DIR / _lock_name
         if _lock_path.exists():
+            _owner_pid = _lock_owner_pid(_lock_path)
+            if _owner_pid and _pid_alive(_owner_pid):
+                print(f"  🚫 {_lock_name} is held by a still-running process (PID {_owner_pid}) "
+                      f"— another Indeed session already has this browser profile open.")
+                _indeed_session_busy = True
+                continue
             try:
                 _lock_path.unlink()
                 print(f"  🔓 Cleared stale {_lock_name} — prior session didn't exit cleanly")
             except Exception as _le:
                 print(f"  ⚠  Could not clear {_lock_name}: {_le}")
+
+    if _indeed_session_busy:
+        print("  ❌ Skipping this Indeed run — close the other session first, then run again.")
+        try:
+            notifier.send_alert(
+                subject="⚠️ Indeed run skipped — session already in use",
+                body=(
+                    "The Indeed pipeline found another process still holding the browser "
+                    "profile lock and skipped this run instead of launching a second "
+                    "Chrome into a guaranteed collision.\n"
+                    "Close the other Indeed window/process, then run Indeed again."
+                ),
+            )
+        except Exception:
+            pass
+        return
 
     # ── Clear stale resume-selection cache (filename changes every job) ───────
     try:
@@ -2880,12 +2938,33 @@ def main():
             headless=False,
             args=["--disable-blink-features=AutomationControlled"],
             viewport={"width": 1280, "height": 900},
+            timeout=getattr(cfg, "INDEED_BROWSER_LAUNCH_TIMEOUT_MS", 60000),
         )
+        # If this process dies for any reason (crash, uncaught exception from the
+        # Playwright driver, etc.) before browser.close() runs, the Chromium profile
+        # lock (SingletonLock/Cookie/Socket) is left behind and the *next* launch
+        # hangs for minutes waiting on a lock nothing still holds. This process owns
+        # that lock right now, so on exit — clean or not — release it unconditionally.
+        def _release_indeed_session_lock():
+            for _lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                _lp = SESSION_DIR / _lock_name
+                try:
+                    if _lp.exists() or _lp.is_symlink():
+                        _lp.unlink()
+                except Exception:
+                    pass
+        atexit.register(_release_indeed_session_lock)
+
         page = browser.pages[0] if browser.pages else browser.new_page()
-        # Auto-dismiss any JS alert/confirm dialogs — prevents ProtocolError crash
+        # Auto-dismiss any JS alert/confirm dialogs — prevents ProtocolError crash.
+        # Guard against a page that already closed/navigated by the time this fires
+        # (that race is what crashes the Playwright driver — see CHANGELOG).
         def _safe_dismiss(d):
-            try: d.dismiss()
-            except Exception: pass
+            try:
+                if not d.page.is_closed():
+                    d.dismiss()
+            except Exception:
+                pass
         browser.on("dialog", _safe_dismiss)
 
         ensure_login(page)
@@ -2924,6 +3003,14 @@ def main():
         global _indeed_blocked
         _consecutive_empty_queries = 0
         _empty_query_bail = getattr(cfg, "INDEED_EMPTY_QUERY_BAIL_THRESHOLD", 4)
+        # Rolling-average low-yield tracking — catches a soft-blocked session
+        # that trickles 1-2 cards through occasionally instead of hard-zero
+        # every time, which would otherwise keep resetting the counter above
+        # and never trip the bail. See config.py for thresholds.
+        _total_queries_done = 0
+        _total_cards_found = 0
+        _low_yield_min_queries = getattr(cfg, "INDEED_LOW_YIELD_MIN_QUERIES", 6)
+        _low_yield_avg_cards = getattr(cfg, "INDEED_LOW_YIELD_AVG_CARDS", 5)
 
         for _qi, query in enumerate(SEARCH_QUERIES):
             if applied_count >= MAX_APPLY:
@@ -3022,6 +3109,8 @@ def main():
                     break   # fewer than 10 results on this page = no point fetching next
 
             print(f"  Found {len(job_cards)} cards ({_pages_per_query} pages)")
+            _total_queries_done += 1
+            _total_cards_found += len(job_cards)
 
             # Repeated zero-card searches almost always mean the session is
             # blocked (e.g. every page load aborting) rather than a real lack
@@ -3047,6 +3136,33 @@ def main():
                     break
             else:
                 _consecutive_empty_queries = 0
+
+            # Low-yield check — a soft-blocked session that trickles a few
+            # cards through per query never trips the strict zero-streak bail
+            # above, so also bail if the rolling average is far below a
+            # healthy query's yield (up to ~45 cards/query by design).
+            if (not _indeed_blocked
+                    and _total_queries_done >= _low_yield_min_queries
+                    and (_total_cards_found / _total_queries_done) < _low_yield_avg_cards):
+                _avg = _total_cards_found / _total_queries_done
+                print(f"\n  🛑 Only {_avg:.1f} cards/query average over {_total_queries_done} "
+                      f"searches (expected ~45) — Indeed is likely soft-blocking this session. "
+                      f"Stopping Indeed run early.")
+                try:
+                    notifier.send_alert(
+                        subject=f"🛑 Indeed run stopped — low yield ({_avg:.1f} cards/query avg), likely blocked",
+                        body=(
+                            f"The Indeed pipeline averaged {_avg:.1f} cards/query over "
+                            f"{_total_queries_done} searches (a healthy query returns ~45) and "
+                            f"stopped itself early instead of grinding through the rest of the "
+                            f"query list for little to no gain.\n"
+                            f"Check the session manually — Indeed may be soft-blocking this browser/IP."
+                        ),
+                    )
+                except Exception as _notify_err:
+                    print(f"          ⚠  Could not send low-yield-session email: {_notify_err}")
+                _indeed_blocked = True
+                break
 
             # Domain keyword set used both by the pre-filter pass below and the
             # per-card loop further down — kept in one place so the two can't
@@ -3115,6 +3231,18 @@ def main():
                 company = card.get("company","")
                 jk      = card.get("jk","")
                 href    = card.get("href","")
+
+                # Blank company name — almost always one of Indeed's own
+                # "recommended near you" filler cards padded into the results
+                # list when a narrow query (entry-level, last 7 days, exact
+                # title) runs out of genuine matches, not a real search hit.
+                # These reliably fail JD extraction and score a flat 0% later
+                # anyway — skip now instead of paying for a page load + a
+                # wasted Claude call to learn that.
+                if not company.strip():
+                    print(f"  ⏭  Blank company name: '{title}' — likely a filler/recommended card, skipping")
+                    skipped_count += 1
+                    continue
 
                 # Session-level dedup FIRST — prevents duplicate messages across queries
                 session_key = f"{company.lower().strip()}|{title.lower().strip()}"
@@ -3274,14 +3402,21 @@ def main():
                     save_log(log)
                     continue
 
-                # ── Score with Claude ──────────────────────────────────────────
-                result = ce.score_fit(profile_summary, jd, title, company)
+                # ── Score fit — Claude (paid) or free ATS keyword match ─────────
+                # Toggle: config.USE_CLAUDE_SCORING (default False, per Raghav's
+                # request 2026-07-06 — no ongoing API cost).
+                if getattr(cfg, "USE_CLAUDE_SCORING", True):
+                    result = ce.score_fit(profile_summary, jd, title, company)
+                else:
+                    result = jdp.ats_fit_score(jd, title, company)
                 score  = int(result.get("score", 0)) if isinstance(result, dict) else int(result)
                 scored_count += 1
                 grade  = result.get("grade", "") if isinstance(result, dict) else ""
-                print(f"  🎯 Fit score: {score}%  {grade}  {'✅' if score >= cfg.FIT_THRESHOLD else '❌'}")
+                _threshold = cfg.FIT_THRESHOLD if getattr(cfg, "USE_CLAUDE_SCORING", True) \
+                             else getattr(cfg, "ATS_FIT_THRESHOLD", 60)
+                print(f"  🎯 Fit score: {score}%  {grade}  {'✅' if score >= _threshold else '❌'}")
 
-                if score < cfg.FIT_THRESHOLD:
+                if score < _threshold:
                     skipped_count += 1
                     log.append({"status": "Skipped", "title": title, "company": company,
                                 "score": score, "url": live_url,

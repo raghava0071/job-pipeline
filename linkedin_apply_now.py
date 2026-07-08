@@ -1911,14 +1911,22 @@ def main():
                 total_processed += 1
                 print(f"\n    🔵 {company} — {title[:50]}")
 
-                # Score with Claude
-                fit = ce.score_fit(profile_summary, description, title, company)
+                # Score fit — Claude (paid) or free ATS keyword match.
+                # Toggle: config.USE_CLAUDE_SCORING (default False, per
+                # Raghav's request 2026-07-06 — no ongoing API cost).
+                if getattr(cfg, "USE_CLAUDE_SCORING", True):
+                    fit = ce.score_fit(profile_summary, description, title, company)
+                else:
+                    import jd_parser as jdp
+                    fit = jdp.ats_fit_score(description, title, company)
                 score = float(fit.get("score", 0))
                 grade = fit.get("grade", "?")
                 bar = "█" * int(score//10) + "░" * (10-int(score//10))
                 print(f"      [{bar}] {score:.0f}% {grade}")
 
-                li_threshold = getattr(cfg, "LINKEDIN_FIT_THRESHOLD", 80)
+                li_threshold = (getattr(cfg, "LINKEDIN_FIT_THRESHOLD", 80)
+                                if getattr(cfg, "USE_CLAUDE_SCORING", True)
+                                else getattr(cfg, "ATS_FIT_THRESHOLD", 60))
                 if score < li_threshold:
                     print(f"      Below LinkedIn gate ({li_threshold}%) — skip")
                     log.append({"timestamp": datetime.now().isoformat(), "company": company,

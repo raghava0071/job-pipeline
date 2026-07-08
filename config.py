@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "1.1.1"
+PIPELINE_VERSION = "1.2.1"
 
 # ── Platform switches — turn a platform off without touching its code ──────────
 # Set to False to skip that platform entirely for the current run.
@@ -51,6 +51,19 @@ CLAUDE_MODEL_SMART  = "claude-sonnet-4-6"            # fit scoring, cover letter
 # Claude engine default also uses 65%, so these are now in sync.
 FIT_THRESHOLD          = 60   # Indeed/Workday minimum Claude score (%)
 LINKEDIN_FIT_THRESHOLD = 60   # LinkedIn minimum — 72% was killing throughput
+
+# ── Scoring method — Claude (paid, smarter) vs free ATS keyword match ─────────
+# Per Raghav's request (2026-07-06): default to the free path, no API cost.
+# The free path (jd_parser.compute_ats_score — keyword/skills/experience/
+# education/title match, the original pre-Claude scoring method) can't judge
+# things Claude catches, like off-domain industry requirements or a
+# secretly-senior role — expect more false-approves. Flip this back to True
+# any time to restore Claude's smarter (but paid, ~$1.50-2/day at 3 runs/day)
+# judgment with zero other code changes needed.
+USE_CLAUDE_SCORING = False
+ATS_FIT_THRESHOLD  = 60   # minimum free ATS score (%) — separate scale from
+                          # FIT_THRESHOLD above, watch a run and retune if
+                          # apply volume/quality looks off
 
 # ── Apply Limits ───────────────────────────────────────────────────────────────
 MAX_APPLIES_PER_RUN    = 200  # total cap per run across all platforms
@@ -442,6 +455,8 @@ INDEED_SCROLL_SEARCHES   = True # simulate human scroll between searches
 INDEED_CF_RETRY_WAIT_SEC = 30   # seconds to wait if Cloudflare challenge (was 45)
 INDEED_PAGES_PER_QUERY   = 3    # how many result pages to scrape per query (was 2)
                                  # 3 pages = ~45 job cards per query
+INDEED_BROWSER_LAUNCH_TIMEOUT_MS = 60000  # fail fast (1 min) instead of Playwright's
+                                 # default hang if the Chromium profile is stuck/locked
 
 # ── Indeed block detection — stop early instead of grinding for hours ─────────
 # Unattended (scheduled) runs can't solve CAPTCHAs, so repeated CAPTCHA cooldowns
@@ -449,6 +464,15 @@ INDEED_PAGES_PER_QUERY   = 3    # how many result pages to scrape per query (was
 # not just rate-limited. Give up after this many rather than looping all day.
 CAPTCHA_MAX_COOLDOWNS_PER_RUN     = 2   # unsolved-CAPTCHA cooldown cycles before stopping the run
 INDEED_EMPTY_QUERY_BAIL_THRESHOLD = 4   # consecutive 0-card searches before stopping the run
+
+# A soft-blocked session (Cloudflare shadow-throttling) doesn't always return
+# exactly 0 cards every search — sometimes 1-2 trickle through, which resets
+# the consecutive-zero counter above and lets the run grind for hours at a
+# tiny fraction of normal yield (seen 2026-07-06: 45 cards across 54 searches
+# in 76 minutes, average <1 card/search, never hit the zero-streak bail).
+# This checks the rolling average instead of relying on strict zero streaks.
+INDEED_LOW_YIELD_MIN_QUERIES = 6   # don't judge yield until this many queries have run
+INDEED_LOW_YIELD_AVG_CARDS   = 5   # avg cards/query below this after MIN_QUERIES = likely blocked
 
 # ── Target Roles ───────────────────────────────────────────────────────────────
 TARGET_ROLES = [

@@ -23,6 +23,7 @@ from typing import Dict, List, Tuple
 
 sys.path.insert(0, os.path.dirname(__file__))
 from raghav_profile import PROFILE, EXPERIENCE, SKILLS, EDUCATION, TARGET_ROLES, COMMON_QA
+import config as cfg
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 RAW_CSV  = os.path.join(DATA_DIR, "raw_jobs.csv")
@@ -649,6 +650,35 @@ def parse_jd(jd_text: str, job_title: str) -> dict:
         "dim_title":           scores.get("ttl_score",  0.0),
         "yoe_required":        scores.get("yoe_required", 0),
         "coverage_gap":        scores.get("coverage_gap", []),
+    }
+
+
+def ats_fit_score(jd_text: str, job_title: str, company: str = "") -> dict:
+    """
+    Free, zero-API-cost fit score — the original pre-Claude scoring method
+    (compute_ats_score: keyword/skills/experience/education/title composite).
+    Returns the same dict shape as claude_engine.score_fit() so call sites
+    can switch between the two via config.USE_CLAUDE_SCORING without any
+    other code changes.
+
+    NOTE: this is pattern matching, not judgment — it can't tell a
+    keyword-stuffed mismatch from a real fit, and can't catch things Claude
+    does (off-domain industry requirements, secretly-senior scope despite
+    title). Expect more false-approves than Claude scoring. Threshold is
+    config.ATS_FIT_THRESHOLD, a separate scale from FIT_THRESHOLD.
+    """
+    parsed = parse_jd(jd_text, job_title)
+    score  = round(parsed.get("optimized_score", 0.0))
+    threshold = getattr(cfg, "ATS_FIT_THRESHOLD", 60)
+    grade = ("A" if score >= 85 else "B" if score >= 72 else
+             "C" if score >= 65 else "D" if score >= 50 else "F")
+    return {
+        "score": score,
+        "grade": grade,
+        "apply": score >= threshold,
+        "reasoning": "Free ATS keyword/skills/experience/education/title match (no AI call).",
+        "strengths": parsed.get("jd_keywords", [])[:5],
+        "missing":   parsed.get("coverage_gap", []),
     }
 
 
