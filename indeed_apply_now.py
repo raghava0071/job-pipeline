@@ -1130,6 +1130,41 @@ Rules:
                                         try { opt.dispatchEvent(new Event(ev)); } catch(e2) {}
                                     }
                                 });
+                                // Also click the associated <label> and any custom
+                                // clickable wrapper card — same fix already proven
+                                // necessary for the resume-selection special case
+                                // ("Indeed needs the whole card clicked", not just
+                                // the underlying <input>). Some of Indeed's custom
+                                // widgets (confirmed: the EEO/demographic self-ID
+                                // module, 2026-07-08) only wire their real click
+                                // handler to the visible label/card element, not
+                                // the input itself, so a raw opt.click() updates
+                                // the DOM's checked state but never notifies
+                                // Indeed's own form validation.
+                                // IMPORTANT: only do this if opt.click() didn't
+                                // already take — checkboxes (unlike radios) TOGGLE
+                                // on every click, so clicking the label again after
+                                // a successful direct click would silently uncheck
+                                // it right back off.
+                                try {
+                                    if (!opt.checked) {
+                                        if (le) {
+                                            le.click();
+                                            ['click','mousedown','mouseup'].forEach(function(ev) {
+                                                le.dispatchEvent(new MouseEvent(ev, {bubbles:true}));
+                                            });
+                                        }
+                                        if (!opt.checked) {
+                                            var wrapEl = opt.closest('label, li, [role="radio"], [role="option"], [class*="card" i]');
+                                            if (wrapEl && wrapEl !== le) {
+                                                wrapEl.click();
+                                                ['click','mousedown','mouseup'].forEach(function(ev) {
+                                                    wrapEl.dispatchEvent(new MouseEvent(ev, {bubbles:true}));
+                                                });
+                                            }
+                                        }
+                                    }
+                                } catch(ecard) {}
                             }
                             fireEvents(opt);
                             filled++;
