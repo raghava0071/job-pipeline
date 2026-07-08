@@ -944,6 +944,13 @@ CLAUDE_QA: dict[str, str] = {
     "select resume raghavendra_karanam_gyansys_inc_marketing_analytics_-_con.docx": "jobsDocumentCardToggle-ember865",
     "select resume raghavendra_karanam_premium_health_center_healthcare_business_intel.docx": "jobsDocumentCardToggle-ember541",
     "how many years of work experience do you have with programming languages?": "4",
+    "how many years of analytics engineering experience do you have? *": "3",
+    "how many years of software engineering experience do you have? *": "3",
+    "how many years of business intelligence experience do you have? *": "3",
+    "dod iat/iam level ii": "No",
+    "dod iat/iam level iii": "No",
+    "no-remote only": "No-remote only",
+    "hybrid": "Hybrid",
 }
 
 
