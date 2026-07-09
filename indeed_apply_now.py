@@ -1688,19 +1688,33 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                             }
 
                             // Step 2: Pin the iframe — large, centered, always on top
+                            //
+                            // Fixed 2026-07-08: was 330x650 — reCAPTCHA's image
+                            // challenge renders at a roughly fixed intrinsic size
+                            // around 400px wide. Forcing the outer iframe box
+                            // narrower than that very likely squeezed/clipped its
+                            // internal layout, pushing the Verify button below the
+                            // visible area — consistent with three separate
+                            // screenshots tonight all showing the image grid cut
+                            // off at the bottom with no visible Submit/Verify
+                            // button. Widened and made taller with real margin,
+                            // capped to the actual viewport so it can't exceed the
+                            // screen on a smaller display, with overflow-y:auto as
+                            // a fallback in case content still doesn't fully fit.
                             bframe.style.cssText = [
                                 'position: fixed !important',
                                 'top: 10px !important',
                                 'left: 50% !important',
                                 'transform: translateX(-50%) !important',
-                                'width: 330px !important',
-                                'height: 650px !important',
+                                'width: 420px !important',
+                                'height: 780px !important',
+                                'max-height: 95vh !important',
                                 'z-index: 2147483647 !important',
                                 'border: 4px solid #ff0000 !important',
                                 'border-radius: 10px !important',
                                 'background: white !important',
                                 'box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important',
-                                'overflow: visible !important',
+                                'overflow-y: auto !important',
                             ].join(';');
 
                             // Step 3: Also surface any sibling anchor checkbox iframe
