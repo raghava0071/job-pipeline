@@ -1958,11 +1958,46 @@ def _find_active_form_ctx(page, verbose=True):
     return best_ctx
 
 def _is_confirmed(page):
-    """Check any frame for confirmation text."""
+    """Check any frame for confirmation text.
+
+    CONFIRMED FALSE POSITIVE 2026-07-09: the pipeline reported "Applied:
+    submitted" and emailed Raghav a screenshot for GRP Solutions Inc — the
+    screenshot itself shows the "Review your application" / "100%" page,
+    with the Submit button never even clicked. This function fired True
+    while still sitting on the pre-submission review page — most likely some
+    hidden/accessibility-only text on that page (e.g. an ARIA live region
+    pre-rendered with template text for screen readers, which document.
+    innerText can still pick up even when visually hidden) happened to
+    contain one of CONFIRM_PHRASES. A false "submitted" is a worse failure
+    mode than a false "failed": it means a real job Raghav believes he
+    applied to may never have actually gone to the employer.
+
+    Fixed with a negative guard: known pre-submission review-page markers
+    (URL still on review-m/review-module/questions-module/resume-selection,
+    or the page still literally showing "review your application" /
+    "you won't be able to edit your application") now veto any phrase match
+    — a confirm-phrase hit on a page that's still clearly the review screen
+    is treated as a false positive, not a success.
+    """
+    REVIEW_PAGE_URL_MARKERS = ("review-m", "review-module", "questions-module", "resume-selection")
+    REVIEW_PAGE_TEXT_MARKERS = ("review your application", "you won't be able to edit your application")
+
+    try:
+        current_url = (page.url or "").lower()
+    except Exception:
+        current_url = ""
+    on_review_url = any(m in current_url for m in REVIEW_PAGE_URL_MARKERS)
+
     all_frames = [page.main_frame] + list(page.frames)
     for frame in all_frames:
         body = _safe_eval(frame, "() => document.body.innerText.toLowerCase()", "")
+        if not body:
+            continue
         if any(p in body for p in CONFIRM_PHRASES):
+            if on_review_url or any(m in body for m in REVIEW_PAGE_TEXT_MARKERS):
+                # Looks like a confirm-phrase match, but we're still
+                # demonstrably on the review page — don't trust it.
+                continue
             return True
     return False
 

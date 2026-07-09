@@ -989,6 +989,9 @@ CLAUDE_QA: dict[str, str] = {
     "select resume raghavendra_karanam_mitchell_martin_inc_ai_agent_developer__gener.docx": "jobsDocumentCardToggle-ember399",
     "how many years of work experience do you have with arcgis products?": "2",
     "select resume raghavendra_karanam_csznet_inc_oracle_database_developer.docx": "on",
+    "select resume raghavendra_karanam_resolve_tech_solutions_fabricpower_bi_developer.docx": "jobsDocumentCardToggle-ember562",
+    "select resume raghavendra_karanam_ventures_unlimited_inc_jr_ai_engineer__0-2_years.docx": "on",
+    "select resume raghavendra_karanam_tek_tree_llc_database_developer.docx": "jobsDocumentCardToggle-ember706",
 }
 
 
