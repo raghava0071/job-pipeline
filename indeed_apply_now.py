@@ -2869,6 +2869,32 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                     _prev_page_sig = _cur_page_sig
 
                     if _same_sig_count >= 2:
+                        # Added 2026-07-08: checked a real stuck job's frame scan
+                        # right before this exact point fired — no bframe challenge
+                        # iframe existed yet, only the unclicked reCAPTCHA checkbox.
+                        # Google's risk engine appears to escalate to a visible
+                        # image challenge only AFTER a few rapid Submit clicks (the
+                        # same ones this early-exit is designed to cut off), and it
+                        # can take a few extra seconds to actually render. Without
+                        # this, "page looks unchanged" was being read as "click
+                        # isn't landing" and this loop would stop watching the page
+                        # right as a real CAPTCHA was rendering — leaving Raghav
+                        # looking at a live, unsolved challenge with no alert email,
+                        # no notification, and no resize, because the code had
+                        # already moved on to the next job by the time it appeared.
+                        # One more explicit check with extra wait before giving up.
+                        print(f"          🔎 Page unchanged — waiting 5s and re-checking for a "
+                              f"delayed CAPTCHA before giving up...")
+                        time.sleep(5)
+                        _late_captcha_ok = _check_and_handle_captcha(apply_page, title, company, job_url=job_url)
+                        if not _late_captcha_ok:
+                            print(f"          ❌ CAPTCHA timed out — queuing for retry")
+                            return False, "captcha-timeout"
+                        if _is_confirmed(apply_page):
+                            print(f"          🎉 Application submitted and confirmed (after CAPTCHA solve)!")
+                            submitted = True
+                            break
+
                         print(f"          ❌ Page unchanged across {_same_sig_count + 1} attempts — "
                               f"button click isn't landing, stopping early (was attempt {attempt}/{MAX_SUBMIT_ATTEMPTS})")
                         submitted = False
