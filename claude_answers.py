@@ -994,6 +994,7 @@ CLAUDE_QA: dict[str, str] = {
     "select resume raghavendra_karanam_tek_tree_llc_database_developer.docx": "jobsDocumentCardToggle-ember706",
     "select resume raghavendra_karanam_warp_ai_engineer.docx": "jobsDocumentCardToggle-ember570",
     "are you able to work in office 4 days a week?": "Yes",
+    "select resume raghavendra_karanam_ektello_data_analyst_korean_bilin.docx": "jobsDocumentCardToggle-ember1103",
 }
 
 

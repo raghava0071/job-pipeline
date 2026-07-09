@@ -1809,6 +1809,8 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                     _clicked_after_solve = False
                     try:
                         for frame in page.frames:
+                            if _is_recaptcha_frame(frame):
+                                continue
                             for _label in ["Submit your application", "Submit application",
                                            "Submit", "Apply now"]:
                                 try:
@@ -1833,6 +1835,8 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                     if not _clicked_after_solve:
                         try:
                             for frame in page.frames:
+                                if _is_recaptcha_frame(frame):
+                                    continue
                                 clicked = _safe_eval(frame, """
                                     () => {
                                         const kws = ['submit your application','submit application','submit','apply now'];
@@ -2085,6 +2089,8 @@ def _get_nav_buttons(page, verbose=True):
     """
     all_frames = list(page.frames)  # no duplicate main_frame
     for i, frame in enumerate(all_frames):
+        if _is_recaptcha_frame(frame):
+            continue
         try:
             btns = frame.evaluate(NAV_JS) or []
             if btns:
@@ -2193,6 +2199,34 @@ def _click_nav(frame, hint="continue", verbose=True):
     return "none"
 
 
+def _is_recaptcha_frame(frame) -> bool:
+    """
+    True if this frame belongs to Google's reCAPTCHA widget (the checkbox
+    'anchor' iframe or the image-challenge 'bframe' iframe).
+
+    Added 2026-07-09: confirmed via Raghav's live report that the pipeline
+    appeared to be "answering the CAPTCHA wrongly" itself. Root cause found —
+    _click_any_forward_button() and _click_submit_btn()'s fallback both used
+    to iterate EVERY frame on the page with no awareness that one of them
+    could be the reCAPTCHA challenge itself, running a generic "click any
+    button" JS query inside whatever frame it landed on. reCAPTCHA's own
+    image tiles and its Verify/reload controls are real <button>/[role=button]
+    elements, so a generic click scan running inside that frame could select
+    a wrong tile or submit the challenge prematurely — exactly the kind of
+    interaction Google's own bot-detection is built to catch, and a very
+    plausible contributor to the repeated session blocks investigated
+    earlier. Every generic "click any button in any frame" fallback now
+    skips frames that match this check entirely — the pipeline should never
+    interact with CAPTCHA content itself, only detect/wait/pin/resubmit
+    around it.
+    """
+    try:
+        url = (frame.url or "").lower()
+    except Exception:
+        return False
+    return "recaptcha" in url or "gstatic.com/recaptcha" in url
+
+
 def _click_any_forward_button(page, verbose=True):
     """
     Last-resort: click ANY visible enabled non-back button across all frames.
@@ -2206,6 +2240,8 @@ def _click_any_forward_button(page, verbose=True):
             'external application', 'leaving indeed', "you're leaving",
             'new update', 'updates']
     for frame in list(page.frames):
+        if _is_recaptcha_frame(frame):
+            continue
         try:
             result = frame.evaluate("""
                 (backWords) => {
@@ -2805,6 +2841,8 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                     # bounding-box + page.mouse.click() is a trusted browser-level
                     # click, same fix as in _click_nav().
                     for frame in pg.frames:
+                        if _is_recaptcha_frame(frame):
+                            continue
                         try:
                             for label in ["Submit your application", "Submit application",
                                           "Submit", "Apply now", "Send application"]:
@@ -2822,6 +2860,8 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                             pass
 
                     for frame in pg.frames:
+                        if _is_recaptcha_frame(frame):
+                            continue
                         js_clicked = _safe_eval(frame, """
                             () => {
                                 const kws = ['submit your application','submit application',
