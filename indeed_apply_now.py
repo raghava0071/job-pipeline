@@ -1570,6 +1570,85 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         #       reintroduce the exact "stays true forever after solving" bug
         #       this function exists to avoid. Requiring real challenge text
         #       keeps this signal specific to an actual, active challenge.
+        # CONFIRMED BROKEN 2026-07-09: once a challenge has ever rendered, this
+        # function was staying True FOREVER, even minutes after Raghav solved
+        # the CAPTCHA and hit Submit — the wait loop always burned the full 10
+        # minutes and gave up, exactly matching his report ("pipeline is not
+        # understand that I solve the cap... still sitting in that page").
+        # Two compounding causes, both traced by re-reading this function and
+        # the pin logic above it line by line rather than guessing:
+        #
+        #  1. The challenge-text check below OR'd in a bare 'recaptcha'
+        #     substring match. That word is part of Google's own permanent
+        #     widget branding/footer text, present in the bframe's document
+        #     whether or not the challenge is solved — so this signal could
+        #     never honestly report "resolved." Even the specific phrases
+        #     ('select all images', etc.) aren't safe either: reCAPTCHA
+        #     typically hides a solved challenge by collapsing/hiding its
+        #     container, not by clearing the DOM text inside it, and
+        #     f.evaluate() reads a frame's document regardless of whether
+        #     that frame is visually hidden on the page — so text-based
+        #     checks can't reliably prove "still active" at all.
+        #  2. The pin/resize step above forces the bframe's ENTIRE inline
+        #     style with `!important` on position/size, applied once when the
+        #     challenge is first detected. If Google's own JS later tries to
+        #     hide/collapse that same box after a solve (e.g. shrinking width/
+        #     height via a plain, non-!important inline style), our earlier
+        #     !important values win and the box visually stays put — so even
+        #     the size/visibility-based signals could get stuck "visible."
+        #
+        # Fixed by checking the canonical, Google-controlled solved signal
+        # instead of guessing from visibility/text heuristics: the hidden
+        # `g-recaptcha-response` token. Google populates this element with a
+        # long opaque token the moment the widget considers itself solved
+        # (checkbox ticked / challenge passed) — completely independent of
+        # our CSS overrides, and it lives in the SAME document that embeds
+        # the widget (Indeed's own SmartApply frame), not inside the
+        # cross-origin anchor/bframe iframes, so Playwright can read it
+        # directly. Checked first and treated as authoritative: if present,
+        # the CAPTCHA is solved, full stop, regardless of what any visibility
+        # check says.
+        for f in list(page.frames):
+            if _is_recaptcha_frame(f):
+                continue
+            try:
+                token_len = f.evaluate("""
+                    () => {
+                        const els = document.querySelectorAll(
+                            'textarea[name^="g-recaptcha-response"], [id^="g-recaptcha-response"]'
+                        );
+                        for (const el of els) {
+                            if (el.value && el.value.length > 10) return el.value.length;
+                        }
+                        return 0;
+                    }
+                """)
+                if token_len:
+                    return False  # solved — authoritative signal, stop here
+            except Exception:
+                pass
+
+        # Second authoritative signal, independent of the token: the anchor
+        # (checkbox) iframe's own checkbox element sets aria-checked="true"
+        # the moment Google considers the widget solved. Read from INSIDE
+        # that frame's own document — untouched by our bframe CSS override,
+        # since we never style the anchor frame's internals, only its
+        # z-index on the outer <iframe> tag.
+        for f in list(page.frames):
+            if "anchor" not in (f.url or ""):
+                continue
+            try:
+                checked = f.evaluate("""
+                    () => {
+                        const cb = document.querySelector('#recaptcha-anchor, .recaptcha-checkbox');
+                        return !!cb && cb.getAttribute('aria-checked') === 'true';
+                    }
+                """)
+                if checked:
+                    return False  # solved — checkbox confirms
+            except Exception:
+                pass
+
         for f in list(page.frames):
             if "bframe" not in (f.url or ""):
                 continue
@@ -1594,7 +1673,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                     () => {
                         const t = (document.body.innerText || '').toLowerCase();
                         return t.includes('select all images') || t.includes('click verify')
-                            || t.includes('select all squares') || t.includes('recaptcha');
+                            || t.includes('select all squares');
                     }
                 """)
                 if has_challenge_text:
