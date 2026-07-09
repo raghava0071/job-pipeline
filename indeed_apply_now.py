@@ -1914,6 +1914,7 @@ def _click_nav(frame, hint="continue", verbose=True):
     if verbose:
         print(f"          👆 Clicking '{hint}' in frame ({frame_url[:50] or 'main'})...")
 
+    _last_click_err = None
     for label in ["Continue", "Next", "Submit application", "Submit your application",
                   "Submit", "Apply", "Apply now", "Send application",
                   "Review your application", "Complete application"]:
@@ -1925,12 +1926,44 @@ def _click_nav(frame, hint="continue", verbose=True):
                 if verbose:
                     print(f"          ✔  Clicked: '{label}'")
                 return label
-        except:
-            pass
+        except Exception as _ce:
+            # Added 2026-07-08: this used to be a bare `except: pass`, so every
+            # time Playwright's real (trusted) click failed we had zero record of
+            # WHY — just fell straight to the JS fallback. The JS fallback's raw
+            # element.click() dispatches an UNTRUSTED event, which some of
+            # Indeed's buttons (this one is behind reCAPTCHA) silently ignore —
+            # the DOM looks clicked but the real submit handler never fires.
+            # Keeping the exception text so the next failure is diagnosable
+            # instead of a guess.
+            _last_click_err = str(_ce)[:200]
+
+    # Real-mouse-click fallback — BEFORE the JS fallback. Uses Playwright's
+    # actual input pipeline (a trusted browser-level click), unlike a raw JS
+    # element.click(), which some of Indeed's buttons (gated behind invisible
+    # reCAPTCHA) appear to silently ignore. Added 2026-07-08 after confirming
+    # via data/stuck_submits.json that 8 straight "successful" JS clicks on
+    # Submit never actually advanced the page — same review-m URL, same page
+    # text, every time.
+    try:
+        for label in ["Submit your application", "Submit application", "Submit",
+                      "Continue", "Next", "Apply now", "Send application"]:
+            btn = frame.locator(f"button:has-text('{label}')").first
+            if btn.count() > 0 and btn.is_visible(timeout=1000):
+                box = btn.bounding_box()
+                if box:
+                    btn.scroll_into_view_if_needed()
+                    cx = box["x"] + box["width"] / 2
+                    cy = box["y"] + box["height"] / 2
+                    frame.page.mouse.click(cx, cy)
+                    if verbose:
+                        print(f"          ✔  Real mouse-click: '{label}'")
+                    return label
+    except Exception as _me:
+        _last_click_err = str(_me)[:200]
 
     # JS fallback — scrolls into view, checks aria-disabled (Indeed's pattern)
     if verbose:
-        print(f"          ↩  Playwright failed — JS click fallback")
+        print(f"          ↩  Playwright failed ({_last_click_err or 'unknown'}) — JS click fallback")
     result = _safe_eval(frame, """
         () => {
             // NOTE: bare 'review' as a keyword used to match inside 'preview' (e.g.
@@ -2568,6 +2601,31 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                         lbl = _click_nav(nav_frame, nav_btns[0].get("text","submit"))
                         print(f"          ✔  Clicked nav: '{lbl}'")
                         return True
+                    # Real-mouse-click attempt first — added 2026-07-08. A raw JS
+                    # element.click() dispatches an untrusted event; confirmed via
+                    # data/stuck_submits.json that Indeed's Submit button (behind
+                    # reCAPTCHA) can silently ignore those — the DOM shows a click
+                    # happened but the real submit handler never fires, so all 8
+                    # retries land on the exact same review page. Playwright's
+                    # bounding-box + page.mouse.click() is a trusted browser-level
+                    # click, same fix as in _click_nav().
+                    for frame in pg.frames:
+                        try:
+                            for label in ["Submit your application", "Submit application",
+                                          "Submit", "Apply now", "Send application"]:
+                                btn = frame.locator(f"button:has-text('{label}')").first
+                                if btn.count() > 0 and btn.is_visible(timeout=1000):
+                                    box = btn.bounding_box()
+                                    if box:
+                                        btn.scroll_into_view_if_needed()
+                                        cx = box["x"] + box["width"] / 2
+                                        cy = box["y"] + box["height"] / 2
+                                        frame.page.mouse.click(cx, cy)
+                                        print(f"          ✔  Real mouse-click Submit: '{label}'")
+                                        return True
+                        except Exception:
+                            pass
+
                     for frame in pg.frames:
                         js_clicked = _safe_eval(frame, """
                             () => {
@@ -2599,7 +2657,38 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                     return False
 
                 MAX_SUBMIT_ATTEMPTS = 8
+                def _save_submit_diag(note):
+                    try:
+                        import json as _json_stuck_submit
+                        _ss_file = cfg.BASE_DIR / "data" / "stuck_submits.json"
+                        _ss_file.parent.mkdir(parents=True, exist_ok=True)
+                        _ss_existing = []
+                        if _ss_file.exists():
+                            try:
+                                _ss_existing = _json_stuck_submit.loads(_ss_file.read_text())
+                            except Exception:
+                                _ss_existing = []
+                        _ss_page_txt = ""
+                        try:
+                            _ss_page_txt = apply_page.evaluate("() => document.body.innerText")
+                        except Exception:
+                            pass
+                        _ss_existing.append({
+                            "timestamp": datetime.now().isoformat(),
+                            "company": company,
+                            "job_title": title,
+                            "url": apply_page.url,
+                            "page_text_snippet": _ss_page_txt[:4000],
+                            "note": note,
+                        })
+                        _ss_file.write_text(_json_stuck_submit.dumps(_ss_existing, indent=2))
+                        print(f"          📝 Submit give-up diagnostics saved → data/stuck_submits.json")
+                    except Exception as _sse:
+                        print(f"          ⚠  Could not save submit diagnostics: {_sse}")
+
                 _submit_nav_clicks = 0  # track how many non-submit nav clicks we've made
+                _prev_page_sig = None
+                _same_sig_count = 0
                 for attempt in range(1, MAX_SUBMIT_ATTEMPTS + 1):
                     print(f"          🚀 LIVE: Submit attempt {attempt}/{MAX_SUBMIT_ATTEMPTS}...")
 
@@ -2657,9 +2746,46 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                             submitted = True
                         break
 
-                    if attempt < MAX_SUBMIT_ATTEMPTS:
+                    # ── Early-exit on a truly unresponsive button ──────────────
+                    # Added 2026-07-08: confirmed via data/stuck_submits.json that a
+                    # real job (Computer Enterprises Inc) got the EXACT same page
+                    # (same URL, same body text) across all 8 attempts — the click
+                    # was landing on the DOM but not triggering Indeed's real submit
+                    # handler (likely the untrusted-event / reCAPTCHA gate the mouse-
+                    # click fix above targets). Grinding 8 rapid clicks at a button
+                    # that isn't working wastes ~90s per job AND is very plausibly
+                    # what got the whole session flagged: every Indeed search
+                    # immediately after that exact job failed with net::ERR_ABORTED
+                    # for the rest of the run. If the page is byte-identical for 2
+                    # consecutive attempts (3 total), stop now instead of burning
+                    # through all 8 — same diagnostics get saved either way.
+                    try:
+                        _cur_page_sig = (apply_page.url or "") + "|" + (
+                            apply_page.evaluate("() => document.body.innerText") or ""
+                        )[:2000]
+                    except Exception:
+                        _cur_page_sig = None
+                    if _cur_page_sig is not None and _cur_page_sig == _prev_page_sig:
+                        _same_sig_count += 1
+                    else:
+                        _same_sig_count = 0
+                    _prev_page_sig = _cur_page_sig
+
+                    if _same_sig_count >= 2:
+                        print(f"          ❌ Page unchanged across {_same_sig_count + 1} attempts — "
+                              f"button click isn't landing, stopping early (was attempt {attempt}/{MAX_SUBMIT_ATTEMPTS})")
+                        submitted = False
+                        _save_submit_diag(
+                            "page byte-identical across multiple submit attempts — the click "
+                            "is landing on the DOM but not triggering Indeed's real submit "
+                            "handler (likely rejected as an untrusted event / reCAPTCHA gate). "
+                            "Stopped early instead of grinding through all attempts."
+                        )
+                        break
+                    elif attempt < MAX_SUBMIT_ATTEMPTS:
                         print(f"          🔄 No confirmation yet — waiting 8s then retrying Submit...")
                         time.sleep(8)  # longer wait between attempts reduces CAPTCHA triggers
+                        continue
                     else:
                         print(f"          ❌ Gave up after {MAX_SUBMIT_ATTEMPTS} submit attempts")
                         submitted = False
@@ -2669,35 +2795,11 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                         # zero data to tell "actually failed" apart from "actually succeeded,
                         # confirmation page just used unrecognized wording". Save page state
                         # so this is debuggable from data/ instead of a black box.
-                        try:
-                            import json as _json_stuck_submit
-                            _ss_file = cfg.BASE_DIR / "data" / "stuck_submits.json"
-                            _ss_file.parent.mkdir(parents=True, exist_ok=True)
-                            _ss_existing = []
-                            if _ss_file.exists():
-                                try:
-                                    _ss_existing = _json_stuck_submit.loads(_ss_file.read_text())
-                                except Exception:
-                                    _ss_existing = []
-                            _ss_page_txt = ""
-                            try:
-                                _ss_page_txt = apply_page.evaluate("() => document.body.innerText")
-                            except Exception:
-                                pass
-                            _ss_existing.append({
-                                "timestamp": datetime.now().isoformat(),
-                                "company": company,
-                                "job_title": title,
-                                "url": apply_page.url,
-                                "page_text_snippet": _ss_page_txt[:4000],
-                                "note": "submit attempts exhausted — button may have vanished "
-                                        "(possible real success with unrecognized confirmation "
-                                        "wording) or a real dead-end. Check page_text_snippet.",
-                            })
-                            _ss_file.write_text(_json_stuck_submit.dumps(_ss_existing, indent=2))
-                            print(f"          📝 Submit give-up diagnostics saved → data/stuck_submits.json")
-                        except Exception as _sse:
-                            print(f"          ⚠  Could not save submit diagnostics: {_sse}")
+                        _save_submit_diag(
+                            "submit attempts exhausted — button may have vanished "
+                            "(possible real success with unrecognized confirmation "
+                            "wording) or a real dead-end. Check page_text_snippet."
+                        )
 
                 break
 
