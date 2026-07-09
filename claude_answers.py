@@ -969,6 +969,9 @@ CLAUDE_QA: dict[str, str] = {
     "* apply only if you are comfortable working on a w2 .": "Yes",
     "select resume raghavendra_karanam_talentola_data_engineer.docx": "jobsDocumentCardToggle-ember621",
     "select resume raghavendra_karanam_erewhon_junior_data_engineer.docx": "jobsDocumentCardToggle-ember1029",
+    "acknowledge/accept": "Acknowledge/Accept",
+    "q_bf75dd7f386b18a32e0c0dda82ba6ca7": "Acknowledge/Accept",
+    "q_07fd72f2f79a0e972010fff32195da46": "If selected, I understand that completing a CLEAR verification check is required prior to receiving an offer of employment.",
 }
 
 

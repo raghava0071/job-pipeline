@@ -1524,20 +1524,48 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         once a CAPTCHA has ever appeared on this page. That staleness was causing
         every subsequent Submit-retry to re-trigger the full alert+email flow even
         when nothing was actually showing.
+
+        CONFIRMED BROKEN 2026-07-08: this used to run a `document.querySelectorAll
+        ('iframe')` scan via page.evaluate(), which executes in page.main_frame
+        only. Indeed's SmartApply form (and its embedded reCAPTCHA widget) lives
+        inside its own nested iframe (the "review-m"/"question" frame seen
+        throughout this file's logging), so the bframe challenge iframe is a CHILD
+        of THAT iframe, not of the top-level page — a top-level querySelectorAll
+        can never see it. Result: this returned False 100% of the time across
+        every run tonight (grepped "CAPTCHA DETECTED" across three full debug
+        logs — zero matches) despite a real, on-screen CAPTCHA challenge
+        (confirmed via a live screenshot Raghav sent). That's why the alert email
+        never fired, and very likely why Submit kept failing — a click, real or
+        synthetic, can't reach a button that's covered by an unsolved CAPTCHA
+        overlay the pipeline never knew was there. This may also be why Indeed's
+        server started rejecting the session shortly after: repeatedly hammering
+        Submit against an unacknowledged CAPTCHA challenge looks exactly like bot
+        behaviour to Indeed's own risk system.
+
+        Fixed by asking each candidate frame for its own owning <iframe> element
+        via Playwright's frame_element() — this works regardless of how deeply
+        the frame is nested, since it doesn't rely on searching a specific
+        document's DOM at all.
         """
         try:
-            return bool(page.evaluate("""
-                () => {
-                    const bframe = Array.from(document.querySelectorAll('iframe'))
-                        .find(f => f.src && f.src.includes('bframe'));
-                    if (!bframe) return false;
-                    const style = window.getComputedStyle(bframe);
-                    if (style.display === 'none' || style.visibility === 'hidden') return false;
-                    if (!bframe.offsetParent && style.position !== 'fixed') return false;
-                    const rect = bframe.getBoundingClientRect();
-                    return rect.width > 0 && rect.height > 0;
-                }
-            """))
+            for f in list(page.frames):
+                if "bframe" not in (f.url or ""):
+                    continue
+                try:
+                    el = f.frame_element()
+                except Exception:
+                    continue
+                if not el:
+                    continue
+                try:
+                    if not el.is_visible():
+                        continue
+                    box = el.bounding_box()
+                    if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
+                        return True
+                except Exception:
+                    continue
+            return False
         except Exception:
             return any("bframe" in (f.url or "") for f in list(page.frames))
 
