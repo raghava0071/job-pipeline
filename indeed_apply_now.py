@@ -1687,28 +1687,38 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                                 el.style.clipPath  = 'none';
                             }
 
-                            // Step 2: Pin the iframe — large, centered, always on top
+                            // Step 2: Pin the iframe — large, centered in the
+                            // MIDDLE of the screen (both axes), always on top.
                             //
-                            // Fixed 2026-07-08: was 330x650 — reCAPTCHA's image
-                            // challenge renders at a roughly fixed intrinsic size
-                            // around 400px wide. Forcing the outer iframe box
-                            // narrower than that very likely squeezed/clipped its
-                            // internal layout, pushing the Verify button below the
-                            // visible area — consistent with three separate
-                            // screenshots tonight all showing the image grid cut
-                            // off at the bottom with no visible Submit/Verify
-                            // button. Widened and made taller with real margin,
-                            // capped to the actual viewport so it can't exceed the
-                            // screen on a smaller display, with overflow-y:auto as
-                            // a fallback in case content still doesn't fully fit.
+                            // Fixed 2026-07-09, per Raghav's own diagnosis: the
+                            // real problem isn't detection or clicking — it's
+                            // that the challenge's own internal Verify button
+                            // renders below the visible area of the pinned box.
+                            // `overflow-y:auto` on the OUTER iframe element (the
+                            // previous attempt) does NOT help here — it only
+                            // affects how the iframe itself behaves if it
+                            // overflows the page, it has no effect on scrolling
+                            // to content INSIDE the iframe's own document (a
+                            // separate, cross-origin scroll context we can't
+                            // reach from here). The only real fix is making the
+                            // outer box tall enough from the start that nothing
+                            // is ever cut off. Sized relative to the actual
+                            // viewport (85vh, capped 820px, floored 600px)
+                            // instead of one more guessed fixed pixel value, and
+                            // centered vertically as well as horizontally — per
+                            // Raghav's explicit ask ("shape it onto the middle
+                            // of the page") — so there's maximum room on all
+                            // sides regardless of the challenge's exact natural
+                            // size (3x3 vs 4x4 grid, with/without a reload row).
                             bframe.style.cssText = [
                                 'position: fixed !important',
-                                'top: 10px !important',
+                                'top: 50% !important',
                                 'left: 50% !important',
-                                'transform: translateX(-50%) !important',
-                                'width: 420px !important',
-                                'height: 780px !important',
-                                'max-height: 95vh !important',
+                                'transform: translate(-50%, -50%) !important',
+                                'width: 460px !important',
+                                'height: 85vh !important',
+                                'max-height: 820px !important',
+                                'min-height: 600px !important',
                                 'z-index: 2147483647 !important',
                                 'border: 4px solid #ff0000 !important',
                                 'border-radius: 10px !important',
