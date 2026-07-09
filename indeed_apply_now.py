@@ -1782,25 +1782,64 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                 if not still_captcha:
                     print(f"          ✅ CAPTCHA solved! Auto-clicking Submit...")
                     time.sleep(2)
+                    # Fixed 2026-07-09: this used a raw JS b.click() — an
+                    # UNTRUSTED synthetic event, the exact same kind already
+                    # proven unreliable against Indeed's reCAPTCHA-gated Submit
+                    # button in 1.2.7 (_click_nav/_click_submit_btn were fixed
+                    # there to use a real page.mouse.click() instead). This
+                    # specific auto-click-after-solve path was never updated —
+                    # it's a third, separate click implementation that got
+                    # missed. Very likely why Raghav couldn't get Submit to
+                    # register even after solving the CAPTCHA himself: this
+                    # silent background click may have been firing and failing
+                    # the whole time. Now tries a real trusted mouse-click at
+                    # the button's actual coordinates first, falling back to
+                    # the JS click only if no matching button can be located
+                    # via Playwright's own locator.
+                    _clicked_after_solve = False
                     try:
                         for frame in page.frames:
-                            clicked = _safe_eval(frame, """
-                                () => {
-                                    const kws = ['submit your application','submit application','submit','apply now'];
-                                    const btns = Array.from(document.querySelectorAll('button,[role=button],input[type=submit]'));
-                                    for (const b of btns) {
-                                        if (!b.offsetParent) continue;
-                                        const t = (b.innerText||b.textContent||b.value||'').toLowerCase().trim();
-                                        if (kws.some(k=>t.includes(k))) { b.click(); return t; }
-                                    }
-                                    return null;
-                                }
-                            """, None)
-                            if clicked:
-                                print(f"          ✔  Auto-clicked Submit after CAPTCHA: '{clicked}'")
+                            for _label in ["Submit your application", "Submit application",
+                                           "Submit", "Apply now"]:
+                                try:
+                                    _btn = frame.locator(f"button:has-text('{_label}')").first
+                                    if _btn.count() > 0 and _btn.is_visible(timeout=800):
+                                        _box = _btn.bounding_box()
+                                        if _box:
+                                            _btn.scroll_into_view_if_needed()
+                                            _cx = _box["x"] + _box["width"] / 2
+                                            _cy = _box["y"] + _box["height"] / 2
+                                            frame.page.mouse.click(_cx, _cy)
+                                            print(f"          ✔  Real mouse-click Submit after CAPTCHA: '{_label}'")
+                                            _clicked_after_solve = True
+                                            break
+                                except Exception:
+                                    continue
+                            if _clicked_after_solve:
                                 break
                     except Exception:
                         pass
+
+                    if not _clicked_after_solve:
+                        try:
+                            for frame in page.frames:
+                                clicked = _safe_eval(frame, """
+                                    () => {
+                                        const kws = ['submit your application','submit application','submit','apply now'];
+                                        const btns = Array.from(document.querySelectorAll('button,[role=button],input[type=submit]'));
+                                        for (const b of btns) {
+                                            if (!b.offsetParent) continue;
+                                            const t = (b.innerText||b.textContent||b.value||'').toLowerCase().trim();
+                                            if (kws.some(k=>t.includes(k))) { b.click(); return t; }
+                                        }
+                                        return null;
+                                    }
+                                """, None)
+                                if clicked:
+                                    print(f"          ✔  JS-clicked Submit after CAPTCHA (fallback): '{clicked}'")
+                                    break
+                        except Exception:
+                            pass
                     time.sleep(6)
                     _consecutive_captcha_failures = 0  # success — reset streak
                     return True

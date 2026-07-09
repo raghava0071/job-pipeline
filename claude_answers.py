@@ -992,6 +992,8 @@ CLAUDE_QA: dict[str, str] = {
     "select resume raghavendra_karanam_resolve_tech_solutions_fabricpower_bi_developer.docx": "jobsDocumentCardToggle-ember562",
     "select resume raghavendra_karanam_ventures_unlimited_inc_jr_ai_engineer__0-2_years.docx": "on",
     "select resume raghavendra_karanam_tek_tree_llc_database_developer.docx": "jobsDocumentCardToggle-ember706",
+    "select resume raghavendra_karanam_warp_ai_engineer.docx": "jobsDocumentCardToggle-ember570",
+    "are you able to work in office 4 days a week?": "Yes",
 }
 
 
