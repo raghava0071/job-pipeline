@@ -966,6 +966,9 @@ CLAUDE_QA: dict[str, str] = {
     "please confirm you currently reside within a commutable distance to brea, ca.": "No",
     "select resume raghavendra_karanam_avery_products_corporation_data_analyst.docx": "jobsDocumentCardToggle-ember755",
     "select resume raghavendra_karanam_inceed_data_analyst.docx": "jobsDocumentCardToggle-ember827",
+    "* apply only if you are comfortable working on a w2 .": "Yes",
+    "select resume raghavendra_karanam_talentola_data_engineer.docx": "jobsDocumentCardToggle-ember621",
+    "select resume raghavendra_karanam_erewhon_junior_data_engineer.docx": "jobsDocumentCardToggle-ember1029",
 }
 
 

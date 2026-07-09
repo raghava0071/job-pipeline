@@ -6,6 +6,15 @@
 
 cd /Users/raghava/job_pipeline
 
+# Force Python to flush output line-by-line instead of block-buffering it.
+# Without this, stdout piped through `tee` (below) buffers in ~4-8KB chunks —
+# so if the pipeline gets cancelled mid-run (e.g. during a CAPTCHA), whatever
+# hadn't been flushed yet (often the most recent, most useful minute of
+# activity) never makes it into the saved log file. Bit Raghav directly on
+# 2026-07-08: he solved a CAPTCHA and hit a stuck Submit button, cancelled the
+# run, and none of it was in data/debug_logs/ — this is why.
+export PYTHONUNBUFFERED=1
+
 # Auto-save full run output so failures can be diagnosed without manual
 # copy-paste (added 2026-07-08 at Raghav's request). Keeps the last 10 runs.
 mkdir -p data/debug_logs
@@ -43,12 +52,12 @@ echo ""
 
 # Run Indeed applications
 echo "🔍 Starting Indeed applications (50 jobs)..."
-python indeed_apply_now.py --limit 50
+python -u indeed_apply_now.py --limit 50
 echo ""
 
 # Run LinkedIn applications
 echo "💼 Starting LinkedIn applications (50 jobs)..."
-python linkedin_apply_now.py --limit 50
+python -u linkedin_apply_now.py --limit 50
 echo ""
 
 echo "✅ Pipeline complete!"
