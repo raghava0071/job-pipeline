@@ -18,7 +18,7 @@
 #   python linkedin_apply_now.py --dry-run   # score + build resumes, no submit
 # =============================================================================
 
-import sys, time, json as json, argparse
+import sys, time, json as json, argparse, re
 from pathlib import Path
 from datetime import datetime, timedelta
 

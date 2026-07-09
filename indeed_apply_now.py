@@ -2897,16 +2897,37 @@ def apply_to_job(page, browser, job, resume_path, cover_letter_path, profile_tex
                         # no notification, and no resize, because the code had
                         # already moved on to the next job by the time it appeared.
                         # One more explicit check with extra wait before giving up.
-                        print(f"          🔎 Page unchanged — waiting 5s and re-checking for a "
-                              f"delayed CAPTCHA before giving up...")
-                        time.sleep(5)
-                        _late_captcha_ok = _check_and_handle_captcha(apply_page, title, company, job_url=job_url)
-                        if not _late_captcha_ok:
-                            print(f"          ❌ CAPTCHA timed out — queuing for retry")
-                            return False, "captcha-timeout"
-                        if _is_confirmed(apply_page):
-                            print(f"          🎉 Application submitted and confirmed (after CAPTCHA solve)!")
-                            submitted = True
+                        # 2026-07-09: a single 5s-then-check (previous version)
+                        # still wasn't enough — confirmed live that a real
+                        # CAPTCHA rendered even later than that, after this job
+                        # had already been abandoned and the code had moved on to
+                        # scoring/searching other jobs. The tab sat open with an
+                        # unsolved challenge nobody was watching: no email, no
+                        # pin, because _check_and_handle_captcha() was never
+                        # called again for that specific page. Widened this to a
+                        # real repeated-check window (every 3s for up to 24s)
+                        # instead of one shot, since evidence shows the challenge
+                        # can take longer than 5s to actually appear after the
+                        # clicks that triggered it.
+                        print(f"          🔎 Page unchanged — watching for a delayed CAPTCHA "
+                              f"(up to 24s) before giving up...")
+                        _late_captcha_ok = True
+                        for _watch_i in range(8):
+                            time.sleep(3)
+                            _late_captcha_ok = _check_and_handle_captcha(apply_page, title, company, job_url=job_url)
+                            if not _late_captcha_ok:
+                                print(f"          ❌ CAPTCHA timed out — queuing for retry")
+                                return False, "captcha-timeout"
+                            if _is_confirmed(apply_page):
+                                print(f"          🎉 Application submitted and confirmed (after CAPTCHA solve)!")
+                                submitted = True
+                                break
+                            # If a CAPTCHA WAS visible and got solved inside
+                            # _check_and_handle_captcha, its own wait loop already
+                            # consumed real time and either returned True (solved)
+                            # or already returned False above (timeout). Only
+                            # keep polling here if nothing has shown up yet.
+                        if submitted:
                             break
 
                         print(f"          ❌ Page unchanged across {_same_sig_count + 1} attempts — "

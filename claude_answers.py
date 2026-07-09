@@ -973,6 +973,22 @@ CLAUDE_QA: dict[str, str] = {
     "q_bf75dd7f386b18a32e0c0dda82ba6ca7": "Acknowledge/Accept",
     "q_07fd72f2f79a0e972010fff32195da46": "If selected, I understand that completing a CLEAR verification check is required prior to receiving an offer of employment.",
     "select resume raghavendra_karanam_kiewit_data_analyst_-_kiewit_dat.docx": "jobsDocumentCardToggle-ember632",
+    "do you have data analytics experience in a manufacturing environment?": "No",
+    "do you have at least 3 years of manufacturing operations analysis experience?": "No",
+    "select resume raghavendra_karanam_jmj_phillip_group_operations_business_intel.docx": "jobsDocumentCardToggle-ember549",
+    "select resume raghavendra_karanam_crossing_hurdles_ai_engineer__90hr_remote.docx": "jobsDocumentCardToggle-ember833",
+    "select resume raghavendra_karanam_lhh_manufacturing_data_analys.docx": "jobsDocumentCardToggle-ember741",
+    "discipline": "Computer Science",
+    "please include your gpa if you are a recent graduate or have limited work experience.": "3.5",
+    "select resume raghavendra_karanam_akraya_inc_analytics_engineer__marke.docx": "jobsDocumentCardToggle-ember1133",
+    "select resume raghavendra_karanam_covetus_generative_ai_engineer.docx": "jobsDocumentCardToggle-ember603",
+    "select resume raghavendra_karanam_sharp_decisions_azure_data_engineer_1177.docx": "jobsDocumentCardToggle-ember391",
+    "select resume raghavendra_karanam_inclusively_associate_ai_engineer__ai.docx": "jobsDocumentCardToggle-ember699",
+    "select resume raghavendra_karanam_maximatek_data_analyst.docx": "on",
+    "what is your desired annual base salary? *": "72000",
+    "select resume raghavendra_karanam_mitchell_martin_inc_ai_agent_developer__gener.docx": "jobsDocumentCardToggle-ember399",
+    "how many years of work experience do you have with arcgis products?": "2",
+    "select resume raghavendra_karanam_csznet_inc_oracle_database_developer.docx": "on",
 }
 
 
