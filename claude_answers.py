@@ -972,6 +972,7 @@ CLAUDE_QA: dict[str, str] = {
     "acknowledge/accept": "Acknowledge/Accept",
     "q_bf75dd7f386b18a32e0c0dda82ba6ca7": "Acknowledge/Accept",
     "q_07fd72f2f79a0e972010fff32195da46": "If selected, I understand that completing a CLEAR verification check is required prior to receiving an offer of employment.",
+    "select resume raghavendra_karanam_kiewit_data_analyst_-_kiewit_dat.docx": "jobsDocumentCardToggle-ember632",
 }
 
 

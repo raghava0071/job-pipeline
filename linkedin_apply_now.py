@@ -1307,8 +1307,21 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
     _form_start  = time.time()
 
     for step in range(cfg.FORM_MAX_STEPS):
-        if time.time() - _form_start > 120:
+        _elapsed = time.time() - _form_start
+        if _elapsed > 120:
+            # Added 2026-07-08: a real job (Textron — Data Engineer II) hit this
+            # timeout with zero warning in the log — steps 0-3 all printed and
+            # completed in what looked like quick succession, then the very next
+            # loop iteration immediately hit this check with no "step 4" line at
+            # all. Without per-step timestamps there's no way to tell whether one
+            # specific step silently ate ~100+ seconds (e.g. a slow Playwright
+            # .click() actionability retry) or something else entirely — logging
+            # the actual elapsed time here so the next occurrence is diagnosable
+            # instead of a guess.
+            print(f"        ⏱  Form timeout — {_elapsed:.1f}s elapsed, stuck before reaching step {step}")
             return False, "form timeout (120s)"
+        if step > 0:
+            print(f"        ⏱  step {step} starting at {_elapsed:.1f}s elapsed")
         if confirmed():
             return True, "confirmed via page text"
         if step > 0 and not modal_open():
@@ -1438,11 +1451,31 @@ VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
             time.sleep(0.5)
 
         # ── Navigate form ──────────────────────────────────────────────────
+        # Fixed 2026-07-08: this used `.first` on the button:has-text() locator,
+        # which locks onto the FIRST matching element in DOM order and gives up
+        # on that whole btn_text if that one instance isn't visible/enabled —
+        # it never tried any OTHER element with the same text. Confirmed via a
+        # real failure (Innova Solutions — AI Engineer): the log's own debug
+        # print showed 'Next' WAS visible on the page at that exact moment
+        # (separate query, used only for logging), yet this loop still reported
+        # no clickable button and gave up immediately — consistent with a
+        # hidden/stale duplicate 'Next' element being first in DOM order and
+        # blocking the real, visible one from ever being tried. Now checks every
+        # matching element for each btn_text and clicks the first one that's
+        # actually visible and enabled, instead of only ever looking at index 0.
         btn_clicked = None
         for btn_text in ["Submit application", "Submit my application", "Review", "Next", "Continue", "Done"]:
             try:
-                btn = page.locator(f"button:has-text('{btn_text}')").first
-                if btn.count() > 0 and btn.is_visible() and not btn.is_disabled():
+                candidates = page.locator(f"button:has-text('{btn_text}')").all()
+                btn = None
+                for _cand in candidates:
+                    try:
+                        if _cand.is_visible() and not _cand.is_disabled():
+                            btn = _cand
+                            break
+                    except Exception:
+                        continue
+                if btn is not None:
 
                     # ── PRE-SUBMIT REVIEW — only run if Claude answered unknown fields ──
                     # Skip if all fields were answered from qa_answers/cache (fast path)
