@@ -1740,7 +1740,60 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         # frame_element() — the callback receives that exact iframe element as its
         # argument, so the parent-chain walk and styling happen in the correct
         # document regardless of nesting depth, instead of guessing from the top.
+        # CONFIRMED BROKEN 2026-07-09: Raghav sent a screenshot showing the
+        # pinned box sitting bottom-right, partly cut off past the actual
+        # window edge — not centered at all despite the code below setting
+        # `top:50%; left:50%`. Diffed against the last-known-working code
+        # (2026-06-22, before this got broken) to find out why: back then the
+        # bframe iframe was a DIRECT CHILD of the top-level page, so
+        # `position:fixed; top/left:50%` correctly centered against the real
+        # browser window. Indeed has since restructured SmartApply to embed
+        # the whole apply form (and the CAPTCHA inside it) in its OWN nested
+        # iframe. `position:fixed` percentages are always relative to the
+        # CONTAINING BLOCK's own viewport — which, for an element living
+        # inside a nested iframe's document, is that iframe's own rendered
+        # box, not the true outer browser window. So "50%, 50%" was centering
+        # the box within the SmartApply iframe's own (smaller, offset)
+        # rendered area the whole time, which only coincidentally looks right
+        # when that iframe happens to fill the visible window — otherwise the
+        # box lands wherever the iframe's own box happens to be positioned on
+        # the page, exactly matching the screenshot.
+        #
+        # Fixed by computing REAL pixel coordinates instead of a percentage:
+        # read the true top-level window size and the SmartApply iframe's own
+        # on-screen offset (both from the top-level page, which already
+        # accounts for any outer-page scroll), then translate "center of the
+        # real window" into the SmartApply iframe's LOCAL coordinate space by
+        # subtracting that offset. Applied as absolute `left/top: Npx`
+        # (no `%`, no `transform`), which stays correct regardless of where
+        # Indeed positions the SmartApply iframe on the page or how tall its
+        # own internal layout is.
         try:
+            try:
+                _top_vw, _top_vh = page.main_frame.evaluate(
+                    "() => [window.innerWidth, window.innerHeight]"
+                )
+            except Exception:
+                _top_vw, _top_vh = 1440, 900
+
+            _sa_offset_x, _sa_offset_y = 0.0, 0.0
+            try:
+                for _sa_f in list(page.frames):
+                    if "smartapply.indeed.com" in (_sa_f.url or ""):
+                        _sa_el = _sa_f.frame_element()
+                        _sa_box = _sa_el.bounding_box() if _sa_el else None
+                        if _sa_box:
+                            _sa_offset_x = _sa_box["x"]
+                            _sa_offset_y = _sa_box["y"]
+                        break
+            except Exception:
+                pass
+
+            _box_w = 460
+            _box_h = max(600, min(820, int(0.85 * _top_vh)))
+            _local_left = (_top_vw / 2) - _sa_offset_x - (_box_w / 2)
+            _local_top  = (_top_vh / 2) - _sa_offset_y - (_box_h / 2)
+
             _resize_done = False
             for _f in list(page.frames):
                 if "bframe" not in (_f.url or ""):
@@ -1753,7 +1806,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                     continue
                 try:
                     _bframe_el.evaluate("""
-                        (bframe) => {
+                        (bframe, pos) => {
                             // Step 1: Walk up and remove overflow:hidden / clipping on parent chain
                             let el = bframe;
                             for (let i = 0; i < 10; i++) {
@@ -1766,38 +1819,17 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                                 el.style.clipPath  = 'none';
                             }
 
-                            // Step 2: Pin the iframe — large, centered in the
-                            // MIDDLE of the screen (both axes), always on top.
-                            //
-                            // Fixed 2026-07-09, per Raghav's own diagnosis: the
-                            // real problem isn't detection or clicking — it's
-                            // that the challenge's own internal Verify button
-                            // renders below the visible area of the pinned box.
-                            // `overflow-y:auto` on the OUTER iframe element (the
-                            // previous attempt) does NOT help here — it only
-                            // affects how the iframe itself behaves if it
-                            // overflows the page, it has no effect on scrolling
-                            // to content INSIDE the iframe's own document (a
-                            // separate, cross-origin scroll context we can't
-                            // reach from here). The only real fix is making the
-                            // outer box tall enough from the start that nothing
-                            // is ever cut off. Sized relative to the actual
-                            // viewport (85vh, capped 820px, floored 600px)
-                            // instead of one more guessed fixed pixel value, and
-                            // centered vertically as well as horizontally — per
-                            // Raghav's explicit ask ("shape it onto the middle
-                            // of the page") — so there's maximum room on all
-                            // sides regardless of the challenge's exact natural
-                            // size (3x3 vs 4x4 grid, with/without a reload row).
+                            // Step 2: Pin the iframe at an ABSOLUTE PIXEL position
+                            // pre-computed in Python from the TRUE top-level window
+                            // size and this iframe's own on-screen offset — see the
+                            // long comment above for why plain 50%/50% doesn't work
+                            // once the CAPTCHA lives inside a nested iframe.
                             bframe.style.cssText = [
                                 'position: fixed !important',
-                                'top: 50% !important',
-                                'left: 50% !important',
-                                'transform: translate(-50%, -50%) !important',
-                                'width: 460px !important',
-                                'height: 85vh !important',
-                                'max-height: 820px !important',
-                                'min-height: 600px !important',
+                                'top: ' + pos.top + 'px !important',
+                                'left: ' + pos.left + 'px !important',
+                                'width: ' + pos.width + 'px !important',
+                                'height: ' + pos.height + 'px !important',
                                 'z-index: 2147483647 !important',
                                 'border: 4px solid #ff0000 !important',
                                 'border-radius: 10px !important',
@@ -1817,7 +1849,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                                 });
                             }
                         }
-                    """)
+                    """, {"left": _local_left, "top": _local_top, "width": _box_w, "height": _box_h})
                     _resize_done = True
                 except Exception:
                     continue
