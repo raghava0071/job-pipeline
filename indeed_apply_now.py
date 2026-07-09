@@ -1547,27 +1547,62 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         the frame is nested, since it doesn't rely on searching a specific
         document's DOM at all.
         """
-        try:
-            for f in list(page.frames):
-                if "bframe" not in (f.url or ""):
-                    continue
-                try:
-                    el = f.frame_element()
-                except Exception:
-                    continue
-                if not el:
-                    continue
-                try:
-                    if not el.is_visible():
-                        continue
+        # 2026-07-08, second pass: the frame_element()-only version above (v1.2.9)
+        # STILL missed a confirmed, live, on-screen CAPTCHA — Raghav sent a second
+        # screenshot showing an active challenge on this exact review-module page
+        # with zero "CAPTCHA DETECTED" in the log. One detection method clearly
+        # isn't reliable enough here (possibly a frame_element()/is_visible()
+        # timing or cross-origin quirk this environment can't be used to debug
+        # live). Checking three independent signals now, ORed together, so a
+        # single method's blind spot can't hide a real CAPTCHA again:
+        #   (a) frame_element() + Playwright's own is_visible() + bounding box
+        #   (b) frame.locator('body').is_visible() — Playwright's actionability
+        #       engine, a different code path than (a)
+        #   (c) asking the bframe's OWN document whether actual challenge UI text
+        #       ("select all images", "verify", tile grid) is present, evaluated
+        #       FROM INSIDE that frame — sidesteps cross-frame/parent traversal
+        #       entirely. Deliberately checks for challenge-specific TEXT, not
+        #       just "does this frame have any rendered size" — a hidden-after-
+        #       solve iframe can still have a fully laid-out internal document
+        #       even while invisible from the outside (hiding is usually done via
+        #       the PARENT's CSS on the <iframe> tag, not by collapsing the
+        #       child document itself), so a bare size check here would
+        #       reintroduce the exact "stays true forever after solving" bug
+        #       this function exists to avoid. Requiring real challenge text
+        #       keeps this signal specific to an actual, active challenge.
+        for f in list(page.frames):
+            if "bframe" not in (f.url or ""):
+                continue
+
+            try:
+                el = f.frame_element()
+                if el and el.is_visible():
                     box = el.bounding_box()
                     if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
                         return True
-                except Exception:
-                    continue
-            return False
-        except Exception:
-            return any("bframe" in (f.url or "") for f in list(page.frames))
+            except Exception:
+                pass
+
+            try:
+                if f.locator("body").first.is_visible(timeout=1000):
+                    return True
+            except Exception:
+                pass
+
+            try:
+                has_challenge_text = f.evaluate("""
+                    () => {
+                        const t = (document.body.innerText || '').toLowerCase();
+                        return t.includes('select all images') || t.includes('click verify')
+                            || t.includes('select all squares') || t.includes('recaptcha');
+                    }
+                """)
+                if has_challenge_text:
+                    return True
+            except Exception:
+                pass
+
+        return False
 
     try:
         captcha_visible = _captcha_actually_visible()
@@ -1610,51 +1645,85 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
             print(f"          ⚠  Mac notification failed: {e}")
 
         # Fix CAPTCHA window so Verify button is fully visible and clickable
+        #
+        # CONFIRMED BROKEN 2026-07-08, same bug class as _captcha_actually_visible():
+        # this ran `document.querySelectorAll('iframe')` via page.evaluate() (top-
+        # level document only), but the bframe is nested inside the SmartApply
+        # iframe, so `bframe` was always undefined and `if (!bframe) return;` bailed
+        # out immediately, every time — meanwhile the print() below fired
+        # unconditionally regardless of whether the JS did anything, so it always
+        # claimed "pinned" even when nothing happened. Raghav's screenshots show
+        # the real CAPTCHA rendered small/awkwardly positioned on the page,
+        # unmodified — consistent with this doing nothing the whole time.
+        #
+        # Fixed the same way as detection: find the bframe's frame object directly
+        # via page.frames, then call ElementHandle.evaluate() on its OWN
+        # frame_element() — the callback receives that exact iframe element as its
+        # argument, so the parent-chain walk and styling happen in the correct
+        # document regardless of nesting depth, instead of guessing from the top.
         try:
-            page.evaluate("""
-                () => {
-                    // Step 1: Find the bframe iframe
-                    const bframe = Array.from(document.querySelectorAll('iframe'))
-                        .find(f => f.src && f.src.includes('bframe'));
-                    if (!bframe) return;
+            _resize_done = False
+            for _f in list(page.frames):
+                if "bframe" not in (_f.url or ""):
+                    continue
+                try:
+                    _bframe_el = _f.frame_element()
+                except Exception:
+                    continue
+                if not _bframe_el:
+                    continue
+                try:
+                    _bframe_el.evaluate("""
+                        (bframe) => {
+                            // Step 1: Walk up and remove overflow:hidden / clipping on parent chain
+                            let el = bframe;
+                            for (let i = 0; i < 10; i++) {
+                                el = el.parentElement;
+                                if (!el || el === document.body) break;
+                                el.style.overflow  = 'visible';
+                                el.style.height    = 'auto';
+                                el.style.maxHeight = 'none';
+                                el.style.clip      = 'none';
+                                el.style.clipPath  = 'none';
+                            }
 
-                    // Step 2: Walk up and remove overflow:hidden / clipping on parent chain
-                    let el = bframe;
-                    for (let i = 0; i < 10; i++) {
-                        el = el.parentElement;
-                        if (!el || el === document.body) break;
-                        el.style.overflow  = 'visible';
-                        el.style.height    = 'auto';
-                        el.style.maxHeight = 'none';
-                        el.style.clip      = 'none';
-                        el.style.clipPath  = 'none';
-                    }
+                            // Step 2: Pin the iframe — large, centered, always on top
+                            bframe.style.cssText = [
+                                'position: fixed !important',
+                                'top: 10px !important',
+                                'left: 50% !important',
+                                'transform: translateX(-50%) !important',
+                                'width: 330px !important',
+                                'height: 650px !important',
+                                'z-index: 2147483647 !important',
+                                'border: 4px solid #ff0000 !important',
+                                'border-radius: 10px !important',
+                                'background: white !important',
+                                'box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important',
+                                'overflow: visible !important',
+                            ].join(';');
 
-                    // Step 3: Pin the iframe — large, centered, always on top
-                    bframe.style.cssText = [
-                        'position: fixed !important',
-                        'top: 10px !important',
-                        'left: 50% !important',
-                        'transform: translateX(-50%) !important',
-                        'width: 330px !important',
-                        'height: 650px !important',
-                        'z-index: 2147483647 !important',
-                        'border: 4px solid #ff0000 !important',
-                        'border-radius: 10px !important',
-                        'background: white !important',
-                        'box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important',
-                        'overflow: visible !important',
-                    ].join(';');
-
-                    // Step 4: Also surface the anchor checkbox iframe
-                    document.querySelectorAll('iframe').forEach(f => {
-                        if (f.src && f.src.includes('anchor')) {
-                            f.style.zIndex = '2147483646';
+                            // Step 3: Also surface any sibling anchor checkbox iframe
+                            // in the SAME parent document as this bframe.
+                            const parentDoc = bframe.ownerDocument;
+                            if (parentDoc) {
+                                parentDoc.querySelectorAll('iframe').forEach(f => {
+                                    if (f.src && f.src.includes('anchor')) {
+                                        f.style.zIndex = '2147483646';
+                                    }
+                                });
+                            }
                         }
-                    });
-                }
-            """)
-            print(f"          🔲 CAPTCHA window pinned — Verify button is fully visible")
+                    """)
+                    _resize_done = True
+                except Exception:
+                    continue
+                break
+
+            if _resize_done:
+                print(f"          🔲 CAPTCHA window pinned — Verify button is fully visible")
+            else:
+                print(f"          ⚠  Could not pin CAPTCHA window (bframe element not reachable) — solve it in its default position")
             print(f"          💡 TIP: If still stuck, click the CAPTCHA area then press Tab → Enter")
         except Exception as e:
             print(f"          ⚠  CAPTCHA resize failed: {e}")
