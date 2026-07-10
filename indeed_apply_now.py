@@ -3796,6 +3796,21 @@ def main():
         global _indeed_blocked
         _consecutive_empty_queries = 0
         _empty_query_bail = getattr(cfg, "INDEED_EMPTY_QUERY_BAIL_THRESHOLD", 4)
+        # 2026-07-10: Raghav hit a full Cloudflare "Additional Verification
+        # Required" wall and had to cancel manually. Checked the logs — the
+        # ONLY existing bail-out (_consecutive_empty_queries, 4 in a row) is
+        # keyed off an AMBIGUOUS signal (0 cards, which could mean lots of
+        # things). But `_is_cloudflare_page()` below is a DIRECT, confirmed
+        # signal — once it fires twice in a row, there's no ambiguity left,
+        # yet the old code just waited 45s, retried once, gave up on that one
+        # query, and moved on to hammer the NEXT query against the same wall.
+        # With up to 3 page-loads per query, that's several minutes of
+        # continued hammering per query before even reaching the 4-empty-
+        # query threshold — actively making an already-flagged session worse
+        # instead of backing off. Tracked separately so a confirmed Cloudflare
+        # wall trips the bail much faster than an ambiguous empty result.
+        _consecutive_cf_blocks = 0
+        _cf_block_bail = getattr(cfg, "INDEED_CF_BLOCK_BAIL_THRESHOLD", 2)
         # Rolling-average low-yield tracking — catches a soft-blocked session
         # that trickles 1-2 cards through occasionally instead of hard-zero
         # every time, which would otherwise keep resetting the counter above
@@ -3844,7 +3859,12 @@ def main():
                             page.goto(url, wait_until="domcontentloaded", timeout=30000)
                             if _is_cloudflare_page():
                                 print(f"  ❌ Cloudflare still blocking after retry — skipping this query")
+                                _consecutive_cf_blocks += 1
                                 break
+                            else:
+                                _consecutive_cf_blocks = 0
+                        else:
+                            _consecutive_cf_blocks = 0
                         loaded = True
                         break
                     except Exception as _nav_err:
@@ -3904,6 +3924,29 @@ def main():
             print(f"  Found {len(job_cards)} cards ({_pages_per_query} pages)")
             _total_queries_done += 1
             _total_cards_found += len(job_cards)
+
+            # Confirmed Cloudflare wall, not just an ambiguous empty result —
+            # bail fast instead of hammering the next query against the same
+            # block. See the comment near _consecutive_cf_blocks above for why
+            # this is separate from (and faster than) the empty-query bail.
+            if _consecutive_cf_blocks >= _cf_block_bail:
+                print(f"\n  🛑 {_consecutive_cf_blocks} confirmed Cloudflare blocks in a row — "
+                      f"stopping Indeed run early instead of continuing to hammer a flagged session.")
+                try:
+                    notifier.send_alert(
+                        subject=f"🛑 Indeed run stopped — {_consecutive_cf_blocks} Cloudflare blocks in a row",
+                        body=(
+                            f"The Indeed pipeline hit {_consecutive_cf_blocks} confirmed Cloudflare "
+                            f"'Additional Verification Required' challenges in a row and stopped itself "
+                            f"early instead of continuing to retry against an already-flagged session.\n"
+                            f"This usually means too many requests too quickly (e.g. several runs back "
+                            f"to back). Let it sit for a few hours before running again."
+                        ),
+                    )
+                except Exception as _notify_err:
+                    print(f"          ⚠  Could not send Cloudflare-blocked email: {_notify_err}")
+                _indeed_blocked = True
+                break
 
             # Repeated zero-card searches almost always mean the session is
             # blocked (e.g. every page load aborting) rather than a real lack

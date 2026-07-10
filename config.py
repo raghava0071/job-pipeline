@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "1.3.1"
+PIPELINE_VERSION = "1.3.2"
 
 # ── Platform switches — turn a platform off without touching its code ──────────
 # Set to False to skip that platform entirely for the current run.
@@ -464,6 +464,14 @@ INDEED_BROWSER_LAUNCH_TIMEOUT_MS = 60000  # fail fast (1 min) instead of Playwri
 # not just rate-limited. Give up after this many rather than looping all day.
 CAPTCHA_MAX_COOLDOWNS_PER_RUN     = 2   # unsolved-CAPTCHA cooldown cycles before stopping the run
 INDEED_EMPTY_QUERY_BAIL_THRESHOLD = 4   # consecutive 0-card searches before stopping the run
+
+# A CONFIRMED Cloudflare "Additional Verification Required" page is a much
+# stronger, unambiguous signal than an empty search (which could have other
+# causes) — bail much faster than the empty-query threshold above instead of
+# hammering the next query against a wall we already know is there. Added
+# 2026-07-10 after Raghav had to manually cancel a run that kept hitting
+# Cloudflare on every query.
+INDEED_CF_BLOCK_BAIL_THRESHOLD    = 2   # consecutive CONFIRMED Cloudflare blocks before stopping the run
 
 # A soft-blocked session (Cloudflare shadow-throttling) doesn't always return
 # exactly 0 cards every search — sometimes 1-2 trickle through, which resets
