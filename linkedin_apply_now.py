@@ -1641,6 +1641,30 @@ def main():
             args=["--disable-blink-features=AutomationControlled"],
             viewport={"width": 1440, "height": 900},
         )
+
+        # Stealth init script — same patch added to indeed_apply_now.py on
+        # 2026-07-09, see that file for the full reasoning. Patches the
+        # JS-visible automation fingerprints (navigator.webdriver, plugins,
+        # languages, chrome.runtime) that bot-detection risk scoring checks,
+        # instead of only reacting to a CAPTCHA after it appears.
+        try:
+            browser.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.chrome = window.chrome || { runtime: {} };
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                const _origQuery = window.navigator.permissions && window.navigator.permissions.query;
+                if (_origQuery) {
+                    window.navigator.permissions.query = (params) => (
+                        params && params.name === 'notifications'
+                            ? Promise.resolve({ state: Notification.permission })
+                            : _origQuery(params)
+                    );
+                }
+            """)
+        except Exception:
+            pass
+
         page = browser.pages[0] if browser.pages else browser.new_page()
         # Auto-dismiss any JS alert/confirm dialogs — prevents ProtocolError crash
         # when a dialog fires after navigation and Playwright's driver tries to handle it.

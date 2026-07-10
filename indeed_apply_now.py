@@ -3674,6 +3674,36 @@ def main():
             viewport={"width": 1280, "height": 900},
             timeout=getattr(cfg, "INDEED_BROWSER_LAUNCH_TIMEOUT_MS", 60000),
         )
+
+        # Stealth init script — added 2026-07-09 after researching how the most
+        # established open-source job-apply bots (e.g. undetected-chromedriver-
+        # based projects) reduce CAPTCHA frequency: they patch the handful of
+        # JS-visible automation fingerprints that reCAPTCHA Enterprise's risk
+        # scoring checks, instead of only fighting the CAPTCHA after it appears
+        # (which is all this pipeline did before today). `--disable-blink-
+        # features=AutomationControlled` alone does NOT clear `navigator.
+        # webdriver` in current Chromium — that flag is still `true` by default,
+        # and it's one of the single most common, deterministic bot signals
+        # sites check for. Runs before every page/frame's own scripts in this
+        # context (context.add_init_script, not page-level), so it applies to
+        # every navigation for the life of the browser, not just the first page.
+        try:
+            browser.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.chrome = window.chrome || { runtime: {} };
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+                const _origQuery = window.navigator.permissions && window.navigator.permissions.query;
+                if (_origQuery) {
+                    window.navigator.permissions.query = (params) => (
+                        params && params.name === 'notifications'
+                            ? Promise.resolve({ state: Notification.permission })
+                            : _origQuery(params)
+                    );
+                }
+            """)
+        except Exception:
+            pass
         # If this process dies for any reason (crash, uncaught exception from the
         # Playwright driver, etc.) before browser.close() runs, the Chromium profile
         # lock (SingletonLock/Cookie/Socket) is left behind and the *next* launch
