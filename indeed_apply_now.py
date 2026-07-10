@@ -1766,108 +1766,130 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         # -50%,-50%)` trick (the one that worked in the 2026-06-22 code, and
         # is immune to any future re-nesting Indeed does) becomes correct
         # again — no coordinates to compute, nothing to get wrong.
-        try:
-            _resize_done = False
-            for _f in list(page.frames):
-                if "bframe" not in (_f.url or ""):
-                    continue
+        # CONFIRMED STILL BROKEN 2026-07-10, third attempt: Raghav hit a
+        # "select all squares with traffic lights" challenge — a taller 4x4
+        # grid variant (vs. the 3x3 "select all images with X" variant this
+        # was tuned against), and it got cut off at the bottom again, Verify
+        # button unreachable. Two separate causes, both now fixed:
+        #  1. This pin only ever ran ONCE, at the moment a CAPTCHA was first
+        #     detected. If Google swaps in a taller/different challenge
+        #     variant afterward (a retry after a wrong answer, or just a
+        #     different challenge type served this time), or renders into a
+        #     fresh bframe element, that later content was never re-pinned —
+        #     whatever styling we applied at t=0 is all it ever got. Fixed by
+        #     turning this into a reusable function and calling it not just
+        #     once at detection, but again every few seconds throughout the
+        #     wait loop below — cheap (it's idempotent CSS), and self-heals
+        #     against any later DOM change instead of assuming the challenge
+        #     never changes shape after the first render.
+        #  2. The height budget (85vh, capped at 820px) was tuned against the
+        #     3x3 grid's natural height and didn't leave enough room for a
+        #     4x4 grid (more rows = taller natural content). Raised to 92vh /
+        #     960px so taller variants fit too.
+        def _pin_captcha_box() -> bool:
+            try:
+                for _f in list(page.frames):
+                    if "bframe" not in (_f.url or ""):
+                        continue
 
-                # Fullscreen every ancestor iframe between the bframe and the
-                # top-level page, from the innermost outward. Trace the chain
-                # to the log — if this still doesn't land right next time,
-                # this line tells us how many levels there actually were and
-                # what they're called, instead of needing another screenshot.
-                _ancestor = _f.parent_frame
-                _chain_urls = []
-                while _ancestor is not None:
-                    try:
-                        _chain_urls.append((_ancestor.url or "")[:60])
-                    except Exception:
-                        pass
-                    try:
-                        _anc_el = _ancestor.frame_element()
-                        if _anc_el:
-                            _anc_el.evaluate("""
-                                (el) => {
-                                    el.style.cssText = [
-                                        'position: fixed !important',
-                                        'top: 0 !important',
-                                        'left: 0 !important',
-                                        'width: 100vw !important',
-                                        'height: 100vh !important',
-                                        'margin: 0 !important',
-                                        'border: none !important',
-                                        'z-index: 2147483000 !important',
-                                    ].join(';');
-                                }
-                            """)
-                    except Exception:
-                        pass
-                    _ancestor = _ancestor.parent_frame
-
-                print(f"          🧭 CAPTCHA ancestor chain ({len(_chain_urls)} level(s)): {_chain_urls}")
-
-                try:
-                    _bframe_el = _f.frame_element()
-                except Exception:
-                    continue
-                if not _bframe_el:
-                    continue
-                try:
-                    _bframe_el.evaluate("""
-                        (bframe) => {
-                            // Step 1: Walk up and remove overflow:hidden / clipping on parent chain
-                            let el = bframe;
-                            for (let i = 0; i < 10; i++) {
-                                el = el.parentElement;
-                                if (!el || el === document.body) break;
-                                el.style.overflow  = 'visible';
-                                el.style.height    = 'auto';
-                                el.style.maxHeight = 'none';
-                                el.style.clip      = 'none';
-                                el.style.clipPath  = 'none';
-                            }
-
-                            // Step 2: Now that every ancestor iframe has been
-                            // forced to fill the real window (above), this
-                            // element's own containing block genuinely IS the
-                            // real browser viewport — plain percentage
-                            // centering works correctly here.
-                            bframe.style.cssText = [
-                                'position: fixed !important',
-                                'top: 50% !important',
-                                'left: 50% !important',
-                                'transform: translate(-50%, -50%) !important',
-                                'width: 460px !important',
-                                'height: 85vh !important',
-                                'max-height: 820px !important',
-                                'min-height: 600px !important',
-                                'z-index: 2147483647 !important',
-                                'border: 4px solid #ff0000 !important',
-                                'border-radius: 10px !important',
-                                'background: white !important',
-                                'box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important',
-                                'overflow-y: auto !important',
-                            ].join(';');
-
-                            // Step 3: Also surface any sibling anchor checkbox iframe
-                            // in the SAME parent document as this bframe.
-                            const parentDoc = bframe.ownerDocument;
-                            if (parentDoc) {
-                                parentDoc.querySelectorAll('iframe').forEach(f => {
-                                    if (f.src && f.src.includes('anchor')) {
-                                        f.style.zIndex = '2147483646';
+                    # Fullscreen every ancestor iframe between the bframe and
+                    # the top-level page, from the innermost outward.
+                    _ancestor = _f.parent_frame
+                    _chain_urls = []
+                    while _ancestor is not None:
+                        try:
+                            _chain_urls.append((_ancestor.url or "")[:60])
+                        except Exception:
+                            pass
+                        try:
+                            _anc_el = _ancestor.frame_element()
+                            if _anc_el:
+                                _anc_el.evaluate("""
+                                    (el) => {
+                                        el.style.cssText = [
+                                            'position: fixed !important',
+                                            'top: 0 !important',
+                                            'left: 0 !important',
+                                            'width: 100vw !important',
+                                            'height: 100vh !important',
+                                            'margin: 0 !important',
+                                            'border: none !important',
+                                            'z-index: 2147483000 !important',
+                                        ].join(';');
                                     }
-                                });
-                            }
-                        }
-                    """)
-                    _resize_done = True
-                except Exception:
-                    continue
-                break
+                                """)
+                        except Exception:
+                            pass
+                        _ancestor = _ancestor.parent_frame
 
-            if _resize_done:
+                    try:
+                        _bframe_el = _f.frame_element()
+                    except Exception:
+                        continue
+                    if not _bframe_el:
+                        continue
+                    try:
+                        _bframe_el.evaluate("""
+                            (bframe) => {
+                                // Step 1: Walk up and remove overflow:hidden / clipping on parent chain
+                                let el = bframe;
+                                for (let i = 0; i < 10; i++) {
+                                    el = el.parentElement;
+                                    if (!el || el === document.body) break;
+                                    el.style.overflow  = 'visible';
+                                    el.style.height    = 'auto';
+                                    el.style.maxHeight = 'none';
+                                    el.style.clip      = 'none';
+                                    el.style.clipPath  = 'none';
+                                }
+
+                                // Step 2: Now that every ancestor iframe has been
+                                // forced to fill the real window (above), this
+                                // element's own containing block genuinely IS the
+                                // real browser viewport — plain percentage
+                                // centering works correctly here. Height budget
+                                // widened (92vh / 960px cap) to fit taller 4x4
+                                // "select all squares" variants, not just the
+                                // 3x3 "select all images" variant.
+                                bframe.style.cssText = [
+                                    'position: fixed !important',
+                                    'top: 50% !important',
+                                    'left: 50% !important',
+                                    'transform: translate(-50%, -50%) !important',
+                                    'width: 480px !important',
+                                    'height: 92vh !important',
+                                    'max-height: 960px !important',
+                                    'min-height: 600px !important',
+                                    'z-index: 2147483647 !important',
+                                    'border: 4px solid #ff0000 !important',
+                                    'border-radius: 10px !important',
+                                    'background: white !important',
+                                    'box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important',
+                                    'overflow-y: auto !important',
+                                ].join(';');
+
+                                // Step 3: Also surface any sibling anchor checkbox iframe
+                                // in the SAME parent document as this bframe.
+                                const parentDoc = bframe.ownerDocument;
+                                if (parentDoc) {
+                                    parentDoc.querySelectorAll('iframe').forEach(f => {
+                                        if (f.src && f.src.includes('anchor')) {
+                                            f.style.zIndex = '2147483646';
+                                        }
+                                    });
+                                }
+                            }
+                        """)
+                        print(f"          🧭 CAPTCHA ancestor chain ({len(_chain_urls)} level(s)): {_chain_urls}")
+                        return True
+                    except Exception:
+                        continue
+                return False
+            except Exception:
+                return False
+
+        try:
+            if _pin_captcha_box():
                 print(f"          🔲 CAPTCHA window pinned — Verify button is fully visible")
             else:
                 print(f"          ⚠  Could not pin CAPTCHA window (bframe element not reachable) — solve it in its default position")
@@ -1892,6 +1914,13 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
             try:
                 frames = list(page.frames)
                 still_captcha = _captcha_actually_visible()
+
+                # Re-pin every ~3s while a challenge is still showing — see the
+                # long comment above _pin_captcha_box() for why a one-time pin
+                # at detection isn't enough (a retry or taller challenge
+                # variant can appear later in this same wait loop, unpinned).
+                if still_captcha and i % 3 == 0:
+                    _pin_captcha_box()
 
                 # Check if the page already confirmed (user may have clicked Submit
                 # manually). Indeed's apply UI runs inside a nested iframe, not the

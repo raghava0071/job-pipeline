@@ -997,6 +997,7 @@ CLAUDE_QA: dict[str, str] = {
     "select resume raghavendra_karanam_ektello_data_analyst_korean_bilin.docx": "jobsDocumentCardToggle-ember1103",
     "select resume raghavendra_karanam_carmax_business_analyst__strateg.docx": "jobsDocumentCardToggle-ember442",
     "select resume raghavendra_karanam_rigup_data_analyst.docx": "jobsDocumentCardToggle-ember441",
+    "select resume raghavendra_karanam_rangam_rci-nypa-1461_data_analys.docx": "jobsDocumentCardToggle-ember530",
 }
 
 
