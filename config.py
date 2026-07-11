@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "1.3.7"
+PIPELINE_VERSION = "1.3.8"
 
 # ── Platform switches — turn a platform off without touching its code ──────────
 # Set to False to skip that platform entirely for the current run.
@@ -492,6 +492,14 @@ INDEED_PAGES_PER_QUERY   = 3    # how many result pages to scrape per query (was
                                  # 3 pages = ~45 job cards per query
 INDEED_BROWSER_LAUNCH_TIMEOUT_MS = 60000  # fail fast (1 min) instead of Playwright's
                                  # default hang if the Chromium profile is stuck/locked
+
+# How often ensure_login() rechecks whether you've logged in, and for how
+# long total, before giving up. Widened 5s → 60s on 2026-07-11 at Raghav's
+# request — fewer, less frequent requests while waiting, especially
+# important if Cloudflare is involved (see the check right next to this loop
+# in indeed_apply_now.py). Total wait budget kept at 5 minutes either way.
+INDEED_LOGIN_WAIT_INTERVAL_SEC = 60   # seconds between each login recheck
+INDEED_LOGIN_WAIT_TOTAL_SEC    = 300  # total time to wait before giving up
 
 # ── Indeed block detection — stop early instead of grinding for hours ─────────
 # Unattended (scheduled) runs can't solve CAPTCHAs, so repeated CAPTCHA cooldowns

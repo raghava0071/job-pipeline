@@ -228,8 +228,17 @@ def ensure_login(page):
     # in the search loop) and stopping immediately instead of hammering for
     # the full 5 minutes — this isn't a "give it a moment" situation, it's
     # confirmed the account isn't reachable at all right now.
-    for i in range(60):
-        time.sleep(5)
+    #
+    # Interval widened 5s → 60s on 2026-07-11 at Raghav's request — same
+    # motivation as the Cloudflare check just above: fewer, less frequent
+    # requests against a session that might already be flagged. Total wait
+    # budget kept at ~5 minutes (LOGIN_WAIT_TOTAL_SEC), just spread across
+    # far fewer checks (5 instead of 60).
+    _login_wait_interval = getattr(cfg, "INDEED_LOGIN_WAIT_INTERVAL_SEC", 60)
+    _login_wait_total     = getattr(cfg, "INDEED_LOGIN_WAIT_TOTAL_SEC", 300)
+    _login_wait_attempts  = max(1, _login_wait_total // _login_wait_interval)
+    for i in range(_login_wait_attempts):
+        time.sleep(_login_wait_interval)
         try:
             page.goto("https://www.indeed.com/", wait_until="domcontentloaded", timeout=10000)
             time.sleep(2)
@@ -256,8 +265,7 @@ def ensure_login(page):
                 return
         except:
             pass
-        if i % 12 == 11:
-            print(f"  ⏳ Still waiting for Indeed login... ({(i+1)*5}s elapsed)")
+        print(f"  ⏳ Still waiting for Indeed login... ({(i+1)*_login_wait_interval}s elapsed)")
 
     print("  ❌ Indeed login timeout — skipping this run")
 
