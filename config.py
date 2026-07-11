@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "1.3.3"
+PIPELINE_VERSION = "1.3.4"
 
 # ── Platform switches — turn a platform off without touching its code ──────────
 # Set to False to skip that platform entirely for the current run.
@@ -50,7 +50,15 @@ CLAUDE_MODEL_SMART  = "claude-sonnet-4-6"            # fit scoring, cover letter
 # 65% = good throughput sweet spot. 72% was too strict — only 2-3 apps per run.
 # Claude engine default also uses 65%, so these are now in sync.
 FIT_THRESHOLD          = 60   # Indeed/Workday minimum Claude score (%)
-LINKEDIN_FIT_THRESHOLD = 60   # LinkedIn minimum — 72% was killing throughput
+# Raised 60 → 72 on 2026-07-10 at Raghav's request: 26% of LinkedIn
+# applications (230/873) were landing at the bottom of the 60 floor (65-69%,
+# the weakest matches that still cleared the bar), which was flagged as a
+# plausible contributor to weak response rates. Trades application VOLUME for
+# match QUALITY — expect meaningfully fewer LinkedIn applications per run than
+# before. No real response-rate data exists yet to confirm this helps (see
+# CHANGELOG 1.3.3) — this is a deliberate bet, not a confirmed fix. Revisit
+# once real outcome data exists, or if throughput drops too far.
+LINKEDIN_FIT_THRESHOLD = 72   # LinkedIn minimum — raised from 60, trading volume for match quality
 
 # ── Scoring method — Claude (paid, smarter) vs free ATS keyword match ─────────
 # Per Raghav's request (2026-07-06): default to the free path, no API cost.
