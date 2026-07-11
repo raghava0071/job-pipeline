@@ -12,8 +12,13 @@
 #   - If `cryptography` is not installed, falls back to JSON with a warning
 #
 # FILES:
-#   - data/workday_accounts.enc  — encrypted accounts (preferred)
-#   - data/workday_accounts.json — plaintext fallback (less secure)
+#   - data/workday_accounts.enc            — encrypted accounts (the only file
+#                                             written to going forward)
+#   - data/workday_accounts_plaintext_backup.json — one-time archived copy of
+#                                             the OLD plaintext file, created
+#                                             automatically the first time this
+#                                             module upgrades legacy data. Not
+#                                             read again after the upgrade.
 #
 # SECURITY NOTES:
 #   - Both files are in .gitignore — never committed to GitHub
@@ -102,7 +107,8 @@ def _decrypt(raw: bytes) -> dict:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-# Plain-JSON store (user-requested): data/workday_accounts.json
+# Legacy plaintext file (data/workday_accounts.json) — only read once, for
+# upgrading old data into the encrypted store. Never written to going forward.
 # Schema per entry: company, portal_url, email, password, created_at, last_login
 PLAIN_FILE = JSON_FALLBACK
 
@@ -120,33 +126,46 @@ def _normalize(company_key: str, v: dict) -> dict:
 
 
 def load_accounts() -> dict:
-    """Load all Workday accounts from plain JSON (data/workday_accounts.json).
-    One-time migration: if only the legacy encrypted file exists, decrypt it,
-    write it out as plain JSON, and use that going forward."""
-    if PLAIN_FILE.exists():
-        try:
-            return json.loads(PLAIN_FILE.read_text()) or {}
-        except Exception:
-            return {}
-
-    # Migrate legacy encrypted store → plain JSON
+    """Load all Workday accounts from the encrypted store (preferred, matches
+    this file's own security intent). One-time upgrade: if a legacy plaintext
+    file exists too (from before encrypted saving was wired up), merge it in
+    — plaintext entries win on conflict, since that was the file actively
+    being written to (the encrypted file may be a stale, older snapshot from
+    before the bug that made saves go to plaintext instead). Re-save the
+    merged result encrypted, then archive the plaintext copy so passwords
+    stop sitting on disk unprotected."""
+    enc_data = {}
     if ENC_FILE.exists():
         try:
-            data = _decrypt(ENC_FILE.read_bytes()) or {}
-            if data:
-                data = {k: _normalize(k, v) for k, v in data.items() if isinstance(v, dict)}
-                PLAIN_FILE.write_text(json.dumps(data, indent=2))
-                print(f"  🔓 Migrated {len(data)} account(s) → plain workday_accounts.json")
-            return data
+            enc_data = _decrypt(ENC_FILE.read_bytes()) or {}
         except Exception as e:
-            print(f"  ⚠  Could not migrate encrypted accounts: {e}")
+            print(f"  ⚠  Could not read encrypted accounts: {e}")
 
-    return {}
+    if not PLAIN_FILE.exists():
+        return enc_data
+
+    # Legacy plaintext file present — one-time merge-and-archive.
+    try:
+        plain_data = json.loads(PLAIN_FILE.read_text()) or {}
+        plain_data = {k: _normalize(k, v) for k, v in plain_data.items() if isinstance(v, dict)}
+        merged = {**enc_data, **plain_data}   # plaintext wins on conflict — it's the fresher source
+        if merged:
+            ENC_FILE.write_bytes(_encrypt(merged))
+        archived = PLAIN_FILE.with_name(PLAIN_FILE.stem + "_plaintext_backup" + PLAIN_FILE.suffix)
+        PLAIN_FILE.rename(archived)
+        added = len(plain_data) - len(set(plain_data) & set(enc_data))
+        print(f"  🔒 Merged {len(plain_data)} plaintext account(s) into encrypted storage "
+              f"({len(merged)} total, {added} new)")
+        print(f"  📦 Old plaintext file archived to: {archived.name} (not deleted)")
+        return merged
+    except Exception as e:
+        print(f"  ⚠  Could not migrate plaintext accounts: {e}")
+        return enc_data
 
 
 def save_accounts(accounts: dict):
-    """Save all Workday accounts to plain JSON."""
-    PLAIN_FILE.write_text(json.dumps(accounts, indent=2))
+    """Save all Workday accounts to the encrypted store."""
+    ENC_FILE.write_bytes(_encrypt(accounts))
 
 
 def save_account(company_key: str, email: str, password: str, extra: dict = None):
@@ -167,7 +186,7 @@ def save_account(company_key: str, email: str, password: str, extra: dict = None
             entry[k] = val
     accounts[company_key] = entry
     save_accounts(accounts)
-    print(f"  💾 Account saved (plain JSON) for: {company_key}")
+    print(f"  💾 Account saved (encrypted) for: {company_key}")
 
 
 def get_account(company_key: str) -> dict:
