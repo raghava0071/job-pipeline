@@ -906,6 +906,7 @@ def _get_wd_password() -> str:
             for line in env.read_text().splitlines():
                 if line.startswith("WORKDAY_PASSWORD="):
                     pwd = line.split("=", 1)[1].strip().strip('"').strip("'")
+    return pwd
 
 def workday_sign_in(page, email: str, password: str) -> bool:
     """Sign in to Workday. Returns True once we've left the sign-in page —
