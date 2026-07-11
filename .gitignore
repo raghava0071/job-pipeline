@@ -1,34 +1,49 @@
 # =============================================================================
 # .GITIGNORE — Job Application Pipeline
 # RULE: if it contains personal data, credentials, or runtime state → exclude
+#
+# IMPORTANT: git does NOT support trailing "# comment" text on a pattern line
+# — only a line that STARTS with # is a comment. A pattern like
+# "*.enc   # encrypted files" is treated as one literal (and unmatchable)
+# pattern, not as "*.enc" plus a comment. Every note below is on its own line
+# for that reason — do not put explanatory text on the same line as a pattern.
 # =============================================================================
 
 # ── Credentials & secrets ─────────────────────────────────────────────────────
-.env                        # API keys, email password, Workday password, secret key
-*.enc                       # encrypted credential stores
-workday_accounts.json       # Workday account list with credentials
-workday_accounts.enc        # same, encrypted
-secure_store.key            # encryption key
+# API keys, email password, Workday password, secret key
+.env
+# encrypted credential stores
+*.enc
+# Workday account list with credentials (incl. archived plaintext backups)
+workday_accounts*.json
+# encryption key
+secure_store.key
 
 # ── Personal profile (contains real name, email, phone, address, experience) ──
-raghav_profile.py           # private — use raghav_profile.example.py as template
+# private — use raghav_profile.example.py as template
+raghav_profile.py
 
 # ── Personal Q&A and auto-saved Claude answers ────────────────────────────────
-qa_answers.py               # contains personal answers (salary, address, work auth)
-claude_answers.py           # auto-saved Claude answers — may contain personal data
+# contains personal answers (salary, address, work auth)
+qa_answers.py
+# auto-saved Claude answers — may contain personal data
+claude_answers.py
 
 # ── Application data & logs (personal job search history) ────────────────────
-data/apply_log.json         # full application history — personal
+# full application history — personal
+data/apply_log.json
 data/indeed_applied_log.json
 data/workday_applied_log.json
 data/linkedin_applied_log.json
 data/apply_queue.json
 data/Application_Tracker.xlsx
-data/~$Application_Tracker.xlsx  # Excel lock file
+# Excel lock file
+data/~$Application_Tracker.xlsx
 data/stuck_questions.json
 data/answer_cache.db
 data/*.db
-data/desc_fingerprints.json # fingerprint store (runtime state)
+# fingerprint store (runtime state)
+data/desc_fingerprints.json
 
 # ── Runtime logs ──────────────────────────────────────────────────────────────
 data/*.log
@@ -48,7 +63,8 @@ claude_task_*.log
 .indeed_session/
 .linkedin_session/
 .workday_session/
-*.pma                       # Chrome metrics
+# Chrome metrics
+*.pma
 SingletonLock
 SingletonCookie
 SingletonSocket
@@ -65,8 +81,10 @@ data/indeed_jobs.csv
 data/scheduler_*.log
 
 # ── Personal documents accidentally committed ──────────────────────────────────
-*.docx                      # resume files — contain real personal data
-*.pdf                       # personal PDFs (LinkedIn carousel etc.)
+# resume files — contain real personal data
+*.docx
+# personal PDFs (LinkedIn carousel etc.)
+*.pdf
 *_jo.docx
 
 # ── macOS metadata ────────────────────────────────────────────────────────────
