@@ -408,11 +408,33 @@ def load_log():
 def save_log(log):
     LOG_FILE.write_text(json.dumps(log, indent=2))
 
+# Failure reasons that mean the form itself is structurally unfillable (an
+# unanswerable required question, a stuck step, or Claude's own review
+# blocking submission) — retrying will hit the exact same wall every time,
+# since nothing about the job or the code changed between attempts. NOT
+# included: "Easy Apply btn not clickable" (can be a timing fluke) and
+# "dry-run" (not a real attempt) — those stay retryable.
+_PERMANENT_FAIL_REASONS = (
+    "form timeout (120s)",
+    "form exhausted without confirmation",
+    "claude review blocked submission",
+)
+
 def already_applied(url, log, title="", company=""):
-    """Dedup by URL (normalized) AND by company+title pair."""
+    """Dedup by URL (normalized) AND by company+title pair. Also treats
+    certain FAILED attempts as permanent (see _PERMANENT_FAIL_REASONS) —
+    without this, the same unfillable job resurfaces across near-duplicate
+    search queries and gets retried from scratch each time. One job alone
+    burned ~15 of a 23-minute run this way before this fix (six retries,
+    each hitting the same 120s timeout or exhausted-form failure)."""
     key = url.split("?")[0].rstrip("/")
     for e in log:
-        if e.get("status") not in ("Applied", "Already Applied"):
+        status = e.get("status")
+        note   = (e.get("note") or "").lower().strip()
+        permanent_fail = status == "Failed" and (
+            note in _PERMANENT_FAIL_REASONS or note.startswith("stuck on")
+        )
+        if status not in ("Applied", "Already Applied") and not permanent_fail:
             continue
         if e.get("url","").split("?")[0].rstrip("/") == key:
             return True
