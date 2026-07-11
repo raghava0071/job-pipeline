@@ -1148,21 +1148,50 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
             password, "🔑 Verify password"
         )
 
-        # Checkbox — agree to terms (check if visible)
+        # Checkboxes — agree to terms / consent to data use. Checks EVERY
+        # visible unchecked checkbox on the form (some portals like Amgen
+        # have only a data-consent box, others have a separate terms box
+        # too — the old code stopped after the first match and could leave
+        # a second one unticked). Previously this printed "Checkbox checked"
+        # unconditionally after a bare .click(), even if the click never
+        # actually registered — confirmed via a real screenshot (Amgen) that
+        # the box was still visibly unchecked afterward. Now verifies
+        # is_checked() after each attempt and tries a fallback click on the
+        # associated <label> for portals where the native input is visually
+        # hidden and only the label text is actually clickable.
         try:
-            for chk_sel in ['input[data-automation-id="createAccountCheckbox"]',
-                             'input[type="checkbox"]']:
-                chks = page.locator(chk_sel).all()
-                for chk in chks:
-                    if chk.is_visible(timeout=400):
-                        if not chk.is_checked():
-                            chk.click()
-                            time.sleep(0.3)
+            _checkbox_candidates = page.locator(
+                'input[type="checkbox"]:visible, [role="checkbox"]:visible'
+            ).all()
+            _checked_count = 0
+            for chk in _checkbox_candidates:
+                try:
+                    if chk.is_checked():
+                        _checked_count += 1   # already checked — counts as confirmed
+                        continue
+                    try:
+                        chk.check(timeout=2000)
+                    except Exception:
+                        try:
+                            chk.click(timeout=1500)
+                        except Exception:
+                            _chk_id = chk.get_attribute("id")
+                            if _chk_id:
+                                lbl = page.locator(f'label[for="{_chk_id}"]').first
+                                if lbl.count():
+                                    lbl.click(timeout=1500)
+                    time.sleep(0.3)
+                    if chk.is_checked():
+                        _checked_count += 1
                         print(f"          ☑  Checkbox checked")
-                        break
-                else:
-                    continue
-                break
+                    else:
+                        print(f"          ⚠  Checkbox click didn't register — still unchecked")
+                except Exception as _chk_err:
+                    print(f"          ⚠  Checkbox error: {_chk_err}")
+            if _checkbox_candidates and _checked_count < len(_checkbox_candidates):
+                print(f"          ⚠  {len(_checkbox_candidates) - _checked_count} checkbox(es) "
+                      f"could not be confirmed checked — Create Account may stay disabled")
+                _failure_shot(page, f"consent_checkbox_{company_key}")
         except Exception as e:
             print(f"          ⚠  Checkbox: {e}")
 
