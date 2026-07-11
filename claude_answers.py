@@ -1004,6 +1004,7 @@ CLAUDE_QA: dict[str, str] = {
     "select resume raghavendra_karanam_avenue_code_data_engineer.docx": "jobsDocumentCardToggle-ember400",
     "what is your level of proficiency in korean?": "None",
     "select resume raghavendra_karanam_aquent_business_intelligence_con.docx": "jobsDocumentCardToggle-ember482",
+    "select resume raghavendra_karanam_veridian_tech_solutions_inc_gcp_data_engineer.docx": "jobsDocumentCardToggle-ember663",
 }
 
 

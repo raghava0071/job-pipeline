@@ -383,7 +383,7 @@ def _fill_required_fields(page) -> list:
     # Workday custom dropdown that commonly blocks Next on the contact page
     _select_country_phone_code(page)
     filled = _safe_eval(page, r"""
-        () => {
+        async () => {
             function fire(el){['input','change','blur'].forEach(ev=>el.dispatchEvent(new Event(ev,{bubbles:true})));}
             const out={selects:0,radios:0,checks:0,customDropdowns:0};
 
@@ -426,11 +426,13 @@ def _fill_required_fields(page) -> list:
                 const t=(btn.innerText||'').trim();
                 if(t&&!/^(select|choose|--|please)/i.test(t)) continue;
                 btn.click();
-                setTimeout(()=>{
-                    const opt=Array.from(document.querySelectorAll('[role=option],[data-automation-id="promptOption"]'))
-                        .filter(o=>o.offsetParent)[0];
-                    if(opt){opt.click();out.customDropdowns++;}
-                },400);
+                // Must await the listbox render before reading it — a bare setTimeout
+                // here would fire after this function already returned, so the click
+                // never actually happened before Next was checked/pressed.
+                await new Promise(r=>setTimeout(r,400));
+                const opt=Array.from(document.querySelectorAll('[role=option],[data-automation-id="promptOption"]'))
+                    .filter(o=>o.offsetParent)[0];
+                if(opt){opt.click();out.customDropdowns++;await new Promise(r=>setTimeout(r,150));}
             }
 
             return out;
@@ -1484,6 +1486,7 @@ def _wait_for_page(page, sel: str, timeout_secs=30) -> bool:
 def step_contact_information(page):
     """Fill My Information step: name, address, phone."""
     print(f"          📋 Step: My Information")
+    from raghav_profile import COMMON_QA as _cqa_contact
 
     # Previous worker check — click "No" if asked
     _safe_eval(page, """
@@ -1507,7 +1510,7 @@ def step_contact_information(page):
     time.sleep(0.2)
 
     # Address — line 1 must be a street address (not city/state)
-    _fill(page, WD["address_line1"], "os.environ.get("HOME_ADDRESS","") ")
+    _fill(page, WD["address_line1"], _cqa_contact.get("street_address", ""))
     time.sleep(0.2)
     _fill(page, WD["city"], "City")
     time.sleep(0.2)
@@ -1527,7 +1530,7 @@ def step_contact_information(page):
     time.sleep(0.3)
     _select_country_phone_code(page)   # required dropdown → United States
     time.sleep(0.3)
-    _fill(page, WD["phone_number"], "os.environ.get("HOME_PHONE","") ")
+    _fill(page, WD["phone_number"], _cqa_contact.get("phone", ""))
     time.sleep(0.3)
 
     _advance_page(page, "My Information")
@@ -1853,7 +1856,7 @@ Name:          {PROFILE.get('name')}
 Email:         {PROFILE.get('email')}
 Phone:         {PROFILE.get('phone')}
 Location:      {PROFILE.get('location')}
-Address:       os.environ.get("HOME_ADDRESS","") , City, ST ZIP
+Address:       {_CQA.get('street_address')}, {_CQA.get('city')}, {_CQA.get('state')} {_CQA.get('zip')}
 Work Auth:     {PROFILE.get('work_auth')}
 Visa:          F-1 STEM OPT — no sponsorship needed
 LinkedIn:      https://{PROFILE.get('linkedin')}
@@ -1962,7 +1965,7 @@ RULES (follow exactly):
         "permanent resident":       "No",
         "linkedin":                 "https://www.linkedin.com/in/yourusername",
         "github":                   "https://github.com/raghava0071",
-        "phone":                    "os.environ.get("HOME_PHONE","") ",
+        "phone":                    "(555) 555-5555",
         "city":                     "City",
         "state":                    "Florida",
         "zip":                      "33484",
@@ -2100,9 +2103,41 @@ def extract_workday_job(page) -> dict:
         }
     """, {}) or {}
 
+def _dismiss_cookie_banner(page) -> bool:
+    """Corporate Workday portals (Visa, PwC, Iqvia, Lseg...) commonly run
+    OneTrust/Cookiebot consent overlays that sit on top of the page and block
+    clicks on the real Apply button even though Playwright sees it as
+    'visible'. Dismiss the banner first so it can't be the reason Apply is
+    unreachable."""
+    result = _safe_eval(page, """
+        () => {
+            const kws = ['accept all','accept cookies','accept','i agree','allow all','got it'];
+            const sels = ['#onetrust-accept-btn-handler', '.onetrust-close-btn-handler',
+                          '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
+                          'button[aria-label*="Accept" i]', 'button[id*="accept" i]'];
+            for (const s of sels) {
+                const b = document.querySelector(s);
+                if (b && b.offsetParent) { b.click(); return s; }
+            }
+            const btns = Array.from(document.querySelectorAll('button')).filter(b => b.offsetParent);
+            for (const b of btns) {
+                const t = (b.innerText || '').toLowerCase().trim();
+                if (kws.some(k => t === k || t.includes(k))) { b.click(); return t; }
+            }
+            return null;
+        }
+    """, None)
+    if result:
+        print(f"          🍪 Dismissed cookie banner: '{result}'")
+        time.sleep(0.5)
+        return True
+    return False
+
 def click_workday_apply(page) -> bool:
     """Click the Apply button on a Workday job posting — handles all locales."""
-    for sel in [
+    _dismiss_cookie_banner(page)
+
+    apply_selectors = [
         'a[data-automation-id="adventureButton"]',
         'a[data-automation-id="jobPostingApplyButton"]',
         'button[data-automation-id="jobPostingApplyButton"]',
@@ -2112,15 +2147,24 @@ def click_workday_apply(page) -> bool:
         "a:has-text('Bewerben')", "button:has-text('Bewerben')",  # German
         "a:has-text('Solicitar')", "button:has-text('Solicitar')", # Spanish
         "a:has-text('Start Application')", "button:has-text('Start Application')",
-    ]:
-        try:
-            btn = page.locator(sel).first
-            if btn.count() > 0 and btn.is_visible(timeout=3000):
-                btn.click()
-                time.sleep(3)
-                return True
-        except:
-            pass
+    ]
+
+    # Two passes: some corporate Workday portals hydrate slowly, so if nothing
+    # matched on the first pass, dismiss any late-appearing cookie banner and
+    # give the page a bit more time before giving up.
+    for attempt in range(2):
+        for sel in apply_selectors:
+            try:
+                btn = page.locator(sel).first
+                if btn.count() > 0 and btn.is_visible(timeout=3000):
+                    btn.click()
+                    time.sleep(3)
+                    return True
+            except:
+                pass
+        if attempt == 0:
+            _dismiss_cookie_banner(page)
+            time.sleep(3)
     return False
 
 # ── Main apply function ───────────────────────────────────────────────────────
@@ -2153,6 +2197,7 @@ def apply_to_workday_job(page, job: dict, resume_path: str, cover_letter_path: s
     # Click Apply
     print(f"          👆 Clicking Apply...")
     if not click_workday_apply(page):
+        _failure_shot(page, f"no_apply_btn_{company}")
         return False, "no Apply button found"
     time.sleep(2)
 
