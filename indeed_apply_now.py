@@ -3729,13 +3729,42 @@ def main():
     seen_this_run  = set()   # dedup within this session (company+title)
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch_persistent_context(
-            str(SESSION_DIR),
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-            viewport={"width": 1280, "height": 900},
-            timeout=getattr(cfg, "INDEED_BROWSER_LAUNCH_TIMEOUT_MS", 60000),
-        )
+        # 2026-07-11: switched from Playwright's bundled Chromium build to the
+        # real, installed Google Chrome binary (channel="chrome"). Root cause
+        # investigation this week found that Raghav's REGULAR Chrome browser
+        # reaches Indeed fine on the same network, while this pipeline's
+        # browser gets Cloudflare-blocked immediately — even on a completely
+        # fresh, just-reset profile (ruling out stale cookies) on the same IP
+        # (ruling out IP reputation). The one remaining difference is the
+        # browser build itself: Playwright's bundled "Chromium" has internal
+        # differences from a real Google Chrome install (missing proprietary
+        # components like Widevine, different internal version/build
+        # signatures) that deeper bot-detection fingerprinting can pick up on
+        # even with the navigator.webdriver-level stealth patch already in
+        # place (v1.3.0). This still uses a completely separate, dedicated
+        # profile (SESSION_DIR) — never touches Raghav's actual personal
+        # Chrome session/tabs/logins, just uses the same underlying binary.
+        # Falls back to the bundled Chromium (previous behaviour) if Chrome
+        # isn't installed on this machine, so this can't hard-break the run.
+        try:
+            browser = pw.chromium.launch_persistent_context(
+                str(SESSION_DIR),
+                headless=False,
+                channel="chrome",
+                args=["--disable-blink-features=AutomationControlled"],
+                viewport={"width": 1280, "height": 900},
+                timeout=getattr(cfg, "INDEED_BROWSER_LAUNCH_TIMEOUT_MS", 60000),
+            )
+            print("  🌐  Using real Google Chrome (channel=chrome)")
+        except Exception as _chrome_err:
+            print(f"  ⚠  Real Chrome not available ({str(_chrome_err)[:80]}) — falling back to bundled Chromium")
+            browser = pw.chromium.launch_persistent_context(
+                str(SESSION_DIR),
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled"],
+                viewport={"width": 1280, "height": 900},
+                timeout=getattr(cfg, "INDEED_BROWSER_LAUNCH_TIMEOUT_MS", 60000),
+            )
 
         # Stealth init script — added 2026-07-09 after researching how the most
         # established open-source job-apply bots (e.g. undetected-chromedriver-

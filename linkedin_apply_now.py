@@ -2064,8 +2064,34 @@ def main():
                     continue
 
                 # APPLY — Easy Apply button is RIGHT HERE in the right panel
+                #
+                # CONFIRMED 2026-07-11: this call was the exact crash site in a
+                # real run — an uncaught TargetClosedError here killed the
+                # entire Python process (traceback all the way to main()),
+                # losing the rest of the run instead of just skipping this one
+                # job. Every other browser-closed-prone call in this same loop
+                # (card click, extract_right_panel above) already has this
+                # exact recovery pattern; this one was just missed. Same fix:
+                # reopen the page and continue with the next job instead of
+                # letting the whole process die.
                 print(f"      Clicking Easy Apply...")
-                ea_clicked = click_easy_apply(page)
+                try:
+                    ea_clicked = click_easy_apply(page)
+                except PWError as _pwe:
+                    if "Target page, context or browser has been closed" in str(_pwe) or \
+                       "Not attached to an active page" in str(_pwe):
+                        print(f"      [{jid}] ⚠  Browser session died clicking Easy Apply — reopening page...")
+                        try:
+                            page = browser.new_page()
+                            page.goto(build_url(kw), wait_until="domcontentloaded", timeout=30000)
+                            time.sleep(3)
+                        except Exception as _re:
+                            print(f"      [{jid}] ❌ Could not recover: {_re} — stopping LinkedIn run")
+                            break
+                        continue
+                    else:
+                        print(f"      [{jid}] ⚠  Error clicking Easy Apply: {_pwe} — skip")
+                        continue
                 if not ea_clicked:
                     print(f"      ❌ Could not click Easy Apply")
                     log.append({"timestamp": datetime.now().isoformat(), "company": company,
