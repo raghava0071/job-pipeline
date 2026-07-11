@@ -74,6 +74,15 @@ CAPTCHA_COOLDOWN_SECS         = 300  # 5-minute break
 _total_cooldowns_this_run = 0
 _indeed_blocked           = False
 
+# Set when a page.goto() fails with "Target page, context or browser has
+# been closed" — this means the actual Chrome window is gone (closed by the
+# user, crashed, etc.), not a network blip. Retrying inside the same page
+# object can never succeed once this happens, so the search loop checks this
+# flag and stops immediately instead of retrying every remaining query
+# against a browser that no longer exists (seen: 0 cards found, query after
+# query, for up to 54 queries, until someone manually Ctrl+C'd it).
+_browser_window_closed    = False
+
 # Fields scanned by the most recent smart_fill_step() call — the stuck-question
 # logger below reads this. (It used to reference a variable, form_fields_last_seen,
 # that was never actually assigned anywhere, so every stuck_questions.json entry
@@ -163,7 +172,16 @@ def already_applied(url, log, title="", company=""):
     return False
 
 def ensure_login(page):
-    """Check Indeed login; prompt user if not logged in."""
+    """Check Indeed login; prompt user if not logged in.
+
+    Sets the module-level _indeed_blocked flag on every give-up path (could
+    not reach Indeed, Cloudflare wall during the wait, or login timeout) so
+    the search loop's existing "if _indeed_blocked: break" check short-
+    circuits immediately instead of running all 54 queries anyway even
+    though every downstream Apply attempt was always going to fail without
+    a login. Previously this function only printed "skipping this run" —
+    nothing actually enforced that, so the run proceeded regardless."""
+    global _indeed_blocked
     # Retry up to 3x — a single network timeout was killing entire evening runs
     for _i in range(3):
         try:
@@ -175,6 +193,7 @@ def ensure_login(page):
                 time.sleep(8)
             else:
                 print("  ❌ Could not reach Indeed after 3 attempts — skipping this run")
+                _indeed_blocked = True
                 return
     time.sleep(3)
     # Check for user account indicator
@@ -249,6 +268,7 @@ def ensure_login(page):
                 print(f"  🚨 Cloudflare is blocking Indeed entirely right now (not a login issue) — "
                       f"stopping instead of re-hammering the same block for 5 minutes.")
                 print(f"  💡 This session/IP is flagged. Wait before trying again instead of re-running.")
+                _indeed_blocked = True
                 return
             logged_in = page.evaluate("""
                 () => {
@@ -268,6 +288,7 @@ def ensure_login(page):
         print(f"  ⏳ Still waiting for Indeed login... ({(i+1)*_login_wait_interval}s elapsed)")
 
     print("  ❌ Indeed login timeout — skipping this run")
+    _indeed_blocked = True
 
 def extract_job_panel(page):
     """Extract job details from the Indeed right panel / detail view."""
@@ -3855,7 +3876,7 @@ def main():
             except Exception:
                 pass
 
-        global _indeed_blocked
+        global _indeed_blocked, _browser_window_closed
         _consecutive_empty_queries = 0
         _empty_query_bail = getattr(cfg, "INDEED_EMPTY_QUERY_BAIL_THRESHOLD", 4)
         # 2026-07-10: Raghav hit a full Cloudflare "Additional Verification
@@ -3887,6 +3908,10 @@ def main():
                 break
             if _indeed_blocked:
                 print(f"\n  🛑 Stopping remaining searches — session flagged as blocked earlier this run.")
+                break
+            if _browser_window_closed:
+                print(f"\n  🛑 Stopping — the Chrome window closed earlier this run and can't be recovered.")
+                print(f"  👉 Re-open the pipeline's Chrome window and run again.")
                 break
 
             # Human-like inter-query delay (skip before very first query)
@@ -3930,9 +3955,22 @@ def main():
                         loaded = True
                         break
                     except Exception as _nav_err:
-                        print(f"  ⚠  Search load failed (p{_page_start//15+1}, attempt {_attempt+1}/3): {str(_nav_err)[:60]}")
+                        _err_str = str(_nav_err)
+                        # The Chrome window itself is gone (closed, crashed) — not a
+                        # network blip. Retrying against the same dead page object
+                        # will fail identically every time, so stop immediately
+                        # instead of burning 3 attempts here and repeating this for
+                        # every remaining page and every remaining query.
+                        if ("Target page, context or browser has been closed" in _err_str
+                                or "Not attached to an active page" in _err_str):
+                            print(f"  🛑 Chrome window closed — can't continue (not a network issue, no point retrying)")
+                            _browser_window_closed = True
+                            break
+                        print(f"  ⚠  Search load failed (p{_page_start//15+1}, attempt {_attempt+1}/3): {_err_str[:60]}")
                         if _attempt < 2:
                             time.sleep(5)
+                if _browser_window_closed:
+                    break
                 if not loaded:
                     print(f"  ❌ Could not load page {_page_start//15+1} — skipping")
                     continue
