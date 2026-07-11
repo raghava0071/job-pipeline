@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "1.3.5"
+PIPELINE_VERSION = "1.3.6"
 
 # ── Platform switches — turn a platform off without touching its code ──────────
 # Set to False to skip that platform entirely for the current run.
@@ -381,9 +381,16 @@ STAFFING_CONSULTANCY_COMPANY_WORDS = {
     "akraya", "sharp decisions", "brooksource", "talent groups", "akkodis",
     "software guidance & assistance", "harrison clarke",
     # Global IT-services / body-shop-style firms — direct-hire FTE but still
-    # a "you work at whatever client we place you at" consulting model
-    "tata consultancy", "tcs", "infosys", "wipro", "cognizant", "hcl",
-    "tech mahindra", "capgemini", "ltimindtree", "mphasis", "hexaware",
+    # a "you work at whatever client we place you at" consulting model.
+    # 2026-07-10: Raghav asked why big-name companies like TCS/Infosys never
+    # come up as applied — turned out they were deliberately excluded here.
+    # He wants the big, well-known Indian IT majors allowed again (US-based
+    # roles only — already enforced independently by FAKE_JOB_LOCATION_
+    # SIGNALS containing "india", which runs in is_fake_job() BEFORE this
+    # staffing check, so removing these names here does NOT open the door to
+    # India-based postings from them). Smaller/less-known IT-services firms
+    # stay excluded — not asked to unblock those specifically.
+    "capgemini", "ltimindtree", "mphasis", "hexaware",
     "mindtree", "persistent systems", "zensar", "birlasoft", "l&t infotech",
     "sonata software", "cigniti", "virtusa", "syntel", "genpact",
     # Big management / professional-services consulting
@@ -394,6 +401,16 @@ STAFFING_CONSULTANCY_COMPANY_WORDS = {
     "deloitte", "ernst & young", "pwc", "kpmg", "accenture",
     "bcg", "mckinsey", "bain & company", "slalom", "west monroe",
     "guidehouse", "grant thornton",
+}
+
+# Explicit allowlist, checked BEFORE the generic-keyword loop above — the big
+# Indian IT majors' official names contain generic words that need to stay
+# blocked for everyone else ("Tata Consultancy Services" contains
+# "consultancy"), so a plain keyword-removal alone isn't enough to unblock
+# them. See staffing_filter.py for how this is used.
+STAFFING_CONSULTANCY_EXPLICIT_ALLOW = {
+    "tata consultancy", "tcs", "infosys", "wipro", "cognizant",
+    "hcl technologies", "hcltech", "tech mahindra",
 }
 
 # Description-level signals — the posting talks like a staffing/consulting

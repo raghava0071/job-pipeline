@@ -30,6 +30,20 @@ def is_staffing_or_consultancy(company: str, description: str = ""):
     c = (company or "").lower().strip()
     d = (description or "").lower()
 
+    # Explicit exceptions, checked FIRST — 2026-07-10, Raghav asked to allow
+    # the big, well-known Indian IT majors (TCS, Infosys, Wipro, Cognizant,
+    # HCL, Tech Mahindra) again. Their brand names were removed from the
+    # generic keyword list below, but a plain substring check alone isn't
+    # enough: "Tata Consultancy Services" still contains the generic word
+    # "consultancy" (which needs to stay generic, to keep catching real
+    # unnamed consulting firms), so without this explicit allowlist check
+    # TCS would still get blocked by that unrelated match. Checked before the
+    # generic word loop so these names always win regardless of what generic
+    # keyword their official name happens to contain.
+    for allowed in getattr(cfg, "STAFFING_CONSULTANCY_EXPLICIT_ALLOW", set()):
+        if allowed in c:
+            return False, ""
+
     for w in getattr(cfg, "STAFFING_CONSULTANCY_COMPANY_WORDS", set()):
         if w in c:
             return True, f"staffing/consultancy company: '{w}'"
