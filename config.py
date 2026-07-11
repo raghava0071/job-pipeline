@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "1.3.4"
+PIPELINE_VERSION = "1.3.5"
 
 # ── Platform switches — turn a platform off without touching its code ──────────
 # Set to False to skip that platform entirely for the current run.
@@ -370,6 +370,16 @@ STAFFING_CONSULTANCY_COMPANY_WORDS = {
     "dexian", "kforce", "robert half", "beacon hill", "actalent",
     "cybercoders", "modis", "artech", "collabera", "mastech",
     "volt", "kelly ocg", "yoh", "hays", "michael page", "cornerstone staffing",
+    # Added 2026-07-10 after auditing the actual applied-companies list —
+    # "akraya" and "sharp decisions" had BOTH slipped through as recently as
+    # 2026-07-09, a full week after this filter first shipped (2026-07-02),
+    # since neither name contains a generic staffing keyword. The other five
+    # below are also confirmed real staffing/recruiting firms found in the
+    # same applied-companies audit (pre-dating this filter, so not currently
+    # leaking, but confirmed real and will keep resurfacing in future
+    # searches if not pre-emptively blocked).
+    "akraya", "sharp decisions", "brooksource", "talent groups", "akkodis",
+    "software guidance & assistance", "harrison clarke",
     # Global IT-services / body-shop-style firms — direct-hire FTE but still
     # a "you work at whatever client we place you at" consulting model
     "tata consultancy", "tcs", "infosys", "wipro", "cognizant", "hcl",
