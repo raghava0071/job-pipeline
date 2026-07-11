@@ -998,6 +998,12 @@ CLAUDE_QA: dict[str, str] = {
     "select resume raghavendra_karanam_carmax_business_analyst__strateg.docx": "jobsDocumentCardToggle-ember442",
     "select resume raghavendra_karanam_rigup_data_analyst.docx": "jobsDocumentCardToggle-ember441",
     "select resume raghavendra_karanam_rangam_rci-nypa-1461_data_analys.docx": "jobsDocumentCardToggle-ember530",
+    "select resume raghavendra_karanam_new_york_technology_partners_big_data_engineer_50hr.docx": "jobsDocumentCardToggle-ember791",
+    "select resume raghavendra_karanam_oak_tree_software_data_engineer.docx": "on",
+    "select resume raghavendra_karanam_the_bergaila_companies_drilling__completions_dat.docx": "jobsDocumentCardToggle-ember875",
+    "select resume raghavendra_karanam_avenue_code_data_engineer.docx": "jobsDocumentCardToggle-ember400",
+    "what is your level of proficiency in korean?": "None",
+    "select resume raghavendra_karanam_aquent_business_intelligence_con.docx": "jobsDocumentCardToggle-ember482",
 }
 
 

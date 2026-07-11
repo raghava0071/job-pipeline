@@ -1179,6 +1179,44 @@ Rules:
                             except Exception:
                                 pass
 
+                        # ── Affirmative-intent fallback for Yes/No, Agree/Disagree
+                        # style consent selects ──────────────────────────────────
+                        # CONFIRMED 2026-07-10: caught live in the debug log — a
+                        # LinkedIn privacy-consent field ("By clicking 'Yes' you
+                        # agree to our Privacy Policy...") resolved to the answer
+                        # "Agree", but the actual <select> options were "Yes"/"No"
+                        # (not "Agree"/"Disagree"), so neither the exact-match nor
+                        # the fuzzy word-overlap fallback above found anything —
+                        # "agree" and "yes" don't share a word. The form re-showed
+                        # the SAME unanswered question on every subsequent step
+                        # (2, 3, 4) since a required field was never actually
+                        # filled, until it hit the 120s form timeout. Same root
+                        # cause and same fix already proven on the Indeed side
+                        # (v1.2.6, "single-checkbox Agree widget") — just never
+                        # ported to LinkedIn's <select>-based version of the same
+                        # UI pattern. If the intended answer clearly means "yes/
+                        # agree" but didn't literally match, pick whichever option
+                        # represents the affirmative choice instead of leaving a
+                        # required field blank and stalling the whole form.
+                        if not _selected:
+                            _AFFIRM_INTENT = {"agree", "yes", "i agree", "accept", "confirm", "true", "consent"}
+                            _DECLINE_WORDS = {"disagree", "no", "decline", "false", "do not", "don't"}
+                            if _a_lower in _AFFIRM_INTENT or any(w in _a_lower for w in _AFFIRM_INTENT):
+                                try:
+                                    _all_opts2 = sel.locator("option").all()
+                                    for _opt in _all_opts2:
+                                        _otxt = (_opt.text_content() or "").strip()
+                                        _otxt_l = _otxt.lower()
+                                        if not _otxt or any(w in _otxt_l for w in _DECLINE_WORDS):
+                                            continue
+                                        if any(w in _otxt_l for w in ("yes", "agree", "accept", "i agree")):
+                                            sel.select_option(label=_otxt, timeout=1000)
+                                            _selected = True
+                                            _ans_str = f"{_ans_str} → affirmative fallback '{_otxt}'"
+                                            break
+                                except Exception:
+                                    pass
+
                         if _selected:
                             print(f"          📋 '{field.get('label','?')[:40]}' → '{_ans_str}'")
                         else:
