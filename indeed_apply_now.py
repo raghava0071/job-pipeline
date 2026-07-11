@@ -211,11 +211,36 @@ def ensure_login(page):
         print(f"  ⚠  Could not send alert: {e}")
 
     # Wait up to 5 minutes for login
+    #
+    # CONFIRMED 2026-07-11: Raghav asked directly whether this pipeline keeps
+    # auto-retrying while stuck on the Cloudflare "Are you a robot" page —
+    # yes, it did, and this loop is exactly where. It reloads indeed.com
+    # every 5 seconds for up to 5 minutes (60 attempts) with NO awareness of
+    # Cloudflare — it only checks for a login indicator, so if Cloudflare is
+    # showing its block/verification page instead of the real homepage, this
+    # loop can't tell the difference from "just not logged in yet" and keeps
+    # blindly re-requesting the same blocked page 60 times before giving up.
+    # That's up to 60 extra requests against an already-flagged session every
+    # single time the pipeline is started while blocked — directly
+    # compounding the exact problem described in this week's Cloudflare
+    # investigation. Fixed by checking for Cloudflare's own block-page
+    # signals (same signals used by the separate _is_cloudflare_page() check
+    # in the search loop) and stopping immediately instead of hammering for
+    # the full 5 minutes — this isn't a "give it a moment" situation, it's
+    # confirmed the account isn't reachable at all right now.
     for i in range(60):
         time.sleep(5)
         try:
             page.goto("https://www.indeed.com/", wait_until="domcontentloaded", timeout=10000)
             time.sleep(2)
+            _body_txt = (page.evaluate("() => document.body.innerText") or "").lower()
+            if ("additional verification required" in _body_txt
+                    or "ray id" in _body_txt
+                    or "verify you are human" in _body_txt):
+                print(f"  🚨 Cloudflare is blocking Indeed entirely right now (not a login issue) — "
+                      f"stopping instead of re-hammering the same block for 5 minutes.")
+                print(f"  💡 This session/IP is flagged. Wait before trying again instead of re-running.")
+                return
             logged_in = page.evaluate("""
                 () => {
                     const indicators = [
