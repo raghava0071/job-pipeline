@@ -1266,7 +1266,16 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
         # hidden sign-in form which leaves Create Account email empty.
 
         def _fill_visible(selectors: list, value: str, label: str) -> bool:
-            """Fill the first VISIBLE input matching any of the selectors."""
+            """Fill the first VISIBLE input matching any of the selectors.
+            CONFIRMED live on Ryan Specialty 2026-07-11: `.fill()` alone left
+            "Verify New Password" completely empty (screenshot showed it
+            focused but blank) even though the SAME approach filled the
+            Password field right above it correctly — some Workday portals
+            appear to reject a plain programmatic value-set on the verify-
+            password field specifically. Falls back to real keystrokes (the
+            same trick `_fill()` already uses elsewhere in this file for
+            React-controlled inputs) whenever `.fill()` doesn't actually
+            take, instead of silently moving on with the field still blank."""
             for sel in selectors:
                 try:
                     els = page.locator(sel).all()
@@ -1277,10 +1286,16 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
                             time.sleep(0.15)
                             el.fill(value)
                             time.sleep(0.15)
+                            val = el.input_value()
+                            if not val:
+                                el.click(timeout=2000)
+                                page.keyboard.press("Control+A")
+                                page.keyboard.press("Backspace")
+                                page.keyboard.type(value, delay=40)
+                                time.sleep(0.15)
+                                val = el.input_value()
                             el.press("Tab")
                             time.sleep(0.2)
-                            # Verify it actually filled
-                            val = el.input_value()
                             if val and len(val) > 0:
                                 print(f"          {label} filled (len={len(val)})")
                                 return True
@@ -1534,6 +1549,21 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
             if not ok:
                 _failure_shot(page, f"createacct_verify_{company_key}")
                 return False
+
+        # Guard against a false "success": if Workday's client-side validation
+        # silently blocked the submit (no error TEXT rendered, no success
+        # phrase, but the form itself never actually went anywhere), the code
+        # above would previously fall through here and claim success —
+        # saving a bogus account locally for a portal that never actually
+        # created one, which then makes every future sign-in attempt fail
+        # forever (since secure_store believes the account exists). Verify
+        # we're actually OFF the create-account form before declaring success.
+        still_on_form = _exists(page, WD["verify_password"], timeout=1000)
+        if still_on_form:
+            print(f"          ⚠  Still on Create Account form after submit — "
+                  f"treating as failure, not saving a bogus account")
+            _failure_shot(page, f"createacct_stuck_{company_key}")
+            return False
 
         print(f"          ✅ Account created for {company_key}")
         secure_store.save_account(company_key, email, password,
