@@ -927,9 +927,22 @@ def workday_sign_in(page, email: str, password: str) -> bool:
         # IMPORTANT: Workday renders BOTH the Sign-In and Create-Account forms in
         # the DOM at once, with Create-Account first. A bare querySelector hits
         # the Create-Account email/password (leaving Sign-In empty → submit
-        # silently no-ops). So scope the fill to the form that actually contains
-        # signInSubmitButton — the smallest ancestor with a password field that
-        # does NOT contain the Create-Account button.
+        # silently no-ops).
+        #
+        # CONFIRMED 2026-07-11 via a real failure screenshot (Amgen,
+        # fail_signin_timeout_20260711_200031.png): password field filled
+        # correctly, email field left completely blank, sign-in hung and
+        # timed out. The previous fix for this (an ancestor-scope walk from
+        # the Sign In submit button) didn't reliably land on the right
+        # scope, and its fallback (`document.querySelector`) grabs the
+        # FIRST match in DOM order regardless of visibility — which, per
+        # the comment above, is the hidden Create-Account form's email
+        # field, not the visible Sign-In one. Replaced the scope-walk with
+        # a simpler, more robust rule: fill whichever matching input is
+        # actually VISIBLE (offsetParent !== null). Handles both the
+        # dual-form portals this was originally written for AND
+        # single-form portals like Amgen where the scope-walk had nothing
+        # reliable to find.
         fill_report = page.evaluate("""
             (args) => {
                 const email = args[0], password = args[1];
@@ -943,21 +956,15 @@ def workday_sign_in(page, email: str, password: str) -> bool:
                         el.dispatchEvent(new Event(ev, {bubbles:true})));
                     return true;
                 }
-                const submit = document.querySelector('button[data-automation-id="signInSubmitButton"]');
-                let scope = submit ? submit.parentElement : null;
-                while (scope && scope !== document.body) {
-                    const hasPwd = scope.querySelector('input[type="password"]');
-                    const hasCreate = scope.querySelector('button[data-automation-id="createAccountSubmitButton"]');
-                    if (hasPwd && !hasCreate) break;
-                    scope = scope.parentElement;
+                function firstVisible(sel) {
+                    const els = Array.from(document.querySelectorAll(sel))
+                        .filter(e => e.offsetParent !== null);
+                    return els[0] || null;
                 }
-                if (!scope || scope === document.body)
-                    scope = (submit && submit.closest('form')) || document;
-
-                const em = scope.querySelector('input[data-automation-id="email"], input[type="email"]')
-                        || document.querySelector('input[data-automation-id="email"], input[type="email"]');
-                const pw = scope.querySelector('input[data-automation-id="password"], input[type="password"]')
-                        || document.querySelector('input[data-automation-id="password"], input[type="password"]');
+                const em = firstVisible('input[data-automation-id="email"]')
+                        || firstVisible('input[type="email"]');
+                const pw = firstVisible('input[data-automation-id="password"]')
+                        || firstVisible('input[type="password"]');
                 const r = [];
                 r.push(reactFill(em, email) ? 'email:ok' : 'email:MISS');
                 r.push(reactFill(pw, password) ? 'pwd:ok' : 'pwd:MISS');
