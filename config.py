@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "1.6.5"
+PIPELINE_VERSION = "1.6.6"
 
 # ── Platform switches — turn a platform off without touching its code ──────────
 # Set to False to skip that platform entirely for the current run.
@@ -42,6 +42,31 @@ def get_api_key() -> str:
                 if line.startswith("ANTHROPIC_API_KEY="):
                     key = line.split("=", 1)[1].strip().strip('"').strip("'")
     return key
+
+def _env(key: str, default: str = "") -> str:
+    """Read a value from the OS environment, falling back to parsing .env
+    directly if it's not already set. Needed because nothing in this
+    pipeline loads .env into the process environment globally (no
+    python-dotenv, no shell `source .env`) — every process starts with only
+    real OS env vars, so a bare `os.environ.get(key, default)` silently
+    returns the hardcoded default for anything that only lives in .env.
+
+    CONFIRMED 2026-07-11: this exact gap left CANDIDATE_EMAIL resolving to
+    the literal placeholder "your.email@gmail.com" during Workday account
+    creation instead of the real address — Raghav caught it live in the
+    browser. Same bug class already fixed once in workday_apply_now.py's
+    _get_wd_password() (missing return statement, different symptom, same
+    root cause: an env value that's only ever in .env, never in the real
+    process environment)."""
+    val = os.environ.get(key, "")
+    if not val:
+        env_file = BASE_DIR / ".env"
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if line.startswith(f"{key}="):
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+    return val or default
 
 CLAUDE_MODEL_FAST   = "claude-haiku-4-5-20251001"   # form filling, bullet rewriting
 CLAUDE_MODEL_SMART  = "claude-sonnet-4-6"            # fit scoring, cover letters
@@ -677,10 +702,10 @@ RESUME_MAX_BULLETS  = 7     # max bullets for primary job
 RESUME_SIDE_BULLETS = 4     # max bullets for secondary jobs
 
 # ── Candidate basics (non-sensitive — sensitive data stays in raghav_profile.py)
-CANDIDATE_NAME      = os.environ.get("CANDIDATE_NAME", "Your Name")
-CANDIDATE_LOCATION  = os.environ.get("HOME_CITY_STATE", "City, ST")
-CANDIDATE_EMAIL     = os.environ.get("CANDIDATE_EMAIL", "your.email@gmail.com")
-CANDIDATE_PHONE     = os.environ.get("HOME_PHONE", "")
+CANDIDATE_NAME      = _env("CANDIDATE_NAME", "Your Name")
+CANDIDATE_LOCATION  = _env("HOME_CITY_STATE", "City, ST")
+CANDIDATE_EMAIL     = _env("CANDIDATE_EMAIL", "your.email@gmail.com")
+CANDIDATE_PHONE     = _env("HOME_PHONE", "")
 WORK_AUTH           = "F-1 OPT/STEM OPT — authorized, no sponsorship needed"
 DEGREE              = "M.S. Data Science & Analytics, Florida Atlantic University (2025)"
 YEARS_EXP_TOTAL     = "3+"
