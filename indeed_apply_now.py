@@ -66,6 +66,14 @@ _consecutive_captcha_failures = 0
 CAPTCHA_COOLDOWN_THRESHOLD    = 3    # failures in a row before cooldown
 CAPTCHA_COOLDOWN_SECS         = 300  # 5-minute break
 
+# Element handles _pin_captcha_box() has force-styled via cssText (the bframe
+# itself plus every ancestor iframe in its chain). Tracked explicitly so the
+# post-solve cleanup can strip exactly what was pinned instead of re-matching
+# frames by URL substring — a guess that misses ancestor wrapper iframes whose
+# URL never contains "bframe"/"anchor" (they're intermediate site iframes we
+# styled directly, not Google's own frames). Cleared once cleanup runs.
+_pinned_elements = []
+
 # Total cooldown cycles taken this run with zero successful solves in between.
 # An unattended (scheduled) run has nobody to solve a CAPTCHA, so if we're
 # still hitting them after a full cooldown, the session is very likely
@@ -1872,6 +1880,10 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                                         ].join(';');
                                     }
                                 """)
+                                # Track exactly what we pinned so post-solve cleanup
+                                # can strip it directly instead of re-matching frames
+                                # by URL substring.
+                                _pinned_elements.append(_anc_el)
                         except Exception:
                             pass
                         _ancestor = _ancestor.parent_frame
@@ -1934,6 +1946,9 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                                 }
                             }
                         """)
+                        # Track the bframe itself too — same reason as the
+                        # ancestor tracking above.
+                        _pinned_elements.append(_bframe_el)
                         print(f"          🧭 CAPTCHA ancestor chain ({len(_chain_urls)} level(s)): {_chain_urls}")
                         return True
                     except Exception:
@@ -1941,6 +1956,28 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                 return False
             except Exception:
                 return False
+
+        def _clear_pinned_captcha_elements():
+            """
+            Strip the forced cssText styling _pin_captcha_box() applied, using the
+            exact element handles it recorded in _pinned_elements — not a URL-based
+            re-match. Safe to fully remove the style attribute (rather than
+            restoring specific properties) because _pin_captcha_box() only ever
+            assigns via cssText, which replaces the whole inline style each time;
+            there's no pre-existing style to preserve.
+
+            Called right before the post-solve Submit click: otherwise the pinned
+            bframe (z-index 2147483647, forced to a centered 480px x 92vh white
+            box) and its ancestor iframes stay fixed in place after Google hides
+            the challenge internally, and a coordinate click meant for Submit
+            lands on that leftover overlay instead.
+            """
+            for _el in _pinned_elements:
+                try:
+                    _el.evaluate("(e) => e.removeAttribute('style')")
+                except Exception:
+                    pass
+            _pinned_elements.clear()
 
         try:
             if _pin_captcha_box():
@@ -1996,11 +2033,17 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
 
                 if already_confirmed:
                     print(f"          ✅ Confirmation detected during CAPTCHA wait — application submitted!")
+                    _clear_pinned_captcha_elements()
                     _consecutive_captcha_failures = 0  # success — reset streak
                     return True
 
                 if not still_captcha:
                     print(f"          ✅ CAPTCHA solved! Auto-clicking Submit...")
+                    # Remove the forced pin styling BEFORE attempting the click —
+                    # otherwise the leftover overlay (still centered, still at
+                    # z-index 2147483647) intercepts the coordinate click meant
+                    # for the real Submit button underneath it.
+                    _clear_pinned_captcha_elements()
                     time.sleep(2)
                     # Fixed 2026-07-09: this used a raw JS b.click() — an
                     # UNTRUSTED synthetic event, the exact same kind already
