@@ -394,15 +394,42 @@ def _fill_required_fields(page) -> list:
                 if(opt){sel.value=opt.value;fire(sel);out.selects++;}
             }
 
-            // 2. Radio groups — select first option in any unset group
+            // 2. Radio groups — select first option in any unset group.
+            //    EXCEPT prior-employment questions ("Have you worked at
+            //    <company> before?", "Are you a current or former
+            //    employee?") — CONFIRMED live on Amgen: blindly picking the
+            //    first DOM option landed on "Yes" (wrong — Raghav has never
+            //    worked at any of these companies), which then revealed 3
+            //    unnecessary follow-up fields (Employee ID, Amgen Email,
+            //    office location) that became new blockers of their own.
+            //    For that specific question shape, pick "No" explicitly
+            //    instead of guessing from DOM order.
             const seen={};
+            const PRIOR_EMPLOYMENT_RE = /worked (at|for)|current or former employee|previously employed|former employee/i;
             for(const r of document.querySelectorAll('input[type=radio]')){
                 if(!r.offsetParent) continue;
                 const g=r.name||r.getAttribute('data-automation-id')||'';
                 if(!g||seen[g]) continue; seen[g]=true;
                 const grp=Array.from(document.querySelectorAll('input[type=radio]'))
                     .filter(x=>(x.name||x.getAttribute('data-automation-id'))===g&&x.offsetParent);
-                if(grp.length&&!grp.some(x=>x.checked)){grp[0].click();fire(grp[0]);out.radios++;}
+                if(!grp.length||grp.some(x=>x.checked)) continue;
+
+                // Look for the group's question text (fieldset legend or a
+                // heading a few levels up) to detect the prior-employment case.
+                let qText=''; let qp=grp[0].parentElement;
+                for(let i=0;i<8&&qp;i++,qp=qp.parentElement){
+                    const h=qp.querySelector('legend,[data-automation-id*="Label"],label');
+                    if(h&&(h.innerText||'').trim().length>10){qText=h.innerText;break;}
+                }
+                let pick=grp[0];
+                if(PRIOR_EMPLOYMENT_RE.test(qText)){
+                    const noOpt=grp.find(x=>{
+                        const lbl=document.querySelector('label[for="'+x.id+'"]');
+                        return lbl && /^no$/i.test((lbl.innerText||'').trim());
+                    });
+                    if(noOpt) pick=noOpt;
+                }
+                pick.click();fire(pick);out.radios++;
             }
 
             // 3. Required checkboxes — check them
@@ -411,15 +438,28 @@ def _fill_required_fields(page) -> list:
                 if((c.required||c.getAttribute('aria-required')==='true')&&!c.checked){c.click();fire(c);out.checks++;}
             }
 
-            // 4. Workday custom button-dropdowns with * label that have no value set
-            //    (these are <button> elements that open a listbox — not native <select>)
+            // 4. Workday custom button-dropdowns that have no value set and are
+            //    required (these are <button> elements that open a listbox —
+            //    not native <select>). Required is detected two ways: a *
+            //    in a nearby label (original signal), OR aria-required="true"
+            //    on the button itself — the same signal already trusted for
+            //    native inputs/checkboxes above. CONFIRMED 2026-07-11 live on
+            //    Amgen: "Phone Device Type" (data-automation-id=
+            //    "phone-device-type") has a visible red-asterisk label but
+            //    was NOT being filled — the label-proximity search wasn't
+            //    finding it within 6 parent levels on that portal's markup,
+            //    left the field empty and blocked "Save and Continue" with a
+            //    hard validation error. aria-required is a more reliable,
+            //    semantic signal that doesn't depend on guessing DOM depth.
             for(const btn of document.querySelectorAll('button[data-automation-id]')){
                 if(!btn.offsetParent) continue;
-                // Find parent label with *
-                let lbl=''; let p=btn.parentElement;
-                for(let i=0;i<6&&p;i++,p=p.parentElement){
-                    const h=p.querySelector('label,legend,[data-automation-id*="Label"]');
-                    if(h&&(h.innerText||'').includes('*')){lbl=h.innerText;break;}
+                let lbl = (btn.getAttribute('aria-required')==='true') ? '*' : '';
+                if(!lbl){
+                    let p=btn.parentElement;
+                    for(let i=0;i<6&&p;i++,p=p.parentElement){
+                        const h=p.querySelector('label,legend,[data-automation-id*="Label"]');
+                        if(h&&(h.innerText||'').includes('*')){lbl=h.innerText;break;}
+                    }
                 }
                 if(!lbl.includes('*')) continue;
                 // If button text looks like a placeholder (empty or "Select"), open + pick first option
@@ -2387,7 +2427,15 @@ def apply_to_workday_job(page, job: dict, resume_path: str, cover_letter_path: s
             # Country Phone Code — custom button+listbox widget
             _select_country_phone_code(page)
 
-            # "How Did You Hear About Us?" — common dropdown on many portals
+            # "How Did You Hear About Us?" — common dropdown on many portals.
+            # CONFIRMED 2026-07-11 live on Amgen: this stayed blank because
+            # none of Amgen's actual option text ("Company Website",
+            # "Employee Referral", etc.) matched the hardcoded preferred-
+            # keyword list — the field was required, so leaving it unset
+            # blocked "Save and Continue" outright. Now falls back to
+            # whichever option is FIRST and valid (not empty/"select") if
+            # none of the preferred keywords match, so it's never left
+            # blank — some valid answer beats a hard validation error.
             for hear_sel in [
                 'button[data-automation-id="hearAboutUs"]',
                 'button[data-automation-id="How Did You Hear About Us"]',
@@ -2400,19 +2448,45 @@ def apply_to_workday_job(page, job: dict, resume_path: str, cover_letter_path: s
                         cur = (btn.inner_text() or "").strip()
                         if not cur or "select" in cur.lower():
                             btn.click(); time.sleep(0.5)
-                            # Pick "LinkedIn" or "Indeed" or first option
+                            picked = False
                             for opt_txt in ["LinkedIn", "Indeed", "Job Board", "Online"]:
                                 try:
                                     opt = page.locator(f'[role=option]:has-text("{opt_txt}")').first
                                     if opt.count() and opt.is_visible(timeout=400):
                                         opt.click()
                                         print(f"          🎯 Heard about us → '{opt_txt}'")
+                                        picked = True
                                         break
+                                except Exception:
+                                    pass
+                            if not picked:
+                                try:
+                                    fallback_opt = page.locator('[role=option]').first
+                                    if fallback_opt.count() and fallback_opt.is_visible(timeout=400):
+                                        _txt = (fallback_opt.inner_text() or "").strip()
+                                        fallback_opt.click()
+                                        print(f"          🎯 Heard about us → '{_txt}' (fallback, no preferred match)")
                                 except Exception:
                                     pass
                         break
                 except Exception:
                     pass
+
+            # Phone Device Type — required on many portals (button-driven
+            # listbox, not a native <select>). CONFIRMED 2026-07-11 live on
+            # Amgen: this had no dedicated handler in the unknown-step path
+            # at all (only step_contact_information() sets it, and that
+            # function never ran here because step-detection didn't
+            # recognize this page) — left as "Select One" and blocked
+            # "Save and Continue" with a hard validation error.
+            try:
+                phone_btn = page.locator(WD["phone_type_btn"]).first
+                if phone_btn.count() and phone_btn.is_visible(timeout=400):
+                    cur = (phone_btn.inner_text() or "").strip()
+                    if not cur or "select" in cur.lower():
+                        _select_dropdown(page, WD["phone_type_btn"], "Mobile")
+            except Exception:
+                pass
 
             # State/Province dropdown if visible and empty
             for state_sel in [WD["state_btn"], WD["state_btn_alt"]]:
