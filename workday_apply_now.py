@@ -1484,6 +1484,62 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
         submitted = False
         _before_submit = _get_page_marker(page)
 
+        # ── Diagnostics: figure out WHY the click isn't registering, instead
+        # of just retrying blindly. Confirmed live 2026-07-12: ALL 4 companies
+        # tested (Amgen, Ryan Specialty, Vizient, NBA) failed identically with
+        # createacct_btn_failed even after v1.8.1's real-progress verification
+        # — meaning the click genuinely has zero effect, not just a timing
+        # issue. Captures whether something else is covering the button
+        # (overlay intercepting the click point), whether the button is
+        # actually disabled under the hood, and whether ANY network request
+        # fires when we click — this tells us if the handler runs at all vs.
+        # runs but the backend silently rejects it. Saved to a JSON file so
+        # this can be diagnosed from the file, no live screen-watching needed.
+        _submit_debug = {"company": company_key, "timestamp": datetime.now().isoformat()}
+
+        def _diagnose_button(locator) -> dict:
+            try:
+                return locator.evaluate("""
+                    (b) => {
+                        const r = b.getBoundingClientRect();
+                        const cx = r.left + r.width / 2;
+                        const cy = r.top + r.height / 2;
+                        const top = document.elementFromPoint(cx, cy);
+                        const cs = window.getComputedStyle(b);
+                        return {
+                            tag: b.tagName,
+                            type: b.getAttribute('type'),
+                            disabled: b.disabled,
+                            ariaDisabled: b.getAttribute('aria-disabled'),
+                            rect: {x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height)},
+                            pointerEvents: cs.pointerEvents,
+                            opacity: cs.opacity,
+                            visibility: cs.visibility,
+                            elementAtPoint: top ? (top.tagName + (top.id ? '#' + top.id : '') + (top.className ? '.' + String(top.className).replace(/ /g, '.') : '')) : null,
+                            coveredBySomethingElse: !!(top && top !== b && !b.contains(top)),
+                            formAction: b.form ? b.form.getAttribute('action') : null,
+                            outerHTMLSnippet: b.outerHTML.slice(0, 300),
+                        };
+                    }
+                """)
+            except Exception as e:
+                return {"error": str(e)}
+
+        if submit_btn:
+            _submit_debug["button_diagnosis"] = _diagnose_button(submit_btn)
+        else:
+            _submit_debug["button_diagnosis"] = {"note": "no submit_btn located by any selector"}
+
+        _captured_requests = []
+
+        def _on_request(req):
+            try:
+                if req.resource_type in ("xhr", "fetch"):
+                    _captured_requests.append(f"{req.method} {req.url[:180]}")
+            except Exception:
+                pass
+        page.on("request", _on_request)
+
         def _submit_progressed() -> bool:
             """Poll briefly for the page to actually change after a click
             attempt. CONFIRMED necessary live on Vizient and NBA 2026-07-12:
@@ -1560,7 +1616,23 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
             except Exception:
                 pass
 
+        try:
+            page.remove_listener("request", _on_request)
+        except Exception:
+            pass
+
         if not submitted:
+            _submit_debug["network_requests_seen"] = _captured_requests[-20:]
+            _submit_debug["before_marker"] = _before_submit
+            _submit_debug["after_marker"] = _get_page_marker(page)
+            try:
+                debug_dir = cfg.BASE_DIR / "data" / "crash_logs"
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                debug_file = debug_dir / f"submit_debug_{company_key}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                debug_file.write_text(json.dumps(_submit_debug, indent=2, default=str))
+                print(f"          🔬 Submit diagnostics saved: data/crash_logs/{debug_file.name}")
+            except Exception as _de:
+                print(f"          ⚠  Could not save submit diagnostics: {_de}")
             _failure_shot(page, f"createacct_btn_failed_{company_key}")
             print(f"          ❌ Could not click Create Account button — skipping")
             return False
