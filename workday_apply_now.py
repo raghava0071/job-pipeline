@@ -2105,7 +2105,14 @@ def _smart_fill_questions(page, profile_text: str, job_title: str, company: str,
     For application questions step and any unrecognized steps.
     Uses data-automation-id where possible, falls back to label-based filling.
     """
-    import anthropic, json as _json
+    # NOTE: anthropic is NOT imported here — it's already imported lazily,
+    # correctly, further down inside `if uncached:` (only reached once
+    # qa_answers.py/claude_answers.py/the SQLite cache leave fields
+    # unanswered). This unconditional top-of-function import was dead weight
+    # that made the lazy one downstream pointless: it crashed every call to
+    # this function, even fully cache-resolved ones, before ever reaching the
+    # code that actually needed anthropic.
+    import json as _json
 
     COVER_LABELS = {
         "cover letter", "cover note", "why are you interested",

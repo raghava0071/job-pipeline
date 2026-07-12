@@ -482,7 +482,15 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename="", 
         "message to hiring manager", "message to the hiring team",
         "anything else", "is there anything else",
     }
-    import anthropic, os, json as _json
+    # NOTE: anthropic is imported lazily below, only inside the `if uncached:`
+    # branch — not here. Most steps are fully answered by qa_answers.py /
+    # claude_answers.py / the SQLite cache with zero fields left uncached, so
+    # importing anthropic unconditionally at function entry meant a missing
+    # `anthropic` package crashed EVERY step, even ones that never needed AI
+    # at all. Confirmed live 2026-07-12: a form died on the very first address
+    # step ("No module named 'anthropic'") despite that step's fields being
+    # fully cache-resolvable — the import itself was the only thing that failed.
+    import os, json as _json
 
     # ── Step 1: Extract fields with unique CSS selectors ──────────────────────
     fields = page.evaluate(r"""
@@ -935,8 +943,6 @@ def smart_fill_step(page, profile_text, job_title, company, resume_filename="", 
                         _api_key = line.split("=",1)[1].strip()
             except: pass
 
-        _claude = anthropic.Anthropic(api_key=_api_key)
-
         fields_desc = "\n".join(
             f'{i+1}. label="{f["label"]}" type={f["type"]}'
             + (f' options={f["options"]}' if f.get("options") else '')
@@ -983,6 +989,8 @@ Rules:
 
         print(f"          🤖 Calling Claude API for {len(uncached)} field(s)...")
         try:
+            import anthropic  # lazy — only reached when qa/cache/rules left fields unanswered
+            _claude = anthropic.Anthropic(api_key=_api_key)
             resp = _claude.messages.create(
                 model=os.environ.get("CLAUDE_MODEL","claude-haiku-4-5-20251001"),
                 max_tokens=4096,
@@ -1029,6 +1037,9 @@ Rules:
                             print(f"             · Claude → '{orig_lbl}': (blank)")
 
             print(f"          🤖 Claude answered {len([f for f in uncached if f.get('label','') in answers])}/{len(uncached)} uncached fields")
+        except ImportError:
+            print(f"          ⚠  anthropic not installed — {len(uncached)} field(s) need AI, none available")
+            print(f"          ↩  Applying fallback answers for uncached fields...")
         except Exception as e:
             print(f"          ⚠  Claude API error: {e}")
             print(f"          ↩  Applying fallback answers for uncached fields...")

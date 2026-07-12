@@ -733,11 +733,15 @@ def fill_and_submit_form(page, resume_path, job_title="", company=""):
     No dumb keyword matching — real intelligence for every field.
     """
     import raghav_profile as rp
-    import anthropic, os, json as _json
+    # NOTE: anthropic is imported lazily further down, only once the cache-first
+    # lookup below finds fields it can't answer (see "100% cache hit — no Claude
+    # call needed"). Importing it unconditionally here meant a missing
+    # `anthropic` package crashed every step, even fully cache-resolved ones.
+    import os, json as _json
 
     p = rp.PROFILE
 
-    # ── Claude client ──────────────────────────────────────────────────────────
+    # ── Claude API key (client itself is built lazily, only if actually needed) ──
     _api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not _api_key:
         try:
@@ -747,7 +751,23 @@ def fill_and_submit_form(page, resume_path, job_title="", company=""):
                     _api_key = line.split("=", 1)[1].strip()
         except:
             pass
-    _claude = anthropic.Anthropic(api_key=_api_key)
+
+    # Lazily import + build the Claude client, memoized so it's only touched
+    # once even though both claude_answer_all_fields() and
+    # claude_pre_submit_review() (defined below) need it — each is its own
+    # nested function, so a plain local `_claude =` in only one of them isn't
+    # visible to the other via closure. Returns None if anthropic isn't
+    # installed instead of raising, so both callers can degrade gracefully
+    # (safe-default answers / skip-review-and-proceed) instead of crashing.
+    _claude_holder = {}
+    def _get_claude():
+        if "client" not in _claude_holder:
+            try:
+                import anthropic
+                _claude_holder["client"] = anthropic.Anthropic(api_key=_api_key)
+            except ImportError:
+                _claude_holder["client"] = None
+        return _claude_holder["client"]
 
     # ── Full profile context sent to Claude for every form step ───────────────
     skill_years_str = "\n".join(
@@ -977,6 +997,9 @@ Rules:
             prompt = prompt.replace(fields_desc, fields_desc2)  # swap in uncached only
 
         try:
+            _claude = _get_claude()
+            if _claude is None:
+                raise ImportError("anthropic not installed")
             resp = _claude.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=4096,   # essay questions can need 3000+ tokens for 20+ fields
@@ -1009,6 +1032,8 @@ Rules:
                         _claude_ans.save(lbl, str(new_answers[fid]))
             merged = {**cached_answers, **new_answers}
             return merged
+        except ImportError:
+            print(f"        ⚠ anthropic not installed — {len(uncached_fields)} field(s) need AI, none available")
         except Exception as e:
             print(f"        ⚠ Claude field-fill error: {e}")
             # Profile-based fallback — never leave fields blank
@@ -1344,6 +1369,12 @@ WORK AUTH: [value shown or "Not shown"]
 EXPERIENCE: [key values shown]
 ISSUES: [list ONLY real blocking problems — or "None"]
 VERDICT: [SAFE TO SUBMIT / DO NOT SUBMIT — reason]"""
+
+            _claude = _get_claude()
+            if _claude is None:
+                print(f"        │  ⚠ anthropic not installed — skipping AI review, proceeding with submit")
+                print("        └─────────────────────────────────────────────────────")
+                return True
 
             resp = _claude.messages.create(
                 model="claude-haiku-4-5-20251001",
