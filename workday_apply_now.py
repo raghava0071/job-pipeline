@@ -376,6 +376,30 @@ def _scroll_page(page):
     """)
     time.sleep(0.8)
 
+def _read_workday_errors(page) -> list:
+    """Scrape Workday's own validation-error panel/messages after a failed
+    Next / Save-and-Continue click. Reuses the exact selector combo already
+    proven elsewhere in this file for account-creation errors — Workday
+    marks both auth errors and per-field validation errors ('Errors Found')
+    the same way, so the same query works for any step, not just sign-up."""
+    try:
+        errors = page.evaluate("""
+            () => Array.from(document.querySelectorAll(
+                '[data-automation-id="errorMessage"], [class*="error-message"], ' +
+                '[class*="validationError"], .wd-error, [role="alert"]'
+            )).filter(e => e.offsetParent && e.innerText.trim())
+              .map(e => e.innerText.trim())
+              .filter(t => t.length > 2)
+        """) or []
+    except Exception:
+        return []
+    seen, out = set(), []
+    for e in errors:
+        if e not in seen:
+            seen.add(e)
+            out.append(e)
+    return out
+
 def _fill_required_fields(page) -> list:
     """BUG 2: scroll to trigger lazy fields, fill empty selects/radios/required
     checkboxes, then return the list of required fields still empty."""
@@ -631,9 +655,23 @@ def _select_country_phone_code(page) -> bool:
     except Exception:
         return bool(chosen)
 
-def _advance_page(page, label="page") -> bool:
+def _advance_page(page, label="page", job_title="", company="", jd_text="") -> bool:
     """Fill required fields (BUG 2), click Next, and verify the page actually
-    changed (BUG 3). Screenshots before and after the transition."""
+    changed (BUG 3). Screenshots before and after the transition.
+
+    On a stuck retry, this now reads Workday's own validation-error panel
+    and runs the Claude-driven custom-dropdown resolver so the second
+    attempt targets what Workday ACTUALLY flagged, instead of blindly
+    re-running the identical fill pass that just failed (which is what
+    looked, on a live run, like the pipeline "entering the same details
+    again and again"). CONFIRMED live on Amgen: Workday's "Errors Found"
+    panel named the exact blocking fields — How Did You Hear About Us,
+    State, Phone Device Type — all custom button+listbox widgets the
+    generic required-field pass can't always resolve on its own.
+    job_title/company/jd_text are optional — steps that never have
+    ambiguous custom dropdowns (contact info, voluntary disclosures, etc.)
+    can omit them; the resolver just runs with less context and still no-ops
+    quickly if there's nothing for it to do."""
     before = _get_page_marker(page)
     _transition_shot(page, f"before_{label}")
 
@@ -653,8 +691,12 @@ def _advance_page(page, label="page") -> bool:
             _transition_shot(page, f"nextOK_{label}")
             return True
 
-    # Did not progress — try once more (BUG 3)
-    print(f"          ⛔ Stuck on same page ('{label}') — refilling required fields")
+    # Did not progress — read Workday's own errors and target-fix them
+    errors = _read_workday_errors(page)
+    if errors:
+        print(f"          🛑 Workday errors: {errors}")
+    print(f"          ⛔ Stuck on same page ('{label}') — targeted retry")
+    _smart_fill_custom_dropdowns(page, job_title, company, jd_text)
     empties2 = _fill_required_fields(page)
     if empties2:
         print(f"          ❌ Still-empty required field(s) blocking Next: {empties2}")
@@ -668,7 +710,9 @@ def _advance_page(page, label="page") -> bool:
             _transition_shot(page, f"nextOK_{label}")
             return True
 
-    print(f"          ❌ Did not progress past '{label}'")
+    errors2 = _read_workday_errors(page)
+    print(f"          ❌ Did not progress past '{label}'"
+          + (f" — still blocked by: {errors2}" if errors2 else ""))
     _transition_shot(page, f"stuck_{label}")
     return False
 
@@ -1655,7 +1699,8 @@ def step_application_questions(page, profile_text: str, job_title: str,
     filled = _smart_fill_questions(page, profile_text, job_title, company,
                                    jd_text, cover_letter_text)
     print(f"          ✅ Application Questions: {filled} field(s) filled")
-    _advance_page(page, "Application Questions")
+    _smart_fill_custom_dropdowns(page, job_title, company, jd_text)
+    _advance_page(page, "Application Questions", job_title, company, jd_text)
 
 def step_voluntary_disclosures(page):
     """Fill voluntary disclosure step: gender, ethnicity, veteran."""
@@ -1758,6 +1803,34 @@ def step_review_and_submit(page, dry_run=False) -> bool:
 
 # ── Generic question filler (Claude + cache) ──────────────────────────────────
 
+def _build_profile_context() -> str:
+    """Shared candidate-profile block injected into every Claude prompt that
+    fills a Workday field or dropdown. Pulled out into one place so
+    _smart_fill_questions and _smart_fill_custom_dropdowns can't drift out
+    of sync with each other."""
+    from raghav_profile import PROFILE, EDUCATION, COMMON_QA as _CQA, SKILL_YEARS as _SY
+    return f"""
+CANDIDATE PROFILE:
+Name:          {PROFILE.get('name')}
+Email:         {PROFILE.get('email')}
+Phone:         {PROFILE.get('phone')}
+Location:      {PROFILE.get('location')}
+Address:       {_CQA.get('street_address')}, {_CQA.get('city')}, {_CQA.get('state')} {_CQA.get('zip')}
+Work Auth:     {PROFILE.get('work_auth')}
+Visa:          F-1 STEM OPT — no sponsorship needed
+LinkedIn:      https://{PROFILE.get('linkedin')}
+GitHub:        https://{PROFILE.get('github')}
+
+CURRENT JOB:   {_CQA.get('current_employer')} — {_CQA.get('current_title')} (April 2026–Present)
+EDUCATION:     {EDUCATION[0]['degree']} — {EDUCATION[0]['school']} (May 2025) GPA 3.8
+SALARY WANT:   ${_CQA.get('salary_expected')} / year  |  ${_CQA.get('hourly_rate')} / hour
+NOTICE:        {_CQA.get('notice_period')}
+RELOCATE:      No
+REMOTE:        Yes
+
+SKILLS & YEARS: {json.dumps(_SY)}
+"""
+
 def _smart_fill_questions(page, profile_text: str, job_title: str, company: str,
                            jd_text: str, cover_letter_text: str) -> int:
     """
@@ -1815,18 +1888,36 @@ def _smart_fill_questions(page, profile_text: str, job_title: str, company: str,
             const results = [];
             const seen = {};
 
-            // Text / select / textarea
+            // Text / select / textarea (radio/checkbox handled separately below —
+            // they used to ALSO get picked up here since the selector didn't
+            // exclude them, producing a bogus single-input entry with no
+            // group name that shadowed the correct group entry via the
+            // `seen` dedup and would have been filled with a no-op
+            // `el.value = ans` instead of an actual click).
             for (const inp of document.querySelectorAll(
-                'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=file]),' +
+                'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=file])' +
+                ':not([type=radio]):not([type=checkbox]),' +
                 'select, textarea'
             )) {
                 if (!inp.offsetParent) continue;
-                const lbl = getLabel(inp);
-                if (!lbl || seen[lbl.toLowerCase()]) continue;
-                seen[lbl.toLowerCase()] = true;
                 const type = inp.tagName === 'SELECT' ? 'select'
                     : inp.tagName === 'TEXTAREA' ? 'textarea'
                     : (inp.getAttribute('type') || 'text').toLowerCase();
+
+                // Skip fields that already have a real value — otherwise every
+                // retry loop re-types/re-selects the SAME answer into a field
+                // that's already correct, which is what looked, on a live
+                // run, like the pipeline "entering details again and again".
+                if (type === 'select') {
+                    const opt = inp.options[inp.selectedIndex];
+                    if (inp.value && opt && opt.text.trim() && !/^(select|choose|--)/i.test(opt.text.trim())) continue;
+                } else if (inp.value && inp.value.trim()) {
+                    continue;
+                }
+
+                const lbl = getLabel(inp);
+                if (!lbl || seen[lbl.toLowerCase()]) continue;
+                seen[lbl.toLowerCase()] = true;
                 const opts = type === 'select'
                     ? Array.from(inp.options).map(o => o.text.trim()).filter(o => o && o !== '--')
                     : [];
@@ -1834,12 +1925,16 @@ def _smart_fill_questions(page, profile_text: str, job_title: str, company: str,
                     required: inp.required, sel: uniqueSel(inp) });
             }
 
-            // Radio/checkbox groups
+            // Radio/checkbox groups — skip any group that already has a
+            // selection, same "don't touch what's already correct" rule.
             const groups = {};
+            const skippedGroups = new Set();
             for (const inp of document.querySelectorAll('input[type=radio],input[type=checkbox]')) {
                 if (!inp.offsetParent) continue;
                 const gname = inp.name || inp.getAttribute('data-automation-id') || '';
-                if (!gname || groups[gname]) continue;
+                if (!gname || groups[gname] || skippedGroups.has(gname)) continue;
+                const already = Array.from(document.querySelectorAll('input[name="'+gname+'"]')).some(r => r.checked);
+                if (already) { skippedGroups.add(gname); continue; }
                 const fs = inp.closest('fieldset,[role="group"],[data-automation-id*="formField"]');
                 let lbl = gname;
                 if (fs) {
@@ -1925,29 +2020,8 @@ def _smart_fill_questions(page, profile_text: str, job_title: str, company: str,
             for i, f in enumerate(uncached)
         )
 
-        # Build full profile context for Claude
-        from raghav_profile import PROFILE, EDUCATION, EXPERIENCE, COMMON_QA as _CQA, SKILL_YEARS as _SY
-        profile_context = f"""
-CANDIDATE PROFILE:
-Name:          {PROFILE.get('name')}
-Email:         {PROFILE.get('email')}
-Phone:         {PROFILE.get('phone')}
-Location:      {PROFILE.get('location')}
-Address:       {_CQA.get('street_address')}, {_CQA.get('city')}, {_CQA.get('state')} {_CQA.get('zip')}
-Work Auth:     {PROFILE.get('work_auth')}
-Visa:          F-1 STEM OPT — no sponsorship needed
-LinkedIn:      https://{PROFILE.get('linkedin')}
-GitHub:        https://{PROFILE.get('github')}
-
-CURRENT JOB:   {_CQA.get('current_employer')} — {_CQA.get('current_title')} (April 2026–Present)
-EDUCATION:     {EDUCATION[0]['degree']} — {EDUCATION[0]['school']} (May 2025) GPA 3.8
-SALARY WANT:   ${_CQA.get('salary_expected')} / year  |  ${_CQA.get('hourly_rate')} / hour
-NOTICE:        {_CQA.get('notice_period')}
-RELOCATE:      No
-REMOTE:        Yes
-
-SKILLS & YEARS: {_json.dumps(_SY)}
-
+        # Build full profile context for Claude (shared with the custom-dropdown resolver)
+        profile_context = _build_profile_context() + f"""
 EXTRA CONTEXT (resume snippet):
 {profile_text[:600]}
 """
@@ -2145,6 +2219,198 @@ RULES (follow exactly):
                 pass
 
     return filled or 0
+
+def _smart_fill_custom_dropdowns(page, job_title: str = "", company: str = "", jd_text: str = "") -> int:
+    """
+    Handles Workday's custom button+listbox dropdowns — things like 'How Did
+    You Hear About Us?' or any other portal-specific combo box that ISN'T a
+    native <select> (so _smart_fill_questions' `input,select,textarea` query
+    never sees it). These were previously either left blank or filled by
+    blindly clicking whatever option Workday listed first — CONFIRMED live
+    on Amgen: 'How Did You Hear About Us?' stayed on "Select One" because
+    none of a hardcoded keyword list ("LinkedIn"/"Indeed"/...) matched
+    Amgen's real options, which blocked "Save and Continue" outright.
+
+    Uses the SAME layered answer pipeline as _smart_fill_questions (curated
+    QA → saved Claude answers → cache → a live Claude call that reads the
+    actual label AND the actual scraped options → first-option fallback so
+    a required field is never left blank), instead of guessing blind.
+
+    Skips buttons already owned by dedicated deterministic handlers
+    (country phone code, state/province, phone device type) — those have a
+    definite correct answer from the candidate's own profile and are filled
+    elsewhere; by the time this runs they're no longer empty/placeholder, so
+    they're naturally excluded without needing hardcoded selector overlap
+    checks.
+    """
+    candidates = _safe_eval(page, r"""
+        () => {
+            const out = [];
+            for (const btn of document.querySelectorAll('button[data-automation-id]')) {
+                if (!btn.offsetParent) continue;
+                const aid = btn.getAttribute('data-automation-id') || '';
+                if (!aid) continue;
+                let required = btn.getAttribute('aria-required') === 'true';
+                let labelText = '';
+                let p = btn.parentElement;
+                for (let i = 0; i < 6 && p; i++, p = p.parentElement) {
+                    const h = p.querySelector('label,legend,[data-automation-id*="Label"]');
+                    if (h && (h.innerText||'').trim().length > 1) {
+                        labelText = h.innerText.trim().split('\n')[0];
+                        if ((h.innerText||'').includes('*')) required = true;
+                        break;
+                    }
+                }
+                if (!required || !labelText) continue;
+                const cur = (btn.innerText||'').trim();
+                if (cur && !/^(select|choose|--|please)/i.test(cur)) continue; // already has a real value
+                out.push({aid, label: labelText.replace('*','').trim()});
+            }
+            return out;
+        }
+    """, []) or []
+
+    if not candidates:
+        return 0
+
+    # Scrape each dropdown's real option text (must open it to see the listbox)
+    for c in candidates:
+        btn_sel = f'button[data-automation-id="{c["aid"]}"]'
+        try:
+            btn = page.locator(btn_sel).first
+            if not (btn.count() and btn.is_visible(timeout=500)):
+                c["options"] = []
+                continue
+            btn.click()
+            time.sleep(0.5)
+            c["options"] = _safe_eval(page, r"""
+                () => Array.from(document.querySelectorAll('[role=option],[data-automation-id="promptOption"]'))
+                    .filter(o => o.offsetParent)
+                    .map(o => (o.innerText||'').trim())
+                    .filter(Boolean)
+                    .slice(0, 30)
+            """, []) or []
+            page.keyboard.press("Escape")
+            time.sleep(0.2)
+        except Exception:
+            c["options"] = []
+
+    candidates = [c for c in candidates if c.get("options")]
+    if not candidates:
+        return 0
+
+    print(f"          🔽 {len(candidates)} custom dropdown(s) need answers: "
+          f"{[c['label'] for c in candidates]}")
+
+    answers = {}
+    uncached = []
+    for c in candidates:
+        lbl = c["label"]
+        val = None
+        if _qa and lbl:
+            val = _qa.get_answer(lbl)
+        if val is None and _claude_ans and lbl:
+            val = _claude_ans.get(lbl)
+        if val is None and lbl:
+            val = _cache.get(lbl)
+        if val is not None:
+            answers[lbl] = str(val)
+            print(f"             ✔ cached '{lbl}' → '{str(val)[:60]}'")
+        else:
+            uncached.append(c)
+
+    if uncached:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=cfg.get_api_key())
+            fields_desc = "\n".join(
+                f'{i+1}. label="{c["label"]}" options={c["options"]}'
+                for i, c in enumerate(uncached)
+            )
+            prompt = f"""You are filling a Workday job application dropdown for:
+Job:     {job_title or "(unknown)"}
+Company: {company or "(unknown)"}
+
+{_build_profile_context()}
+
+DROPDOWN FIELDS TO ANSWER — pick exactly one option per field:
+{fields_desc}
+
+Return ONLY a JSON object: {{"field label": "exact option text"}}
+Copy the option text EXACTLY as shown in the options list for that field.
+If genuinely unsure, pick the safest/most neutral option (e.g. "I don't
+wish to answer" for demographic questions, or a generic sourcing channel
+like "Company Website" / "Other" for how-did-you-hear-about-us style
+questions)."""
+            resp = client.messages.create(
+                model=cfg.CLAUDE_MODEL_FAST, max_tokens=500,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            raw = resp.content[0].text.strip()
+            m = re.search(r'\{.*\}', raw, re.DOTALL)
+            if m:
+                claude_ans_map = json.loads(m.group(0))
+                def _n(s): return re.sub(r'[\s\*\?\:]+$', '', s).strip().lower()
+                for c in uncached:
+                    orig = c["label"]
+                    matched = claude_ans_map.get(orig)
+                    if matched is None:
+                        for ck, cv in claude_ans_map.items():
+                            if _n(ck) == _n(orig) or _n(orig) in _n(ck) or _n(ck) in _n(orig):
+                                matched = cv; break
+                    if matched is not None and str(matched).strip():
+                        answers[orig] = str(matched)
+                        if _claude_ans:
+                            _claude_ans.save(orig, str(matched))
+                        _cache.save(orig, str(matched))
+                        print(f"             ✔ Claude → '{orig}': '{str(matched)[:60]}'")
+        except Exception as e:
+            print(f"          ⚠  Claude API error (custom dropdowns): {e}")
+
+    # Anything Claude still couldn't answer — pick the first real option
+    # rather than leave it blank. A valid answer beats a hard validation error.
+    for c in uncached:
+        if not answers.get(c["label"]) and c.get("options"):
+            answers[c["label"]] = c["options"][0]
+            print(f"             ⚠ fallback '{c['label']}' → '{c['options'][0]}' (no cache/Claude match)")
+
+    # Reopen each dropdown and click the resolved option
+    filled = 0
+    for c in candidates:
+        ans = answers.get(c["label"])
+        if not ans:
+            continue
+        btn_sel = f'button[data-automation-id="{c["aid"]}"]'
+        try:
+            btn = page.locator(btn_sel).first
+            if not (btn.count() and btn.is_visible(timeout=500)):
+                continue
+            btn.click()
+            time.sleep(0.4)
+            clicked = _safe_eval(page, r"""
+                (ans) => {
+                    const ansL = ans.toLowerCase().trim();
+                    const opts = Array.from(document.querySelectorAll('[role=option],[data-automation-id="promptOption"]'))
+                        .filter(o => o.offsetParent);
+                    let match = opts.find(o => (o.innerText||'').trim().toLowerCase() === ansL);
+                    if (!match) match = opts.find(o => {
+                        const t = (o.innerText||'').trim().toLowerCase();
+                        return t.includes(ansL) || ansL.includes(t);
+                    });
+                    if (match) { match.click(); return true; }
+                    return false;
+                }
+            """, ans)
+            if clicked:
+                filled += 1
+                print(f"          🎯 '{c['label']}' → '{ans}'")
+            else:
+                page.keyboard.press("Escape")
+        except Exception:
+            pass
+        time.sleep(0.2)
+
+    return filled
 
 # ── Job extraction ────────────────────────────────────────────────────────────
 
@@ -2427,51 +2693,6 @@ def apply_to_workday_job(page, job: dict, resume_path: str, cover_letter_path: s
             # Country Phone Code — custom button+listbox widget
             _select_country_phone_code(page)
 
-            # "How Did You Hear About Us?" — common dropdown on many portals.
-            # CONFIRMED 2026-07-11 live on Amgen: this stayed blank because
-            # none of Amgen's actual option text ("Company Website",
-            # "Employee Referral", etc.) matched the hardcoded preferred-
-            # keyword list — the field was required, so leaving it unset
-            # blocked "Save and Continue" outright. Now falls back to
-            # whichever option is FIRST and valid (not empty/"select") if
-            # none of the preferred keywords match, so it's never left
-            # blank — some valid answer beats a hard validation error.
-            for hear_sel in [
-                'button[data-automation-id="hearAboutUs"]',
-                'button[data-automation-id="How Did You Hear About Us"]',
-                '[data-automation-id*="hearAbout"] button',
-                '[data-automation-id*="HearAbout"] button',
-            ]:
-                try:
-                    btn = page.locator(hear_sel).first
-                    if btn.count() and btn.is_visible(timeout=500):
-                        cur = (btn.inner_text() or "").strip()
-                        if not cur or "select" in cur.lower():
-                            btn.click(); time.sleep(0.5)
-                            picked = False
-                            for opt_txt in ["LinkedIn", "Indeed", "Job Board", "Online"]:
-                                try:
-                                    opt = page.locator(f'[role=option]:has-text("{opt_txt}")').first
-                                    if opt.count() and opt.is_visible(timeout=400):
-                                        opt.click()
-                                        print(f"          🎯 Heard about us → '{opt_txt}'")
-                                        picked = True
-                                        break
-                                except Exception:
-                                    pass
-                            if not picked:
-                                try:
-                                    fallback_opt = page.locator('[role=option]').first
-                                    if fallback_opt.count() and fallback_opt.is_visible(timeout=400):
-                                        _txt = (fallback_opt.inner_text() or "").strip()
-                                        fallback_opt.click()
-                                        print(f"          🎯 Heard about us → '{_txt}' (fallback, no preferred match)")
-                                except Exception:
-                                    pass
-                        break
-                except Exception:
-                    pass
-
             # Phone Device Type — required on many portals (button-driven
             # listbox, not a native <select>). CONFIRMED 2026-07-11 live on
             # Amgen: this had no dedicated handler in the unknown-step path
@@ -2500,8 +2721,15 @@ def apply_to_workday_job(page, job: dict, resume_path: str, cover_letter_path: s
                 except Exception:
                     pass
 
+            # Any remaining custom button+listbox dropdown (e.g. "How Did You
+            # Hear About Us?") that isn't one of the deterministic ones above —
+            # resolve it with Claude instead of guessing. Replaces the old
+            # hardcoded-keyword/first-option fallback that left Amgen's
+            # "How Did You Hear About Us?" blank.
+            _smart_fill_custom_dropdowns(page, title, company, jd_text)
+
             time.sleep(0.5)
-            _advance_page(page, f"unknown-step-{step}")
+            _advance_page(page, f"unknown-step-{step}", title, company, jd_text)
 
         time.sleep(2)
         if _is_confirmed(page):
