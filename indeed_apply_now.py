@@ -2000,6 +2000,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
 
         # ── Wait loop — up to 10 minutes ─────────────────────────────────────
         CAPTCHA_TIMEOUT = 600
+        _halfway_reminder_sent = False
         for i in range(CAPTCHA_TIMEOUT):
             time.sleep(1)
             try:
@@ -2119,6 +2120,30 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                 mins = remaining // 60
                 secs = remaining % 60
                 print(f"          ⏳ Still waiting for CAPTCHA... ({mins}m {secs}s left) — solve in Mac browser")
+
+            # One reminder email at the halfway mark — the initial alert can get
+            # buried or missed if you're away from your Mac, and a 10-minute
+            # window with zero follow-up means the job silently times out with
+            # no second chance to notice. Fires exactly once (guarded by the
+            # flag, not by a modulo check), matching the single fire-on-
+            # detection alert above rather than the risk of the old plain
+            # visibility poll re-alerting on every tick.
+            if not _halfway_reminder_sent and i >= CAPTCHA_TIMEOUT // 2:
+                _halfway_reminder_sent = True
+                _remaining = CAPTCHA_TIMEOUT - i - 1
+                try:
+                    notifier.send_alert(
+                        subject=f"⏳ Still waiting — CAPTCHA for {title} @ {company}",
+                        body=(
+                            f"Halfway through the 10-minute window and this CAPTCHA is still "
+                            f"unsolved ({_remaining // 60}m {_remaining % 60}s left).\n\n"
+                            f"Job: {title} @ {company}\n"
+                            f"Go to your Mac browser and solve it there — after this window "
+                            f"the pipeline will skip this job and move on."
+                        ),
+                    )
+                except Exception as e:
+                    print(f"          ⚠  Could not send halfway reminder email: {e}")
 
         # ── Timeout path ──────────────────────────────────────────────────────
         print(f"          ❌ CAPTCHA not solved in 10 minutes — skipping this job")

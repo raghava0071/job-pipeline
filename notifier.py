@@ -22,6 +22,8 @@
 
 import smtplib
 import os
+import time
+import threading
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -44,6 +46,37 @@ _load_env()
 NOTIFY_EMAIL       = os.environ.get("NOTIFY_EMAIL", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 ENABLED = bool(NOTIFY_EMAIL and GMAIL_APP_PASSWORD)
+
+
+def _send_mime_async(msg, attempts: int = 3, retry_delay: int = 5, log_prefix: str = "📧") -> None:
+    """
+    Send a prebuilt MIME message in a background thread with a short retry.
+
+    Used for time-sensitive alerts (CAPTCHA notice, halfway reminder, timeout
+    notice) that fire from inside a synchronous poll loop — a slow or flaky
+    SMTP handshake (Gmail can take several seconds, longer if it's briefly
+    unreachable) has no business stalling that loop. Fire-and-forget: callers
+    that need to know the outcome only get it via the printed log line once
+    the thread finishes, not via a return value — none of this pipeline's
+    existing send_alert()/send_captcha_alert() call sites check the return
+    value for anything other than "did the call raise," so this doesn't
+    change behavior for them.
+    """
+    def _worker():
+        for attempt in range(1, attempts + 1):
+            try:
+                with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+                    server.login(NOTIFY_EMAIL, GMAIL_APP_PASSWORD)
+                    server.sendmail(NOTIFY_EMAIL, NOTIFY_EMAIL, msg.as_string())
+                print(f"          {log_prefix} Sent → {NOTIFY_EMAIL}: {msg['Subject']}")
+                return
+            except Exception as e:
+                if attempt < attempts:
+                    time.sleep(retry_delay)
+                else:
+                    print(f"          {log_prefix} ❌ Failed after {attempts} attempt(s): {e}")
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def _attach_file(msg: MIMEMultipart, file_path: str, label: str = "") -> bool:
@@ -353,11 +386,7 @@ def send_captcha_alert(title: str, company: str, job_url: str = "") -> bool:
         msg["Subject"] = subject_line
         msg.attach(MIMEText(html, "html"))
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(NOTIFY_EMAIL, GMAIL_APP_PASSWORD)
-            server.sendmail(NOTIFY_EMAIL, NOTIFY_EMAIL, msg.as_string())
-
-        print(f"          📧 CAPTCHA alert sent → {NOTIFY_EMAIL} (with job link ✅)")
+        _send_mime_async(msg, log_prefix="📧 CAPTCHA alert")
         return True
     except Exception as e:
         print(f"          📧 CAPTCHA alert failed: {e}")
@@ -464,11 +493,7 @@ def send_alert(subject: str, body: str) -> bool:
 
         msg.attach(MIMEText(html, "html"))
 
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(NOTIFY_EMAIL, GMAIL_APP_PASSWORD)
-            server.sendmail(NOTIFY_EMAIL, NOTIFY_EMAIL, msg.as_string())
-
-        print(f"          📧 Alert sent → {NOTIFY_EMAIL}: {subject}")
+        _send_mime_async(msg, log_prefix="📧 Alert")
         return True
     except Exception as e:
         print(f"          📧 Alert email failed: {e}")
