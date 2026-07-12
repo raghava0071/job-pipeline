@@ -411,6 +411,53 @@ def _transition_shot(page, tag):
     except Exception:
         pass
 
+def _wait_for_dom_stable(page, quiet_ms: int = 400, timeout_ms: int = 4000) -> int:
+    """Wait until the page stops mutating (no DOM changes for `quiet_ms`),
+    instead of guessing a fixed sleep. Capped at `timeout_ms` total so a page
+    with constant background activity (spinners, polling widgets) can never
+    hang the run.
+
+    Adopted after reading a real, actively-maintained Workday-specific
+    autofill extension (berellevy/job_app_filler) whose README explains
+    exactly why this matters: Workday is a React app that renders each
+    step's container asynchronously, so scanning right after a fixed delay
+    can run BEFORE that step's data-automation-id container has actually
+    attached to the DOM — misclassifying a real step (e.g. contact info) as
+    'unknown' purely because the scan was a beat too early. A
+    MutationObserver-based wait catches the moment rendering actually
+    settles instead of hoping a hardcoded delay was long enough.
+
+    Returns the number of milliseconds actually waited (for logging/debugging).
+    """
+    try:
+        return _safe_eval(page, f"""
+            async () => {{
+                return await new Promise((resolve) => {{
+                    let lastMutation = Date.now();
+                    let observer;
+                    try {{
+                        observer = new MutationObserver(() => {{ lastMutation = Date.now(); }});
+                        observer.observe(document.body, {{childList: true, subtree: true, attributes: true}});
+                    }} catch (e) {{ resolve(0); return; }}
+                    const start = Date.now();
+                    const QUIET_MS = {quiet_ms};
+                    const TIMEOUT_MS = {timeout_ms};
+                    const check = () => {{
+                        const now = Date.now();
+                        if (now - lastMutation >= QUIET_MS || now - start >= TIMEOUT_MS) {{
+                            observer.disconnect();
+                            resolve(now - start);
+                            return;
+                        }}
+                        setTimeout(check, 100);
+                    }};
+                    check();
+                }});
+            }}
+        """, 0) or 0
+    except Exception:
+        return 0
+
 def _scroll_page(page):
     """Scroll slowly top→bottom→top to trigger lazy-loaded fields."""
     _safe_eval(page, """
@@ -2747,8 +2794,15 @@ def apply_to_workday_job(page, job: dict, resume_path: str, cover_letter_path: s
             submitted = True
             break
 
-        # Wait for page to settle after navigation/click
-        time.sleep(2)
+        # Wait for the page to actually settle after navigation/click — a
+        # DOM-mutation-aware wait catches slow-rendering steps (like the one
+        # that misclassified Amgen's contact-info-equivalent page as
+        # "unknown") instead of hoping a fixed 2s delay was enough. Keep a
+        # small minimum sleep too since _wait_for_dom_stable can return
+        # almost immediately on a page that's already quiet.
+        waited_ms = _wait_for_dom_stable(page)
+        if waited_ms < 500:
+            time.sleep(0.5)
         body = _safe_eval(page, "() => document.body.innerText.toLowerCase()", "") or ""
 
         # Detect infinite loop (same page body repeated 3x = stuck)
