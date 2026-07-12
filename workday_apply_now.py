@@ -3090,13 +3090,93 @@ def main():
     seeded = sum(1 for lbl, val in SEED.items() if _cache.get(lbl) is None and not _cache.save(lbl, val) is False)
     if seeded: print(f"  🗄  Seeded {seeded} Workday answers into cache")
 
+    # ── Clear stale Chromium SingletonLock (left over if a prior run didn't
+    # exit cleanly) ─────────────────────────────────────────────────────────
+    # Ported from indeed_apply_now.py, which hit the IDENTICAL error
+    # signature on this machine: `TargetClosedError: ... Target page,
+    # context or browser has been closed` right after launch, caused by a
+    # leftover lock from an earlier session's browser that never closed.
+    # IMPORTANT: only delete a lock if its owning process is actually dead —
+    # deleting a live process's lock and launching a second Chrome on the
+    # same profile doesn't recover anything, it just crashes the same way
+    # (Chrome's own instance check rejects the new one).
+    def _lock_owner_pid(lock_path):
+        try:
+            target = os.readlink(str(lock_path))
+        except OSError:
+            try:
+                target = lock_path.read_text()
+            except Exception:
+                return None
+        _m = re.search(r'-(\d+)\s*$', target.strip())
+        return int(_m.group(1)) if _m else None
+
+    def _pid_alive(pid):
+        if not pid:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except Exception:
+            return False
+
+    _wd_session_busy = False
+    for _lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        _lock_path = SESSION_DIR / _lock_name
+        if _lock_path.exists() or _lock_path.is_symlink():
+            _owner_pid = _lock_owner_pid(_lock_path)
+            if _owner_pid and _pid_alive(_owner_pid):
+                print(f"  🚫 {_lock_name} is held by a still-running process (PID {_owner_pid}) "
+                      f"— another Workday session already has this browser profile open.")
+                _wd_session_busy = True
+                continue
+            try:
+                _lock_path.unlink()
+                print(f"  🔓 Cleared stale {_lock_name} — prior session didn't exit cleanly")
+            except Exception as _le:
+                print(f"  ⚠  Could not clear {_lock_name}: {_le}")
+
+    if _wd_session_busy:
+        print("  ❌ Skipping this Workday run — close the other session first, then run again.")
+        return
+
     with sync_playwright() as pw:
-        browser = pw.chromium.launch_persistent_context(
-            str(SESSION_DIR),
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-            viewport={"width": 1366, "height": 900},
-        )
+        # CONFIRMED 2026-07-12: Raghav hit `TargetClosedError: ... Target
+        # page, context or browser has been closed` on launch — the bundled
+        # Chromium process started (pid logged) then immediately crashed,
+        # with a crashpad warning in the browser logs. This is the exact
+        # same instability class already root-caused and fixed for Indeed
+        # on this machine (see indeed_apply_now.py, 2026-07-11): Playwright's
+        # bundled Chromium build is less stable here than a real, installed
+        # Google Chrome. Switched to the same fix — try real Chrome first
+        # (channel="chrome"), fall back to bundled Chromium only if Chrome
+        # isn't installed, with a generous launch timeout so a slow first
+        # launch doesn't get mistaken for a crash. Still a completely
+        # separate, dedicated profile (SESSION_DIR) — never touches
+        # Raghav's real Chrome tabs/logins, just uses the same binary.
+        try:
+            browser = pw.chromium.launch_persistent_context(
+                str(SESSION_DIR),
+                headless=False,
+                channel="chrome",
+                args=["--disable-blink-features=AutomationControlled"],
+                viewport={"width": 1366, "height": 900},
+                timeout=60000,
+            )
+            print("  🌐  Using real Google Chrome (channel=chrome)")
+        except Exception as _chrome_err:
+            print(f"  ⚠  Real Chrome not available ({str(_chrome_err)[:80]}) — falling back to bundled Chromium")
+            browser = pw.chromium.launch_persistent_context(
+                str(SESSION_DIR),
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled"],
+                viewport={"width": 1366, "height": 900},
+                timeout=60000,
+            )
         page = browser.pages[0] if browser.pages else browser.new_page()
 
         # Dismiss Chromium "Restore pages?" popup — it blocks all clicks if left open
@@ -3265,4 +3345,31 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n⏹  Stopped by user (Ctrl+C)")
+    except Exception:
+        # CONFIRMED needed 2026-07-12: Raghav ran the pipeline directly
+        # (not through run_all.py, which is the only thing that currently
+        # saves a log file) and hit an error with nothing saved anywhere —
+        # the only copy of the error was in his terminal scrollback, so
+        # fixing it required manually screen-sharing and reading it live.
+        # This saves EVERY crash to a file automatically, regardless of how
+        # the script was launched, so Claude can just read it directly next
+        # time instead of needing the error pasted or the screen shared.
+        import traceback
+        crash_dir = cfg.BASE_DIR / "data" / "crash_logs"
+        crash_dir.mkdir(parents=True, exist_ok=True)
+        crash_file = crash_dir / f"crash_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        crash_file.write_text(
+            f"Timestamp:  {datetime.now().isoformat()}\n"
+            f"Command:    {' '.join(sys.argv)}\n"
+            f"Python:     {sys.executable}\n"
+            f"Version:    {getattr(cfg, 'PIPELINE_VERSION', '?')}\n"
+            f"{'=' * 70}\n"
+            f"{traceback.format_exc()}"
+        )
+        print(f"\n\n💥 CRASHED — full error saved to: {crash_file}")
+        print(f"   Just tell Claude \"check the last crash\" — no need to paste anything.")
+        raise
