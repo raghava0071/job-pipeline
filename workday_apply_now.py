@@ -209,17 +209,59 @@ def _fill(page, sel, value: str, timeout=8000, human_delay=True):
     except:
         return False
 
-def _select_dropdown(page, btn_sel, value: str, timeout=8000):
-    """Click a Workday dropdown button then type to filter and press Enter."""
+def _select_dropdown(page, btn_sel, value: str, timeout=8000) -> bool:
+    """Click a Workday dropdown button then type to filter and press Enter.
+    Returns True only if the button actually existed AND its displayed text
+    changed to something real afterward — NOT just "no exception happened".
+    BUG FIX 2026-07-11: this previously ignored _click()'s return value and
+    typed into whatever had keyboard focus even when the button was never
+    found, then unconditionally returned True. That silently defeated every
+    "if not X: try a fallback selector" pattern elsewhere in this file —
+    confirmed live on Amgen, where 'Phone Device Type' and 'State' stayed on
+    "Select One" despite their dedicated handlers reporting success."""
     try:
-        _click(page, btn_sel, timeout)
+        clicked = _click(page, btn_sel, timeout)
+        if not clicked:
+            return False
         time.sleep(0.5)
         page.keyboard.type(value, delay=80)
         time.sleep(0.5)
         page.keyboard.press("Enter")
         time.sleep(0.3)
-        return True
-    except:
+        cur = (page.locator(btn_sel).first.inner_text() or "").strip()
+        return bool(cur) and "select" not in cur.lower()
+    except Exception:
+        return False
+
+def _select_dropdown_by_label(page, label_text: str, value: str, timeout=6000) -> bool:
+    """Fallback for _select_dropdown when the assumed data-automation-id
+    doesn't match this portal's actual markup. CONFIRMED necessary live on
+    Amgen: WD['phone_type_btn'] (assumed data-automation-id=
+    "phone-device-type") never matched anything on that page — Workday's
+    own error panel still listed 'Phone Device Type' as unset even after
+    the ID-based call ran. Uses Playwright's get_by_label, which implements
+    the real ARIA label-association algorithm (label[for], aria-label,
+    aria-labelledby, wrapping <label>) instead of guessing an exact
+    automation-id string."""
+    try:
+        btn = page.get_by_label(label_text, exact=False).first
+        if not (btn.count() and btn.is_visible(timeout=timeout)):
+            return False
+        tag = btn.evaluate("el => el.tagName.toLowerCase()")
+        if tag != "button":
+            return False
+        btn.click()
+        time.sleep(0.5)
+        page.keyboard.type(value, delay=80)
+        time.sleep(0.5)
+        page.keyboard.press("Enter")
+        time.sleep(0.3)
+        cur = (btn.inner_text() or "").strip()
+        ok = bool(cur) and "select" not in cur.lower()
+        if ok:
+            print(f"          🔎 '{label_text}' → '{cur}' (found via label, not automation-id)")
+        return ok
+    except Exception:
         return False
 
 def _click_next(page):
@@ -399,6 +441,31 @@ def _read_workday_errors(page) -> list:
             seen.add(e)
             out.append(e)
     return out
+
+def _parse_error_field_names(error_texts: list) -> list:
+    """Extract clean field names from Workday's error-panel strings, e.g.
+    'Error - How Did You Hear About Us?' -> 'How Did You Hear About Us?'
+    'The field State is required and must have a value.' -> 'State'
+    Used so the retry can target the SPECIFIC field Workday named instead of
+    heuristically guessing which fields might be required."""
+    names, seen = [], set()
+    for e in error_texts or []:
+        t = (e or "").strip()
+        name = None
+        m = re.match(r'^Error\s*-\s*(.+)$', t)
+        if m:
+            name = m.group(1).strip()
+        else:
+            m2 = re.match(r'^The field (.+?) is required', t)
+            if m2:
+                name = m2.group(1).strip()
+        if name:
+            name = name.rstrip('*').strip()
+            key = name.lower()
+            if key not in seen:
+                seen.add(key)
+                names.append(name)
+    return names
 
 def _fill_required_fields(page) -> list:
     """BUG 2: scroll to trigger lazy fields, fill empty selects/radios/required
@@ -693,10 +760,11 @@ def _advance_page(page, label="page", job_title="", company="", jd_text="") -> b
 
     # Did not progress — read Workday's own errors and target-fix them
     errors = _read_workday_errors(page)
+    error_labels = _parse_error_field_names(errors)
     if errors:
         print(f"          🛑 Workday errors: {errors}")
     print(f"          ⛔ Stuck on same page ('{label}') — targeted retry")
-    _smart_fill_custom_dropdowns(page, job_title, company, jd_text)
+    _smart_fill_custom_dropdowns(page, job_title, company, jd_text, error_labels=error_labels)
     empties2 = _fill_required_fields(page)
     if empties2:
         print(f"          ❌ Still-empty required field(s) blocking Next: {empties2}")
@@ -1636,10 +1704,15 @@ def step_contact_information(page):
     _fill(page, WD["city"], "City")
     time.sleep(0.2)
 
-    # State dropdown — try countryRegion first (most portals), fall back to stateProvince
+    # State dropdown — try countryRegion first (most portals), fall back to
+    # stateProvince, then a label-based lookup for portals whose automation-id
+    # doesn't match either assumption (now that _select_dropdown's return
+    # value actually reflects success instead of always being True).
     state_filled = _select_dropdown(page, WD["state_btn"], "Florida")
     if not state_filled:
-        _select_dropdown(page, 'button[data-automation-id="addressSection_stateProvince"]', "Florida")
+        state_filled = _select_dropdown(page, 'button[data-automation-id="addressSection_stateProvince"]', "Florida")
+    if not state_filled:
+        _select_dropdown_by_label(page, "State", "Florida")
     time.sleep(0.3)
     time.sleep(0.3)
 
@@ -1647,7 +1720,9 @@ def step_contact_information(page):
     time.sleep(0.2)
 
     # Phone
-    _select_dropdown(page, WD["phone_type_btn"], "Mobile")
+    phone_type_filled = _select_dropdown(page, WD["phone_type_btn"], "Mobile")
+    if not phone_type_filled:
+        _select_dropdown_by_label(page, "Phone Device Type", "Mobile")
     time.sleep(0.3)
     _select_country_phone_code(page)   # required dropdown → United States
     time.sleep(0.3)
@@ -2220,7 +2295,8 @@ RULES (follow exactly):
 
     return filled or 0
 
-def _smart_fill_custom_dropdowns(page, job_title: str = "", company: str = "", jd_text: str = "") -> int:
+def _smart_fill_custom_dropdowns(page, job_title: str = "", company: str = "",
+                                  jd_text: str = "", error_labels=None) -> int:
     """
     Handles Workday's custom button+listbox dropdowns — things like 'How Did
     You Hear About Us?' or any other portal-specific combo box that ISN'T a
@@ -2242,6 +2318,15 @@ def _smart_fill_custom_dropdowns(page, job_title: str = "", company: str = "", j
     elsewhere; by the time this runs they're no longer empty/placeholder, so
     they're naturally excluded without needing hardcoded selector overlap
     checks.
+
+    error_labels (optional): field names taken directly from Workday's own
+    "Errors Found" panel (_read_workday_errors + _parse_error_field_names).
+    CONFIRMED necessary live on Amgen: the heuristic discovery below (aria-
+    required OR a '*' found in a label within 6 ancestor levels) missed a
+    field that Workday's own error panel named explicitly. When Workday
+    tells us exactly which field is broken, that's ground truth — use
+    Playwright's get_by_label (the real ARIA label-association algorithm)
+    to find it directly instead of relying on the heuristic scan.
     """
     candidates = _safe_eval(page, r"""
         () => {
@@ -2269,6 +2354,30 @@ def _smart_fill_custom_dropdowns(page, job_title: str = "", company: str = "", j
             return out;
         }
     """, []) or []
+
+    # Merge in anything Workday's error panel named that the heuristic scan
+    # above missed.
+    if error_labels:
+        have = {c["label"].strip().lower() for c in candidates}
+        for fname in error_labels:
+            key = fname.strip().lower()
+            if key in have:
+                continue
+            try:
+                loc = page.get_by_label(fname, exact=False).first
+                if not (loc.count() and loc.is_visible(timeout=800)):
+                    continue
+                tag = loc.evaluate("el => el.tagName.toLowerCase()")
+                if tag != "button":
+                    continue  # only custom button-dropdowns are handled here
+                aid = loc.get_attribute("data-automation-id")
+                if not aid:
+                    continue
+                candidates.append({"aid": aid, "label": fname})
+                have.add(key)
+                print(f"             🔎 Found '{fname}' via Workday's error panel (heuristic scan missed it)")
+            except Exception:
+                pass
 
     if not candidates:
         return 0
@@ -2695,31 +2804,45 @@ def apply_to_workday_job(page, job: dict, resume_path: str, cover_letter_path: s
 
             # Phone Device Type — required on many portals (button-driven
             # listbox, not a native <select>). CONFIRMED 2026-07-11 live on
-            # Amgen: this had no dedicated handler in the unknown-step path
-            # at all (only step_contact_information() sets it, and that
-            # function never ran here because step-detection didn't
-            # recognize this page) — left as "Select One" and blocked
-            # "Save and Continue" with a hard validation error.
+            # Amgen TWICE now: first because this had no dedicated handler
+            # in the unknown-step path at all (v1.6.7), and after adding one,
+            # it STILL stayed on "Select One" — turned out WD["phone_type_btn"]
+            # (data-automation-id="phone-device-type") never matched anything
+            # on this portal at all, so `phone_btn.count()` was 0 and the
+            # whole block silently no-opped. Falls back to a label-based
+            # lookup that doesn't depend on knowing the exact automation-id.
+            phone_type_ok = False
             try:
                 phone_btn = page.locator(WD["phone_type_btn"]).first
                 if phone_btn.count() and phone_btn.is_visible(timeout=400):
                     cur = (phone_btn.inner_text() or "").strip()
                     if not cur or "select" in cur.lower():
-                        _select_dropdown(page, WD["phone_type_btn"], "Mobile")
+                        phone_type_ok = _select_dropdown(page, WD["phone_type_btn"], "Mobile")
+                    else:
+                        phone_type_ok = True
             except Exception:
                 pass
+            if not phone_type_ok:
+                _select_dropdown_by_label(page, "Phone Device Type", "Mobile")
 
-            # State/Province dropdown if visible and empty
+            # State/Province dropdown if visible and empty — same fallback
+            # chain: try both known automation-ids, then a label-based lookup.
+            state_ok = False
             for state_sel in [WD["state_btn"], WD["state_btn_alt"]]:
                 try:
                     btn = page.locator(state_sel).first
                     if btn.count() and btn.is_visible(timeout=400):
                         cur = (btn.inner_text() or "").strip()
                         if not cur or "select" in cur.lower():
-                            _select_dropdown(page, state_sel, "Florida")
-                        break
+                            state_ok = _select_dropdown(page, state_sel, "Florida")
+                        else:
+                            state_ok = True
+                        if state_ok:
+                            break
                 except Exception:
                     pass
+            if not state_ok:
+                _select_dropdown_by_label(page, "State", "Florida")
 
             # Any remaining custom button+listbox dropdown (e.g. "How Did You
             # Hear About Us?") that isn't one of the deterministic ones above —
