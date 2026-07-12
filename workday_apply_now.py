@@ -1482,6 +1482,30 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
                     pass
 
         submitted = False
+        _before_submit = _get_page_marker(page)
+
+        def _submit_progressed() -> bool:
+            """Poll briefly for the page to actually change after a click
+            attempt. CONFIRMED necessary live on Vizient and NBA 2026-07-12:
+            the screenshot showed the form fully and correctly filled
+            (Verify Password included, checkbox checked) with the Create
+            Account button visibly enabled — yet the pipeline stayed stuck.
+            Root cause: `submitted` was only ever set based on whether an
+            exception was thrown by the click call, never on whether the
+            page actually advanced. A click that Playwright reports as
+            'successful' can still have zero real effect (timing, an async
+            validation state not yet settled, etc.) — and once `submitted`
+            was set True on a no-op click, the more aggressive fallback
+            methods (JS click, Enter key) never got a chance to run at all,
+            even though one of them might have actually worked. Same root-
+            cause class as the _select_dropdown() bug fixed in v1.7.1."""
+            for _ in range(6):   # up to ~3s
+                time.sleep(0.5)
+                if _get_page_marker(page) != _before_submit:
+                    return True
+                if not _exists(page, WD["verify_password"], timeout=300):
+                    return True   # form itself is gone — real progress
+            return False
 
         # Method 1: Playwright click (most reliable — triggers React onClick)
         if submit_btn:
@@ -1489,9 +1513,10 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
                 submit_btn.scroll_into_view_if_needed()
                 time.sleep(0.3)
                 submit_btn.click(timeout=5000)
-                submitted = True
-                print(f"          🖱  Create Account clicked (playwright click)")
-                time.sleep(3)
+                print(f"          🖱  Create Account clicked (playwright click) — verifying...")
+                submitted = _submit_progressed()
+                if not submitted:
+                    print(f"          ⚠  Click registered but page didn't change — trying next method")
             except Exception as e:
                 print(f"          ⚠  Playwright click failed: {e}")
 
@@ -1511,14 +1536,18 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
                         }}
                     """)
                     if result:
-                        submitted = True
-                        print(f"          🖱  Create Account clicked (JS): {sel}")
-                        time.sleep(3)
-                        break
+                        print(f"          🖱  Create Account clicked (JS): {sel} — verifying...")
+                        submitted = _submit_progressed()
+                        if submitted:
+                            break
+                        print(f"          ⚠  JS click registered but page didn't change — trying next")
                 except Exception:
                     pass
 
-        # Method 3: Enter key on verify password field
+        # Method 3: Enter key on verify password field — often more reliable
+        # than clicking a custom React button, since it triggers the
+        # browser's native form-submit path instead of depending on a click
+        # handler being wired to the exact element we found.
         if not submitted:
             try:
                 vp = page.locator('input[data-automation-id="verifyPassword"]').first
@@ -1526,9 +1555,8 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
                     vp.click()
                     time.sleep(0.2)
                     vp.press("Enter")
-                    submitted = True
-                    print(f"          🖱  Create Account submitted (Enter key)")
-                    time.sleep(3)
+                    print(f"          🖱  Create Account submitted (Enter key) — verifying...")
+                    submitted = _submit_progressed()
             except Exception:
                 pass
 
