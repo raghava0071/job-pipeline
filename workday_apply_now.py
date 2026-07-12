@@ -1540,27 +1540,43 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
                 pass
         page.on("request", _on_request)
 
-        def _submit_progressed() -> bool:
-            """Poll briefly for the page to actually change after a click
-            attempt. CONFIRMED necessary live on Vizient and NBA 2026-07-12:
-            the screenshot showed the form fully and correctly filled
-            (Verify Password included, checkbox checked) with the Create
-            Account button visibly enabled — yet the pipeline stayed stuck.
-            Root cause: `submitted` was only ever set based on whether an
+        def _submit_progressed(patience_s: float = 3.0) -> bool:
+            """Poll for the page to actually change after a click attempt.
+            CONFIRMED necessary live on Vizient and NBA 2026-07-12: the
+            screenshot showed the form fully and correctly filled (Verify
+            Password included, checkbox checked) with the Create Account
+            button visibly enabled — yet the pipeline stayed stuck. Root
+            cause: `submitted` was only ever set based on whether an
             exception was thrown by the click call, never on whether the
-            page actually advanced. A click that Playwright reports as
-            'successful' can still have zero real effect (timing, an async
-            validation state not yet settled, etc.) — and once `submitted`
-            was set True on a no-op click, the more aggressive fallback
-            methods (JS click, Enter key) never got a chance to run at all,
-            even though one of them might have actually worked. Same root-
-            cause class as the _select_dropdown() bug fixed in v1.7.1."""
-            for _ in range(6):   # up to ~3s
+            page actually advanced.
+
+            WIDENED v1.8.3: also treats a visible error/toast/alert appearing
+            as "progress" — that means the click DID reach the backend and
+            got a real (if negative) response, so retrying with a rougher
+            method (JS click / Enter key) would just double-submit into a
+            request that already answered. Previously this only checked for
+            success (marker change / form gone), so a genuine rejection
+            looked identical to "the click did nothing at all."
+
+            Patience for method 1 (real Playwright click, most likely to be
+            the one that actually works) was widened from ~3s to ~10s —
+            a fresh account-creation call can involve email dispatch and
+            validation server-side; giving up after 3s and immediately
+            firing methods 2/3 at the same still-in-flight request risked
+            stacking conflicting submits on top of a request that may have
+            still been about to succeed on its own."""
+            steps = max(1, int(patience_s / 0.5))
+            for _ in range(steps):
                 time.sleep(0.5)
                 if _get_page_marker(page) != _before_submit:
                     return True
                 if not _exists(page, WD["verify_password"], timeout=300):
                     return True   # form itself is gone — real progress
+                _errs = _read_workday_errors(page)
+                if _errs:
+                    _submit_debug["error_seen_after_click"] = _errs[:5]
+                    print(f"          ⚠  Workday responded with an error: {_errs[0][:120]}")
+                    return True   # backend answered — don't pile on more clicks
             return False
 
         # Method 1: Playwright click (most reliable — triggers React onClick)
@@ -1569,8 +1585,8 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
                 submit_btn.scroll_into_view_if_needed()
                 time.sleep(0.3)
                 submit_btn.click(timeout=5000)
-                print(f"          🖱  Create Account clicked (playwright click) — verifying...")
-                submitted = _submit_progressed()
+                print(f"          🖱  Create Account clicked (playwright click) — verifying (up to 10s)...")
+                submitted = _submit_progressed(patience_s=10.0)
                 if not submitted:
                     print(f"          ⚠  Click registered but page didn't change — trying next method")
             except Exception as e:
