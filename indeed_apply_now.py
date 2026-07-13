@@ -1725,7 +1725,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         except Exception as e:
             print(f"          🔬 [{label} #{_captcha_detection_seq}] identity snapshot failed: {e}")
 
-    def _captcha_actually_visible():
+    def _captcha_actually_visible(after_pin: bool = False):
         """
         True only if the reCAPTCHA bframe iframe is currently visible — not just
         attached to the DOM. reCAPTCHA never removes the bframe after a solve, it
@@ -1733,6 +1733,19 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         once a CAPTCHA has ever appeared on this page. That staleness was causing
         every subsequent Submit-retry to re-trigger the full alert+email flow even
         when nothing was actually showing.
+
+        `after_pin` distinguishes the two places this is called from, because
+        which signal is trustworthy flips once _pin_captcha_box() has run:
+          - after_pin=False — the very first, pre-detection gate check (called
+            once, before anything has been pinned). The bframe still has
+            whatever natural CSS Google gave it, so a rendered-challenge-UI
+            check here is trustworthy and is treated as authoritative.
+          - after_pin=True — every call inside the wait loop, AFTER pinning.
+            _pin_captcha_box() forces the bframe's CSS with !important, which
+            can keep it looking "visible" even after Google hides it
+            internally post-solve (see CONFIRMED BROKEN 2026-07-09 below) —
+            so here the token/aria-checked signals stay authoritative and the
+            rendered-UI check only runs as a last-resort fallback.
 
         CONFIRMED BROKEN 2026-07-08: this used to run a `document.querySelectorAll
         ('iframe')` scan via page.evaluate(), which executes in page.main_frame
@@ -1806,17 +1819,112 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         #     !important values win and the box visually stays put — so even
         #     the size/visibility-based signals could get stuck "visible."
         #
-        # Fixed by checking the canonical, Google-controlled solved signal
-        # instead of guessing from visibility/text heuristics: the hidden
-        # `g-recaptcha-response` token. Google populates this element with a
-        # long opaque token the moment the widget considers itself solved
-        # (checkbox ticked / challenge passed) — completely independent of
-        # our CSS overrides, and it lives in the SAME document that embeds
-        # the widget (Indeed's own SmartApply frame), not inside the
-        # cross-origin anchor/bframe iframes, so Playwright can read it
-        # directly. Checked first and treated as authoritative: if present,
-        # the CAPTCHA is solved, full stop, regardless of what any visibility
-        # check says.
+        # CONFIRMED BROKEN 2026-07-13: token-first ordering (the version this
+        # replaces) short-circuited on ANY g-recaptcha-response token > 10
+        # chars, before ever checking whether a challenge was actually
+        # rendered on screen. Two live incidents same day: Coding Macaw
+        # Bootcamp LLC (token len=2340, constant across 8 Submit retries) and
+        # a "select all images with bicycles / click verify once there are
+        # none left" challenge (token len=2404, also constant) — Raghav
+        # confirmed the second one live, on screen, unsolved, no red border
+        # ever applied. Neither ever printed "CAPTCHA DETECTED" because this
+        # function returned False (solved) on the very first check, off a
+        # token Enterprise reCAPTCHA had apparently already issued BEFORE the
+        # visual challenge was completed — so "token present" is necessary
+        # but not sufficient proof of "solved." Reordered below: an actively
+        # rendered challenge UI, when we can trust that check (after_pin=
+        # False — see docstring), now wins over the token. Token/aria-checked
+        # remain authoritative once pinned (after_pin=True), for the reason
+        # in CONFIRMED BROKEN 2026-07-09 above — our own forced CSS can make
+        # the UI check lie "still visible" after a real solve.
+        def _challenge_ui_present():
+            """
+            Returns (True, reason) if a bframe shows a rendered, active
+            challenge UI, else (False, None). Three independent signals,
+            checked per-bframe so any one of them can catch a variant the
+            others miss:
+              (a) frame_element() + Playwright's own is_visible() + bounding box
+              (b) frame.locator('body').is_visible() — separate code path
+              (c) reCAPTCHA's own challenge-grid class names — stable across
+                  object type (buses/bicycles/crosswalks/...) and across the
+                  "select N, submit once" vs. "click each match until none
+                  remain" variants, so this doesn't depend on wording at all
+              (d) instructional phrase text, broadened beyond the original
+                  3-phrase list to also catch the "click each match until
+                  none remain" variant's wording
+            """
+            for f in list(page.frames):
+                if "bframe" not in (f.url or ""):
+                    continue
+
+                try:
+                    el = f.frame_element()
+                    if el and el.is_visible():
+                        box = el.bounding_box()
+                        if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
+                            return True, f"bframe element visible, box={box}"
+                except Exception:
+                    pass
+
+                try:
+                    if f.locator("body").first.is_visible(timeout=1000):
+                        return True, "bframe body visible (Playwright actionability check)"
+                except Exception:
+                    pass
+
+                try:
+                    grid_selector = f.evaluate("""
+                        () => {
+                            const sels = [
+                                '.rc-imageselect-table-33', '.rc-imageselect-table-44',
+                                '.rc-imageselect-tile', '.rc-imageselect-target',
+                                '.rc-imageselect-challenge', '.rc-imageselect'
+                            ];
+                            for (const s of sels) {
+                                if (document.querySelector(s)) return s;
+                            }
+                            return null;
+                        }
+                    """)
+                    if grid_selector:
+                        return True, f"bframe challenge grid present ({grid_selector})"
+                except Exception:
+                    pass
+
+                try:
+                    matched_phrase = f.evaluate("""
+                        () => {
+                            const t = (document.body.innerText || '').toLowerCase();
+                            const phrases = [
+                                'select all images with', 'select all squares with',
+                                'click verify once', 'there are none left',
+                                'click each matching image', 'skip'
+                            ];
+                            for (const p of phrases) {
+                                if (t.includes(p)) return p;
+                            }
+                            return null;
+                        }
+                    """)
+                    if matched_phrase:
+                        return True, f"bframe contains active challenge text ('{matched_phrase}')"
+                except Exception:
+                    pass
+
+            return False, None
+
+        if not after_pin:
+            _visible, _reason = _challenge_ui_present()
+            if _visible:
+                _log_signal_transition(True, _reason)
+                return True
+
+        # Token check — the canonical, Google-controlled solved signal.
+        # Google populates this element with a long opaque token once the
+        # widget considers itself solved — independent of our CSS overrides,
+        # and it lives in the SAME document that embeds the widget (Indeed's
+        # own SmartApply frame), not inside the cross-origin anchor/bframe
+        # iframes, so Playwright can read it directly.
         for f in list(page.frames):
             if _is_recaptcha_frame(f):
                 continue
@@ -1860,40 +1968,16 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
             except Exception:
                 pass
 
-        for f in list(page.frames):
-            if "bframe" not in (f.url or ""):
-                continue
-
-            try:
-                el = f.frame_element()
-                if el and el.is_visible():
-                    box = el.bounding_box()
-                    if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
-                        _log_signal_transition(True, f"bframe element visible, box={box}")
-                        return True
-            except Exception:
-                pass
-
-            try:
-                if f.locator("body").first.is_visible(timeout=1000):
-                    _log_signal_transition(True, "bframe body visible (Playwright actionability check)")
-                    return True
-            except Exception:
-                pass
-
-            try:
-                has_challenge_text = f.evaluate("""
-                    () => {
-                        const t = (document.body.innerText || '').toLowerCase();
-                        return t.includes('select all images') || t.includes('click verify')
-                            || t.includes('select all squares');
-                    }
-                """)
-                if has_challenge_text:
-                    _log_signal_transition(True, "bframe contains active challenge text")
-                    return True
-            except Exception:
-                pass
+        if after_pin:
+            # Last-resort fallback, post-pin only: neither authoritative
+            # signal fired, so fall back to the UI check anyway rather than
+            # risk hanging — this can reintroduce the 2026-07-09 "stuck
+            # visible forever" bug in rare cases, but only after both real
+            # signals came back empty, which itself would be unusual.
+            _visible, _reason = _challenge_ui_present()
+            if _visible:
+                _log_signal_transition(True, _reason)
+                return True
 
         _log_signal_transition(False, "no signal matched (no bframe/anchor found, or no captcha ever appeared)")
         return False
@@ -2069,17 +2153,24 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                                 // element's own containing block genuinely IS the
                                 // real browser viewport — plain percentage
                                 // centering works correctly here. Height budget
-                                // widened (92vh / 960px cap) to fit taller 4x4
-                                // "select all squares" variants, not just the
-                                // 3x3 "select all images" variant.
+                                // widened again 2026-07-13 (95vh / 1000px cap,
+                                // up from 92vh / 960px) after a "select all
+                                // images with bicycles" challenge still had its
+                                // Verify button cut off below the viewport with
+                                // no way to scroll to it — confirmed fixed via a
+                                // manual DevTools test at these exact values.
+                                // overflow-y: auto (already set below) is kept
+                                // explicit so any remaining overflow is
+                                // scrollable rather than clipped, for whatever
+                                // variant is still taller than this budget.
                                 bframe.style.cssText = [
                                     'position: fixed !important',
                                     'top: 50% !important',
                                     'left: 50% !important',
                                     'transform: translate(-50%, -50%) !important',
                                     'width: 480px !important',
-                                    'height: 92vh !important',
-                                    'max-height: 960px !important',
+                                    'height: 95vh !important',
+                                    'max-height: 1000px !important',
                                     'min-height: 600px !important',
                                     'z-index: 2147483647 !important',
                                     'border: 4px solid #ff0000 !important',
@@ -2216,7 +2307,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
             time.sleep(1)
             try:
                 frames = list(page.frames)
-                still_captcha = _captcha_actually_visible()
+                still_captcha = _captcha_actually_visible(after_pin=True)
 
                 # Re-pin every ~3s while a challenge is still showing — see the
                 # long comment above _pin_captcha_box() for why a one-time pin
