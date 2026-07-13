@@ -15,7 +15,7 @@
 #   python run_all.py --indeed-only          # Indeed only
 # =============================================================================
 
-import sys, argparse, time, multiprocessing as mp, subprocess
+import sys, argparse, time, multiprocessing as mp, subprocess, fcntl, errno, os
 from pathlib import Path
 from datetime import datetime
 
@@ -30,6 +30,56 @@ for _f in ["config.py", "indeed_apply_now.py", "linkedin_apply_now.py", "resume_
         ast.parse((PIPELINE_DIR / _f).read_text())
     except SyntaxError as _e:
         print(f"❌ Syntax error in {_f}: {_e}  — fix before running"); sys.exit(1)
+
+
+# ── Process-level singleton lock ────────────────────────────────────────────
+# Root cause of the Jul 13 08:01 AM incident: two run_all.py invocations
+# (a duplicate/leftover scheduled trigger) fired at the same time, both
+# opened .indeed_session/.linkedin_session at once, and that collision
+# produced the LinkedIn ProcessSingleton crash and the net::ERR_ABORTED
+# cascade on Indeed. This lock makes concurrent runs impossible regardless
+# of the trigger source (launchd, cron, or a manual run overlapping a
+# scheduled one).
+def _acquire_singleton_lock(lock_path):
+    """
+    Exclusive, non-blocking flock on lock_path.
+    Returns (lock_file, None) on success — caller must keep lock_file open
+    for the process lifetime and close it in a finally block.
+    Returns (None, holder_info) if another instance already holds it.
+
+    Uses flock rather than a plain PID-file: flock is tied to the open file
+    descriptor, and the kernel releases it the instant the holding process
+    exits for any reason — normal exit, crash, or kill -9. That's what a
+    plain PID-file can't guarantee (this project already hit that exact
+    staleness problem with .git/index.lock) — no manual "is this PID still
+    alive" check is needed because a stale flock cannot exist.
+    """
+    lock_file = open(lock_path, "a+")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        if e.errno not in (errno.EACCES, errno.EAGAIN):
+            raise
+        lock_file.seek(0)
+        holder_info = lock_file.read().strip() or "(no PID/time recorded)"
+        lock_file.close()
+        return None, holder_info
+
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(f"pid={os.getpid()}\nstarted={datetime.now().strftime('%b %d, %Y at %I:%M:%S %p')}\n")
+    lock_file.flush()
+    return lock_file, None
+
+
+def _release_singleton_lock(lock_file):
+    if lock_file is None:
+        return
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    lock_file.close()
 
 
 def run_linkedin(limit, dry_run, result_queue):
@@ -345,4 +395,28 @@ def main():
 if __name__ == "__main__":
     # Required for multiprocessing on macOS
     mp.set_start_method("spawn", force=True)
-    main()
+
+    import config
+    _lock_file, _holder_info = _acquire_singleton_lock(config.RUN_LOCK_PATH)
+    if _lock_file is None:
+        _now = datetime.now().strftime("%b %d, %Y at %I:%M %p")
+        _msg = (f"Another run_all.py is already running — exiting without touching "
+                f"any browser profile.\nExisting lock holder: {_holder_info}\n"
+                f"Blocked at: {_now}")
+        print(f"\n⛔ {_msg}\n")
+        try:
+            import notifier
+            notifier.send_alert(
+                subject="⛔ Duplicate pipeline run blocked",
+                body=f"A second run_all.py tried to start while one was already running "
+                     f"and was blocked before touching any Chrome profile — this is the "
+                     f"collision that caused the Jul 13 8 AM ERR_ABORTED incident.\n\n{_msg}"
+            )
+        except Exception:
+            pass
+        sys.exit(1)
+
+    try:
+        main()
+    finally:
+        _release_singleton_lock(_lock_file)
