@@ -1589,6 +1589,32 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
     """
     global _consecutive_captcha_failures, _total_cooldowns_this_run, _indeed_blocked
 
+    # Diagnostic-only, added 2026-07-12: tracks the last (visible, reason)
+    # pair logged by _captcha_actually_visible() so its signal source can be
+    # printed on every real STATE CHANGE without spamming ~600 identical
+    # lines into a single stuck-job wait loop. Declared here (not inside the
+    # function) so it survives across every call within this one
+    # _check_and_handle_captcha() invocation.
+    _last_signal_logged = {"key": None}
+
+    def _log_signal_transition(visible: bool, reason: str):
+        """
+        Print which underlying signal (token / aria-checked / bframe
+        visibility / no-signal fallthrough) is driving the current
+        still_captcha value, but only when that value or its reason changes.
+        Added after a real run showed "✅ CAPTCHA solved!" firing within
+        ~1-2s of "🚨 CAPTCHA DETECTED" — implausibly fast for a human to have
+        actually solved an image-selection challenge — with no way to tell
+        afterward which of the three signals claimed "solved" or why. This
+        turns that into something the log states directly instead of
+        something inferred after the fact from timestamps.
+        """
+        key = (visible, reason)
+        if _last_signal_logged["key"] != key:
+            _last_signal_logged["key"] = key
+            state = "STILL SHOWING (unsolved)" if visible else "solved / not visible"
+            print(f"          🔬 captcha signal → {state}   [{reason}]")
+
     def _captcha_actually_visible():
         """
         True only if the reCAPTCHA bframe iframe is currently visible — not just
@@ -1697,6 +1723,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                     }
                 """)
                 if token_len:
+                    _log_signal_transition(False, f"g-recaptcha-response token present, len={token_len}")
                     return False  # solved — authoritative signal, stop here
             except Exception:
                 pass
@@ -1718,6 +1745,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                     }
                 """)
                 if checked:
+                    _log_signal_transition(False, "anchor checkbox aria-checked=true")
                     return False  # solved — checkbox confirms
             except Exception:
                 pass
@@ -1731,12 +1759,14 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                 if el and el.is_visible():
                     box = el.bounding_box()
                     if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
+                        _log_signal_transition(True, f"bframe element visible, box={box}")
                         return True
             except Exception:
                 pass
 
             try:
                 if f.locator("body").first.is_visible(timeout=1000):
+                    _log_signal_transition(True, "bframe body visible (Playwright actionability check)")
                     return True
             except Exception:
                 pass
@@ -1750,10 +1780,12 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                     }
                 """)
                 if has_challenge_text:
+                    _log_signal_transition(True, "bframe contains active challenge text")
                     return True
             except Exception:
                 pass
 
+        _log_signal_transition(False, "no signal matched (no bframe/anchor found, or no captcha ever appeared)")
         return False
 
     try:
@@ -1990,11 +2022,67 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                     pass
             _pinned_elements.clear()
 
+        def _log_pin_diagnostics(pin_succeeded: bool):
+            """
+            Diagnostic-only, added 2026-07-12 after a real "select all squares
+            with buses" CAPTCHA where Raghav couldn't reach the Verify button —
+            with no log evidence either way of whether _pin_captcha_box()'s
+            styling actually rendered on-screen. _pin_captcha_box() returning
+            True only means our JS assignment didn't throw; it says nothing
+            about whether the style actually took effect and stayed applied.
+            Two things it can't tell us on its own:
+              1. The bframe's REAL on-screen bounding box after our cssText
+                 assignment — getBoundingClientRect(), read back independently.
+                 If this comes back zero-sized, our CSS never actually
+                 rendered, regardless of whether the JS call itself succeeded.
+              2. Whether each pinned element's COMPUTED style (getComputedStyle,
+                 not just "we set el.style.cssText without error") still
+                 reflects what we assigned — catches Google's own JS (or a
+                 re-render) silently overwriting our styling a moment later,
+                 which a boolean return value from _pin_captcha_box() can
+                 never detect on its own.
+            This turns "did the pin actually work" from something inferred
+            after the fact off a screenshot into something the log states
+            directly, every time this runs — not just when something looks
+            wrong.
+            """
+            if not pin_succeeded or not _pinned_elements:
+                print(f"          🔬 pin diagnostics: nothing pinned this cycle "
+                      f"(pin_succeeded={pin_succeeded}, tracked_elements={len(_pinned_elements)})")
+                return
+            for _el in _pinned_elements:
+                try:
+                    _info = _el.evaluate("""
+                        (el) => {
+                            const r = el.getBoundingClientRect();
+                            const cs = getComputedStyle(el);
+                            return {
+                                tag: el.tagName,
+                                rect: {x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height)},
+                                position: cs.position,
+                                zIndex: cs.zIndex,
+                                display: cs.display,
+                                visibility: cs.visibility,
+                            };
+                        }
+                    """)
+                    _rect = _info.get("rect", {}) if _info else {}
+                    _onscreen = _rect.get("w", 0) > 0 and _rect.get("h", 0) > 0
+                    print(f"          🔬 pin check [{_info.get('tag') if _info else '?'}]: "
+                          f"rect={_rect} position={_info.get('position') if _info else '?'} "
+                          f"z-index={_info.get('zIndex') if _info else '?'} "
+                          f"display={_info.get('display') if _info else '?'} "
+                          f"→ {'ON-SCREEN' if _onscreen else '⚠ ZERO-SIZE / NOT ACTUALLY RENDERED'}")
+                except Exception as e:
+                    print(f"          🔬 pin check: could not read element state ({e}) — likely detached from DOM already")
+
         try:
-            if _pin_captcha_box():
+            _pin_ok = _pin_captcha_box()
+            if _pin_ok:
                 print(f"          🔲 CAPTCHA window pinned — Verify button is fully visible")
             else:
                 print(f"          ⚠  Could not pin CAPTCHA window (bframe element not reachable) — solve it in its default position")
+            _log_pin_diagnostics(_pin_ok)
             print(f"          💡 TIP: If still stuck, click the CAPTCHA area then press Tab → Enter")
         except Exception as e:
             print(f"          ⚠  CAPTCHA resize failed: {e}")
@@ -2023,7 +2111,8 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                 # at detection isn't enough (a retry or taller challenge
                 # variant can appear later in this same wait loop, unpinned).
                 if still_captcha and i % 3 == 0:
-                    _pin_captcha_box()
+                    _repin_ok = _pin_captcha_box()
+                    _log_pin_diagnostics(_repin_ok)
 
                 # Check if the page already confirmed (user may have clicked Submit
                 # manually). Indeed's apply UI runs inside a nested iframe, not the
