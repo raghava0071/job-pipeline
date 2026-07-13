@@ -2340,6 +2340,54 @@ def _is_confirmed(page):
                 # Looks like a confirm-phrase match, but we're still
                 # demonstrably on the review page — don't trust it.
                 continue
+
+            # CONFIRMED FALSE POSITIVE 2026-07-12: Air Treatment Corporation's
+            # "Inside Sales Engineer" application got emailed to Raghav as
+            # "✅ Application Submitted" while the actual page — screenshotted
+            # by him at the time — was still sitting at 50% progress with 3
+            # required HVAC-industry questions left blank, each showing
+            # Indeed's own "Answer this question to continue" validation
+            # error. Those fields never got answered (the AI fallback needed
+            # for them wasn't available that run — see 1.8.6) so the form
+            # never actually advanced, yet some CONFIRM_PHRASES text still
+            # matched somewhere on that page. The on_review_url /
+            # REVIEW_PAGE_TEXT_MARKERS guard above only recognizes Indeed's
+            # own final review screen — it has no way to catch a stuck
+            # QUESTIONS step, which is a different page entirely, and trying
+            # to enumerate every stuck-page URL/text variant Indeed might
+            # show is the same whack-a-mole this function already burned two
+            # rounds on (see the 2026-07-09 note above). Instead of guessing
+            # what kind of page this is, check a property of the page
+            # itself: does it still have an unresolved required-field error?
+            # Reuses the exact validation-error selectors already proven out
+            # for the "form walk ended" retry logic elsewhere in this file.
+            has_validation_errors = _safe_eval(frame, """
+                () => {
+                    const errSelectors = [
+                        '[class*="error"]:not([class*="errorText--hidden"])',
+                        '[class*="Error"]:not([class*="hidden"])',
+                        '[aria-invalid="true"]',
+                        '[aria-describedby*="error"]',
+                        '.icl-TextInput--error',
+                        '[data-testid*="error"]',
+                        '[role="alert"]',
+                    ];
+                    for (const sel of errSelectors) {
+                        for (const el of document.querySelectorAll(sel)) {
+                            if (!el.offsetParent) continue;
+                            const t = (el.innerText || el.textContent || '').trim();
+                            if (t && t.length > 2 && t.length < 300) return true;
+                        }
+                    }
+                    return false;
+                }
+            """, False)
+            if has_validation_errors:
+                # A confirm-phrase hit on a page that's still showing an
+                # unresolved required-field error is never trustworthy —
+                # keep scanning other frames instead of declaring success.
+                continue
+
             return True
     return False
 
