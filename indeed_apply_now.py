@@ -74,6 +74,14 @@ CAPTCHA_COOLDOWN_SECS         = 300  # 5-minute break
 # styled directly, not Google's own frames). Cleared once cleanup runs.
 _pinned_elements = []
 
+# Counts how many times _check_and_handle_captcha() has printed "CAPTCHA
+# DETECTED" this run — i.e. a distinct detection event, not a poll tick.
+# Used purely to label diagnostic log lines ("detection #1" vs "detection
+# #2") so a stale-vs-fresh-state investigation can compare across separate
+# detections in the same job without guessing which log block belongs to
+# which attempt from timestamps alone.
+_captcha_detection_seq = 0
+
 # Total cooldown cycles taken this run with zero successful solves in between.
 # An unattended (scheduled) run has nobody to solve a CAPTCHA, so if we're
 # still hitting them after a full cooldown, the session is very likely
@@ -1587,7 +1595,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
 
     Call at the START of every step loop iteration AND after every Submit click.
     """
-    global _consecutive_captcha_failures, _total_cooldowns_this_run, _indeed_blocked
+    global _consecutive_captcha_failures, _total_cooldowns_this_run, _indeed_blocked, _captcha_detection_seq
 
     # Diagnostic-only, added 2026-07-12: tracks the last (visible, reason)
     # pair logged by _captcha_actually_visible() so its signal source can be
@@ -1614,6 +1622,108 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
             _last_signal_logged["key"] = key
             state = "STILL SHOWING (unsolved)" if visible else "solved / not visible"
             print(f"          🔬 captcha signal → {state}   [{reason}]")
+
+    def _log_captcha_identity_snapshot(label: str):
+        """
+        Diagnostic-only, added 2026-07-12 to directly test a stale-state
+        hypothesis: that _captcha_actually_visible() might be reading a
+        leftover g-recaptcha-response value from a PREVIOUS challenge rather
+        than genuine fresh-solve state, causing "solved" to fire implausibly
+        fast (~1-2s) after a new challenge appears.
+
+        Captures three things together, labeled with the current detection
+        sequence number so separate detections can be compared side by side:
+          - the RAW token textarea value (length + preview, not just the
+            boolean _captcha_actually_visible() derives from it)
+          - the RAW anchor checkbox aria-checked value
+          - a stable per-element identity marker: a random id stamped into
+            el.dataset the first time we see each element, then read back
+            unchanged on every later call. This is what actually answers the
+            staleness question — not the value alone. If a later "solved"
+            snapshot reports the SAME element_id as an earlier "DETECTED"
+            snapshot, we're looking at the literal same DOM node (expected —
+            Google may reuse elements across rounds; staleness would then be
+            about how promptly GOOGLE clears the value, not our code). If a
+            later detection reports a DIFFERENT element_id than an earlier
+            one, the two challenges are genuinely different DOM nodes, which
+            rules out our own code caching/reusing a stale Python-side
+            handle across attempts — there is no Python-side handle involved
+            at all, page.frames and frame_element() are both re-queried live
+            on every single call already (see _pin_captcha_box and the calls
+            below), so any staleness this reveals would have to be on
+            Google's side, not ours.
+        """
+        try:
+            for f in list(page.frames):
+                if _is_recaptcha_frame(f):
+                    continue
+                try:
+                    info = f.evaluate("""
+                        () => {
+                            const el = document.querySelector(
+                                'textarea[name^="g-recaptcha-response"], [id^="g-recaptcha-response"]'
+                            );
+                            if (!el) return null;
+                            if (!el.dataset.pwProbeId) {
+                                el.dataset.pwProbeId = Math.random().toString(36).slice(2, 10);
+                            }
+                            return {
+                                value_len: (el.value || '').length,
+                                value_preview: (el.value || '').slice(0, 12),
+                                probe_id: el.dataset.pwProbeId,
+                            };
+                        }
+                    """)
+                    if info:
+                        print(f"          🔬 [{label} #{_captcha_detection_seq}] token textarea: "
+                              f"len={info['value_len']} preview='{info['value_preview']}' "
+                              f"element_id={info['probe_id']}")
+                except Exception:
+                    pass
+
+            for f in list(page.frames):
+                if "anchor" not in (f.url or ""):
+                    continue
+                try:
+                    info = f.evaluate("""
+                        () => {
+                            const cb = document.querySelector('#recaptcha-anchor, .recaptcha-checkbox');
+                            if (!cb) return null;
+                            if (!cb.dataset.pwProbeId) {
+                                cb.dataset.pwProbeId = Math.random().toString(36).slice(2, 10);
+                            }
+                            return {
+                                aria_checked: cb.getAttribute('aria-checked'),
+                                probe_id: cb.dataset.pwProbeId,
+                            };
+                        }
+                    """)
+                    if info:
+                        print(f"          🔬 [{label} #{_captcha_detection_seq}] anchor checkbox: "
+                              f"aria-checked={info['aria_checked']} element_id={info['probe_id']}")
+                except Exception:
+                    pass
+
+            for f in list(page.frames):
+                if "bframe" not in (f.url or ""):
+                    continue
+                try:
+                    el = f.frame_element()
+                    if not el:
+                        continue
+                    probe_id = el.evaluate("""
+                        (e) => {
+                            if (!e.dataset.pwProbeId) {
+                                e.dataset.pwProbeId = Math.random().toString(36).slice(2, 10);
+                            }
+                            return e.dataset.pwProbeId;
+                        }
+                    """)
+                    print(f"          🔬 [{label} #{_captcha_detection_seq}] bframe outer <iframe>: element_id={probe_id}")
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"          🔬 [{label} #{_captcha_detection_seq}] identity snapshot failed: {e}")
 
     def _captcha_actually_visible():
         """
@@ -1800,10 +1910,12 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         except Exception:
             pass
 
+        _captcha_detection_seq += 1
         print(f"\n          🚨🚨🚨  CAPTCHA DETECTED — ACTION REQUIRED  🚨🚨🚨")
         print(f"          👉 Go to your Mac and solve the CAPTCHA in the browser window")
         print(f"          ⚠️  Opening the link on your phone will NOT solve it — wrong session")
         print(f"          ⏳ Waiting up to 10 minutes...")
+        _log_captcha_identity_snapshot("DETECTED")
 
         # Email alert — clear Mac-only instructions
         try:
@@ -2140,6 +2252,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
 
                 if not still_captcha:
                     print(f"          ✅ CAPTCHA solved! Auto-clicking Submit...")
+                    _log_captcha_identity_snapshot("SOLVED")
                     # Remove the forced pin styling BEFORE attempting the click —
                     # otherwise the leftover overlay (still centered, still at
                     # z-index 2147483647) intercepts the coordinate click meant
