@@ -82,6 +82,60 @@ _pinned_elements = []
 # which attempt from timestamps alone.
 _captcha_detection_seq = 0
 
+# Counts how many times THIS run's 3-second solve floor (config.
+# CAPTCHA_MIN_SOLVE_FLOOR_SEC) actually blocked a premature "solved"
+# declaration — added 2026-07-13. A non-zero count here means the
+# element-scoping fixes in _captcha_actually_visible() let a false-solve
+# signal through and the floor is the only thing that caught it. See
+# _record_premature_solve_block() for the cross-run rolling-7-day tripwire
+# this feeds into.
+_premature_solve_blocks_this_run = 0
+
+
+def _record_premature_solve_block():
+    """
+    Persists one timestamped tripwire event to
+    data/captcha_premature_solve_events.json and returns how many such
+    events have happened in the trailing 7 days, across ALL runs — not just
+    this process. Added 2026-07-13 alongside CAPTCHA_MIN_SOLVE_FLOOR_SEC.
+
+    A single run's in-memory counter (_premature_solve_blocks_this_run)
+    resets every process start, so "is this still happening regularly"
+    can only be answered by looking across runs — hence persisting to disk
+    instead of just incrementing a module global. If the rolling count
+    passes CAPTCHA_PREMATURE_SOLVE_WEEKLY_ALERT_THRESHOLD, the caller prints
+    a loud warning — see the call site in _captcha_actually_visible().
+    """
+    import json as _json
+    _path = cfg.DATA_DIR / "captcha_premature_solve_events.json"
+    try:
+        _events = _json.loads(_path.read_text()) if _path.exists() else []
+    except Exception:
+        _events = []
+
+    _now = datetime.now()
+    _events.append(_now.isoformat())
+
+    def _parsed_recent_events(_cutoff):
+        _out = []
+        for _e in _events:
+            try:
+                if datetime.fromisoformat(_e) > _cutoff:
+                    _out.append(_e)
+            except Exception:
+                pass  # malformed entry — drop silently, doesn't affect the count
+        return _out
+
+    # Trim the file itself to 60 days of history so it can't grow forever —
+    # separate from the 7-day window used for the alert threshold below.
+    _events = _parsed_recent_events(_now - timedelta(days=60))
+    try:
+        _path.write_text(_json.dumps(_events, indent=2))
+    except Exception:
+        pass
+
+    return len(_parsed_recent_events(_now - timedelta(days=7)))
+
 # Total cooldown cycles taken this run with zero successful solves in between.
 # An unattended (scheduled) run has nobody to solve a CAPTCHA, so if we're
 # still hitting them after a full cooldown, the session is very likely
@@ -1595,7 +1649,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
 
     Call at the START of every step loop iteration AND after every Submit click.
     """
-    global _consecutive_captcha_failures, _total_cooldowns_this_run, _indeed_blocked, _captcha_detection_seq
+    global _consecutive_captcha_failures, _total_cooldowns_this_run, _indeed_blocked, _captcha_detection_seq, _premature_solve_blocks_this_run
 
     # Diagnostic-only, added 2026-07-12: tracks the last (visible, reason)
     # pair logged by _captcha_actually_visible() so its signal source can be
@@ -1860,7 +1914,88 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                 return None
         return None
 
-    def _captcha_actually_visible(after_pin: bool = False):
+    def _read_scoped_token(scope_frame):
+        """
+        Reads g-recaptcha-response from WITHIN the shared DOM container of
+        the currently-visible bframe and its sibling anchor iframe — not
+        just anywhere in their parent frame's document.
+
+        CONFIRMED BROKEN 2026-07-13, SECOND incident same day, AFTER the
+        frame-level fix above already shipped (v1.9.2): scoping to the
+        bframe's parent_frame was not enough. debug_logs/run_20260713_173049.log
+        lines 588-601 (cycle #1) and 621-634 (cycle #2) show the SAME bframe
+        (element_id fn0eqkj9, re-detected twice, not a new challenge) and
+        the SAME token textarea (element_id xzaquzgb) reading len=0 via
+        _log_captcha_identity_snapshot's simpler query at both DETECTED and
+        SOLVED — yet the signal line one row above each "✅ CAPTCHA solved!"
+        cited a DIFFERENT reading entirely (len=2382, line 597 and 630).
+        Same frame, two different g-recaptcha-response-ish elements — Indeed's
+        review-m frame most likely embeds more than one reCAPTCHA instance
+        (e.g. a background "invisible" badge alongside the interactive
+        challenge widget), and a frame-wide querySelectorAll can't tell them
+        apart. That false "solved" auto-clicked Submit ~1s after each pin
+        (lines 602, 635), which is what was resetting/reshaping the live
+        challenge every cycle.
+
+        Fixed by going one level narrower than the frame: find the bframe
+        and anchor's own <iframe> DOM elements (both live in the same
+        frame's document), walk up each one's ancestor chain, and take the
+        nearest COMMON container — the one wrapper element that actually
+        belongs to THIS widget instance. Search for the token ONLY inside
+        that container. Returns (token_len, element_id) so the caller can
+        log exactly which node was read (the element_id uses the same
+        dataset.pwProbeId stamping _log_captcha_identity_snapshot already
+        uses, so it's directly comparable against those log lines).
+
+        Returns (0, None) if no bframe/anchor pair or no common container
+        can be found in scope_frame's document — the caller falls back to
+        the old frame-wide search in that case, e.g. before pinning, when
+        the DOM shape this walk assumes may not exist yet.
+        """
+        if scope_frame is None:
+            return 0, None
+        try:
+            result = scope_frame.evaluate("""
+                () => {
+                    const iframes = Array.from(document.querySelectorAll('iframe'));
+                    const bEl = iframes.find(f => (f.src || '').includes('bframe'));
+                    const aEl = iframes.find(f => (f.src || '').includes('anchor'));
+                    if (!bEl || !aEl) return null;
+
+                    const ancestorsOf = (el) => {
+                        const chain = [];
+                        let cur = el;
+                        while (cur) { chain.push(cur); cur = cur.parentElement; }
+                        return chain;
+                    };
+                    const bChain = ancestorsOf(bEl);
+                    const aSet = new Set(ancestorsOf(aEl));
+                    let common = null;
+                    for (const node of bChain) {
+                        if (aSet.has(node)) { common = node; break; }
+                    }
+                    if (!common) return null;
+
+                    const tokenEl = common.querySelector(
+                        'textarea[name^="g-recaptcha-response"], [id^="g-recaptcha-response"]'
+                    );
+                    if (!tokenEl) return { token_len: 0, element_id: null };
+                    if (!tokenEl.dataset.pwProbeId) {
+                        tokenEl.dataset.pwProbeId = Math.random().toString(36).slice(2, 10);
+                    }
+                    return {
+                        token_len: (tokenEl.value && tokenEl.value.length > 10) ? tokenEl.value.length : 0,
+                        element_id: tokenEl.dataset.pwProbeId,
+                    };
+                }
+            """)
+            if result is None:
+                return 0, None
+            return result.get("token_len", 0) or 0, result.get("element_id")
+        except Exception:
+            return 0, None
+
+    def _captcha_actually_visible_core(after_pin: bool = False):
         """
         True only if the reCAPTCHA bframe iframe is currently visible — not just
         attached to the DOM. reCAPTCHA never removes the bframe after a solve, it
@@ -2082,6 +2217,30 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         # and it lives in the SAME document that embeds the widget (Indeed's
         # own SmartApply frame), not inside the cross-origin anchor/bframe
         # iframes, so Playwright can read it directly.
+        #
+        # Primary read: container-scoped (see _read_scoped_token() for the
+        # 2026-07-13 second-incident root cause — frame-level scoping alone
+        # wasn't enough, this narrows to the shared DOM container of the
+        # bframe+anchor pair). Every "solved" declaration from this signal
+        # logs the exact element_id read, per the same incident.
+        _container_token_len, _container_token_id = _read_scoped_token(_scope_frame)
+        if _container_token_len:
+            _log_signal_transition(
+                False,
+                f"g-recaptcha-response token present (container-scoped), "
+                f"len={_container_token_len}, element_id={_container_token_id}"
+            )
+            return False  # solved — authoritative signal, container-scoped
+
+        # Fallback: the container walk above found no bframe/anchor pair or
+        # no common container (e.g. before pinning, when the DOM shape it
+        # assumes may not exist yet) — fall back to the frame-wide search
+        # rather than silently treating this as unsolved. NOTE: this
+        # fallback carries the exact same ambiguity the container-scoping
+        # fix above exists to avoid (multiple g-recaptcha-response elements
+        # in one frame) — it's a safety net for when the container walk
+        # can't run at all, not a substitute for it. If this path starts
+        # firing "solved" often, that's worth investigating on its own.
         _token_candidates = (
             [_scope_frame] if _scope_frame is not None
             else [f for f in list(page.frames) if not _is_recaptcha_frame(f)]
@@ -2090,20 +2249,29 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
             if f is None:
                 continue
             try:
-                token_len = f.evaluate("""
+                _fallback = f.evaluate("""
                     () => {
-                        const els = document.querySelectorAll(
+                        const el = document.querySelector(
                             'textarea[name^="g-recaptcha-response"], [id^="g-recaptcha-response"]'
                         );
-                        for (const el of els) {
-                            if (el.value && el.value.length > 10) return el.value.length;
+                        if (!el) return { token_len: 0, element_id: null };
+                        if (el.value && el.value.length > 10) {
+                            if (!el.dataset.pwProbeId) {
+                                el.dataset.pwProbeId = Math.random().toString(36).slice(2, 10);
+                            }
+                            return { token_len: el.value.length, element_id: el.dataset.pwProbeId };
                         }
-                        return 0;
+                        return { token_len: 0, element_id: null };
                     }
                 """)
-                if token_len:
-                    _log_signal_transition(False, f"g-recaptcha-response token present, len={token_len}")
-                    return False  # solved — authoritative signal, stop here
+                _fallback_len = (_fallback or {}).get("token_len", 0)
+                if _fallback_len:
+                    _log_signal_transition(
+                        False,
+                        f"g-recaptcha-response token present (frame-wide fallback — container walk "
+                        f"found nothing), len={_fallback_len}, element_id={(_fallback or {}).get('element_id')}"
+                    )
+                    return False  # solved — fallback signal, stop here
             except Exception:
                 pass
 
@@ -2151,6 +2319,51 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
 
         _log_signal_transition(False, "no signal matched (no bframe/anchor found, or no captcha ever appeared)")
         return False
+
+    def _captcha_actually_visible(after_pin: bool = False):
+        """
+        Thin wrapper around _captcha_actually_visible_core() that enforces a
+        minimum-time floor (config.CAPTCHA_MIN_SOLVE_FLOOR_SEC, currently 3s)
+        before trusting a "solved" result — independent of WHICH signal
+        claimed solved (token, aria-checked, or the no-signal fallthrough).
+
+        Added 2026-07-13 after the container-scoping fix above (also added
+        the same day, see _read_scoped_token()) still wasn't proven to close
+        every gap by itself — this is a backstop, not a replacement: even if
+        some future DOM shape defeats the element-scoping again, a "solved"
+        declaration within 3 seconds of first detecting a challenge is not
+        physically plausible for a human to have completed an image-
+        selection challenge, so it's treated as a false positive on its face
+        regardless of cause. Only applies post-pin (after_pin=True) — the
+        pre-pin gate check isn't declaring a solve, it's detecting whether a
+        challenge exists at all, which the floor has no bearing on.
+
+        Every time this floor actually blocks something, it's logged
+        distinctly (⏱) and persisted via _record_premature_solve_block() so
+        a recurring pattern shows up as a rolling 7-day count instead of
+        disappearing into the log the moment the run ends — if the
+        element-scoping fixes above ever regress or a new DOM shape defeats
+        them, this is what surfaces it instead of the bug going unnoticed
+        until the next live incident.
+        """
+        _visible = _captcha_actually_visible_core(after_pin=after_pin)
+        if after_pin and not _visible and _event["detected_at"] is not None:
+            _elapsed = (datetime.now() - _event["detected_at"]).total_seconds()
+            _floor = getattr(cfg, "CAPTCHA_MIN_SOLVE_FLOOR_SEC", 3)
+            if _elapsed < _floor:
+                global _premature_solve_blocks_this_run
+                _premature_solve_blocks_this_run += 1
+                _rolling_7d = _record_premature_solve_block()
+                print(f"          ⏱ Blocked premature solve declaration — only {_elapsed:.1f}s "
+                      f"since detection (floor: {_floor}s) — treating as still unsolved "
+                      f"[{_premature_solve_blocks_this_run} this run, {_rolling_7d} in the past 7 days]")
+                if _rolling_7d > 3:
+                    print(f"          🚨 {_rolling_7d} premature-solve blocks in the past 7 days — "
+                          f"the element-scoping in _read_scoped_token()/_find_captcha_scope_frame() "
+                          f"likely still has a gap. Worth investigating rather than assuming the "
+                          f"3s floor alone is enough long-term.")
+                return True  # force "still showing" — the floor overrides whatever triggered this
+        return _visible
 
     try:
         captcha_visible = _captcha_actually_visible()

@@ -12,12 +12,28 @@ pattern already used earlier for the CAPTCHA overlay fix. Checks:
      logging doesn't change control flow, only adds visibility.
 """
 import sys
+import datetime as _real_datetime_module
 from unittest.mock import MagicMock
 
 sys.path.insert(0, ".")
 import indeed_apply_now as m
 
-m.time.sleep = lambda *_a, **_kw: None
+# v1.9.3 added a 3-second minimum-time floor before any "solved" declaration
+# is trusted, measured against real datetime.now() — which barely advances
+# with time.sleep() mocked to a no-op. Fake the clock, advanced 1 simulated
+# second per wait-loop tick, so SOLVE_AFTER_CHECKS below still lands past
+# the floor instead of being blocked for all 600 ticks until timeout.
+class FakeDatetime(_real_datetime_module.datetime):
+    _current = _real_datetime_module.datetime(2026, 7, 12, 18, 0, 0)
+    @classmethod
+    def now(cls, tz=None):
+        return cls._current
+
+m.datetime = FakeDatetime
+
+def _ticking_sleep(*_a, **_kw):
+    FakeDatetime._current += _real_datetime_module.timedelta(seconds=1)
+m.time.sleep = _ticking_sleep
 
 state = {"visibility_checks": 0, "solved": False}
 captured_prints = []
@@ -79,6 +95,15 @@ class FakeFrame:
         fl.first = FakeBodyLocatorFirst() if sel == "body" else FakeButtonLocatorFirst()
         return fl
     def evaluate(self, js, *a, **kw):
+        # v1.9.3's container-walk query (_read_scoped_token) — this test's
+        # frames don't model a shared DOM container, so report "nothing
+        # found" and let the real code fall through to the frame-wide
+        # fallback below, which this test's state["solved"] flag drives.
+        if "ancestorsOf" in js:
+            return None
+        # v1.9.3's frame-wide fallback token check — {token_len, element_id}.
+        if "token_len" in js and "g-recaptcha-response" in js:
+            return {"token_len": 60, "element_id": "stub-id"} if state["solved"] else {"token_len": 0, "element_id": None}
         if "g-recaptcha-response" in js:
             return 60 if state["solved"] else 0
         if "aria-checked" in js:
