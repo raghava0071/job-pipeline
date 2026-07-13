@@ -1605,6 +1605,21 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
     # _check_and_handle_captcha() invocation.
     _last_signal_logged = {"key": None}
 
+    # Added 2026-07-13: accumulates everything about ONE captcha event as it
+    # happens, reusing data already being computed by the diagnostics above
+    # (no separate tracking logic) so a single consolidated block can be
+    # printed once the event resolves, instead of requiring the scattered
+    # per-tick lines to be pieced together by hand. Only populated once a
+    # real detection happens (see _captcha_detection_seq += 1 below) — a
+    # "no CAPTCHA" call never touches this.
+    _event = {
+        "detected_at": None,
+        "detect_reason": None,
+        "pin_ok": None,
+        "pin_rect": None,
+        "poll_history": [],  # list of (elapsed_seconds, state_label) — one entry per real transition
+    }
+
     def _log_signal_transition(visible: bool, reason: str):
         """
         Print which underlying signal (token / aria-checked / bframe
@@ -1616,12 +1631,64 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         afterward which of the three signals claimed "solved" or why. This
         turns that into something the log states directly instead of
         something inferred after the fact from timestamps.
+
+        Also appends to _event["poll_history"] on every transition (not
+        every tick) — the same dedup this function already does for the
+        printed line is exactly what the consolidated summary needs, so
+        it's recorded here once instead of re-derived later.
         """
         key = (visible, reason)
         if _last_signal_logged["key"] != key:
             _last_signal_logged["key"] = key
             state = "STILL SHOWING (unsolved)" if visible else "solved / not visible"
             print(f"          🔬 captcha signal → {state}   [{reason}]")
+            if _event["detected_at"] is not None:
+                _elapsed = (datetime.now() - _event["detected_at"]).total_seconds()
+                _event["poll_history"].append((_elapsed, f"{state} [{reason}]"))
+
+    def _print_captcha_summary(outcome: str):
+        """
+        One consolidated, greppable block per CAPTCHA event — job/company,
+        when detected and by which signal, whether pinning worked and at
+        what final size, a deduplicated poll history (collapsed to
+        transitions with a duration, not one line per second-long tick),
+        the final outcome, and total elapsed time. Everything here is data
+        _event already collected as a side effect of the existing
+        diagnostics above — nothing is tracked twice.
+        """
+        def _fmt_dur(seconds: float) -> str:
+            seconds = int(seconds)
+            m, s = divmod(seconds, 60)
+            return f"{m}m{s:02d}s" if m else f"{s}s"
+
+        _detected_at = _event["detected_at"]
+        if _detected_at is None:
+            return  # never actually detected anything — nothing to summarize
+        _now = datetime.now()
+        _total_elapsed = (_now - _detected_at).total_seconds()
+
+        print(f"\n          ┌─ CAPTCHA EVENT SUMMARY ──────────────────────────────")
+        print(f"          │ Job: {title} @ {company}")
+        print(f"          │ Detected: {_detected_at.strftime('%H:%M:%S')}  (signal: {_event['detect_reason']})")
+        if _event["pin_ok"] is None:
+            print(f"          │ Pinned: n/a")
+        elif _event["pin_ok"]:
+            print(f"          │ Pinned: yes — {_event['pin_rect']}")
+        else:
+            print(f"          │ Pinned: NO — bframe element not reachable")
+        if _event["poll_history"]:
+            print(f"          │ Poll history:")
+            _prev_t = 0.0
+            for _idx, (_t, _label) in enumerate(_event["poll_history"]):
+                _dur = _t - _prev_t
+                if _idx == 0:
+                    print(f"          │   {_label} — held for {_fmt_dur(_dur)}")
+                else:
+                    print(f"          │   → {_label} at +{_fmt_dur(_t)}")
+                _prev_t = _t
+        print(f"          │ Outcome: {outcome}")
+        print(f"          │ Elapsed: {_fmt_dur(_total_elapsed)} (detected → resolved)")
+        print(f"          └──────────────────────────────────────────────────────\n")
 
     def _log_captcha_identity_snapshot(label: str):
         """
@@ -1724,6 +1791,74 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                     pass
         except Exception as e:
             print(f"          🔬 [{label} #{_captcha_detection_seq}] identity snapshot failed: {e}")
+
+    def _get_current_bframe_probe_id():
+        """
+        Stamps (once) and reads back a stable identity marker on whichever
+        bframe element currently exists — same dataset.pwProbeId technique
+        _log_captcha_identity_snapshot already uses. Used by the wait loop
+        to tell "still the same challenge node" from "Google swapped in a
+        genuinely new one" without needing to re-pin on a blind timer to
+        find out.
+        """
+        for f in list(page.frames):
+            if "bframe" not in (f.url or ""):
+                continue
+            try:
+                el = f.frame_element()
+                if not el:
+                    continue
+                return el.evaluate("""
+                    (e) => {
+                        if (!e.dataset.pwProbeId) {
+                            e.dataset.pwProbeId = Math.random().toString(36).slice(2, 10);
+                        }
+                        return e.dataset.pwProbeId;
+                    }
+                """)
+            except Exception:
+                return None
+        return None
+
+    def _pin_still_onscreen():
+        """
+        Cheap health check on the LAST thing _pin_captcha_box() pinned — the
+        bframe itself, always the last element appended to _pinned_elements
+        — without the full per-element print spam _log_pin_diagnostics does.
+        False means our styling got silently overwritten and needs redoing.
+        """
+        if not _pinned_elements:
+            return False
+        try:
+            _bframe_el = _pinned_elements[-1]
+            _rect = _bframe_el.evaluate("(e) => { const r = e.getBoundingClientRect(); return {w: r.width, h: r.height}; }")
+            return bool(_rect and _rect.get("w", 0) > 0 and _rect.get("h", 0) > 0)
+        except Exception:
+            return False
+
+    def _find_captcha_scope_frame():
+        """
+        Returns the frame that actually EMBEDS the current reCAPTCHA widget
+        — the currently-visible bframe's own parent_frame — so token/aria-
+        checked reads can be scoped to that ONE specific widget instance
+        instead of every frame on the page. See the CONFIRMED BROKEN
+        2026-07-13 note above the token check for why this matters: a
+        page-wide search can silently pick up a stale, unrelated
+        g-recaptcha-response element left over from an earlier step's
+        (hidden but still-attached) iframe.
+
+        Returns None if no bframe currently exists at all — callers should
+        fall back to a page-wide search in that case (e.g. before any
+        challenge has appeared this call).
+        """
+        for f in list(page.frames):
+            if "bframe" not in (f.url or ""):
+                continue
+            try:
+                return f.parent_frame
+            except Exception:
+                return None
+        return None
 
     def _captcha_actually_visible(after_pin: bool = False):
         """
@@ -1919,14 +2054,40 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                 _log_signal_transition(True, _reason)
                 return True
 
+        # CONFIRMED BROKEN 2026-07-13: this used to search EVERY frame on the
+        # page and return the first non-empty g-recaptcha-response found. A
+        # live run showed that picking up an unrelated element with a stale,
+        # constant len=2361 value while the ACTUAL challenge's own response
+        # field (independently confirmed via _log_captcha_identity_snapshot's
+        # simpler, correctly-scoped query) stayed len=0 the entire time —
+        # Indeed's SmartApply flow can leave earlier step iframes attached
+        # (hidden) as the user progresses through steps, and any of them
+        # could carry a leftover recaptcha instance. Once pinned, the
+        # pipeline was declaring "solved" off that stale field within ~1s
+        # and auto-clicking Submit before Raghav had any real chance to
+        # solve the actual on-screen challenge — Submit failed, the outer
+        # retry loop called this whole function fresh again, and it
+        # repeated (6 cycles observed in one run before it was killed).
+        #
+        # Fixed by scoping the search to the frame that actually EMBEDS the
+        # current bframe (its own parent_frame) instead of every frame on
+        # the page — ties the token check to the SAME widget instance the
+        # rest of this function is looking at, without needing to know
+        # Google's internal widget-id scheme.
+        _scope_frame = _find_captcha_scope_frame()
+
         # Token check — the canonical, Google-controlled solved signal.
         # Google populates this element with a long opaque token once the
         # widget considers itself solved — independent of our CSS overrides,
         # and it lives in the SAME document that embeds the widget (Indeed's
         # own SmartApply frame), not inside the cross-origin anchor/bframe
         # iframes, so Playwright can read it directly.
-        for f in list(page.frames):
-            if _is_recaptcha_frame(f):
+        _token_candidates = (
+            [_scope_frame] if _scope_frame is not None
+            else [f for f in list(page.frames) if not _is_recaptcha_frame(f)]
+        )
+        for f in _token_candidates:
+            if f is None:
                 continue
             try:
                 token_len = f.evaluate("""
@@ -1951,10 +2112,19 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         # the moment Google considers the widget solved. Read from INSIDE
         # that frame's own document — untouched by our bframe CSS override,
         # since we never style the anchor frame's internals, only its
-        # z-index on the outer <iframe> tag.
+        # z-index on the outer <iframe> tag. Scoped the same way as the
+        # token check above: only the anchor iframe that's a SIBLING of the
+        # current bframe (same parent_frame) counts, so a stale anchor left
+        # over from an earlier step can't win here either.
         for f in list(page.frames):
             if "anchor" not in (f.url or ""):
                 continue
+            if _scope_frame is not None:
+                try:
+                    if f.parent_frame is not _scope_frame:
+                        continue
+                except Exception:
+                    continue
             try:
                 checked = f.evaluate("""
                     () => {
@@ -2000,6 +2170,12 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         print(f"          ⚠️  Opening the link on your phone will NOT solve it — wrong session")
         print(f"          ⏳ Waiting up to 10 minutes...")
         _log_captcha_identity_snapshot("DETECTED")
+
+        # Start the consolidated event record — everything from here on
+        # (pin result, poll transitions, outcome) gets appended to this same
+        # _event dict instead of only living as scattered print() lines.
+        _event["detected_at"] = datetime.now()
+        _event["detect_reason"] = _last_signal_logged["key"][1] if _last_signal_logged["key"] else "unknown"
 
         # Email alert — clear Mac-only instructions
         try:
@@ -2249,6 +2425,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
             directly, every time this runs — not just when something looks
             wrong.
             """
+            _event["pin_ok"] = pin_succeeded
             if not pin_succeeded or not _pinned_elements:
                 print(f"          🔬 pin diagnostics: nothing pinned this cycle "
                       f"(pin_succeeded={pin_succeeded}, tracked_elements={len(_pinned_elements)})")
@@ -2276,9 +2453,15 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                           f"z-index={_info.get('zIndex') if _info else '?'} "
                           f"display={_info.get('display') if _info else '?'} "
                           f"→ {'ON-SCREEN' if _onscreen else '⚠ ZERO-SIZE / NOT ACTUALLY RENDERED'}")
+                    # The bframe itself (the actual challenge box, not an
+                    # ancestor wrapper) is what the summary block cares
+                    # about — reuse this same read instead of a second pass.
+                    if _info and _info.get("tag") == "IFRAME" and _onscreen:
+                        _event["pin_rect"] = f"{_rect.get('w')}x{_rect.get('h')}"
                 except Exception as e:
                     print(f"          🔬 pin check: could not read element state ({e}) — likely detached from DOM already")
 
+        _pinned_bframe_probe_id = {"id": None}
         try:
             _pin_ok = _pin_captcha_box()
             if _pin_ok:
@@ -2286,6 +2469,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
             else:
                 print(f"          ⚠  Could not pin CAPTCHA window (bframe element not reachable) — solve it in its default position")
             _log_pin_diagnostics(_pin_ok)
+            _pinned_bframe_probe_id["id"] = _get_current_bframe_probe_id()
             print(f"          💡 TIP: If still stuck, click the CAPTCHA area then press Tab → Enter")
         except Exception as e:
             print(f"          ⚠  CAPTCHA resize failed: {e}")
@@ -2309,13 +2493,32 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                 frames = list(page.frames)
                 still_captcha = _captcha_actually_visible(after_pin=True)
 
-                # Re-pin every ~3s while a challenge is still showing — see the
-                # long comment above _pin_captcha_box() for why a one-time pin
-                # at detection isn't enough (a retry or taller challenge
-                # variant can appear later in this same wait loop, unpinned).
-                if still_captcha and i % 3 == 0:
-                    _repin_ok = _pin_captcha_box()
-                    _log_pin_diagnostics(_repin_ok)
+                # Changed 2026-07-13: this used to blind-re-pin every ~3
+                # ticks regardless of whether anything had actually changed
+                # — Raghav reported the box appearing to "reset/reshape"
+                # mid-solve and asked for it to stay exactly as pinned,
+                # untouched, while he's actively working on it. The original
+                # 2026-07-10 reason for periodic re-pinning is still real
+                # (a retry or taller challenge variant can appear later,
+                # unpinned) — so this keeps that protection but makes it
+                # event-driven instead of a blind timer: only touch the
+                # frame if the bframe node has genuinely been swapped for a
+                # different one (Google served a new challenge instance) or
+                # the existing pin has visibly stopped rendering (something
+                # overwrote our styling). Same node, still on-screen at the
+                # size we set → left alone, every tick.
+                if still_captcha:
+                    _current_probe_id = _get_current_bframe_probe_id()
+                    _repin_reason = None
+                    if _current_probe_id is not None and _current_probe_id != _pinned_bframe_probe_id["id"]:
+                        _repin_reason = "challenge instance changed (new bframe node)"
+                    elif not _pin_still_onscreen():
+                        _repin_reason = "pin styling no longer rendering (possibly overwritten)"
+                    if _repin_reason:
+                        print(f"          🔁 Re-pinning — {_repin_reason}")
+                        _repin_ok = _pin_captcha_box()
+                        _log_pin_diagnostics(_repin_ok)
+                        _pinned_bframe_probe_id["id"] = _current_probe_id
 
                 # Check if the page already confirmed (user may have clicked Submit
                 # manually). Indeed's apply UI runs inside a nested iframe, not the
@@ -2339,6 +2542,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                     print(f"          ✅ Confirmation detected during CAPTCHA wait — application submitted!")
                     _clear_pinned_captcha_elements()
                     _consecutive_captcha_failures = 0  # success — reset streak
+                    _print_captcha_summary("solved-and-submitted successfully (confirmed during wait)")
                     return True
 
                 if not still_captcha:
@@ -2414,6 +2618,33 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
                             pass
                     time.sleep(6)
                     _consecutive_captcha_failures = 0  # success — reset streak
+
+                    # Classify the outcome for the summary block by reusing
+                    # the exact same confirm-phrase scan used above for
+                    # already_confirmed — this function can't know whether
+                    # the OUTER caller's later _is_confirmed() check will
+                    # also agree, but it can at least report what its own
+                    # click attempt achieved instead of assuming success.
+                    _post_click_text = ""
+                    for _f in list(page.frames):
+                        try:
+                            _post_click_text += " " + (_f.evaluate("() => document.body ? document.body.innerText : ''") or "")
+                        except Exception:
+                            pass
+                    _post_click_text = _post_click_text.lower()
+                    _submit_confirmed = any(phrase in _post_click_text for phrase in [
+                        "application submitted", "successfully applied",
+                        "your application has been", "application received",
+                        "thanks for applying", "thank you for applying",
+                        "application complete",
+                    ])
+                    if _submit_confirmed:
+                        _outcome = "solved-and-submitted successfully"
+                    elif _clicked_after_solve:
+                        _outcome = "solved-but-submit-failed (clicked Submit, no confirmation yet)"
+                    else:
+                        _outcome = "solved-but-submit-failed (no Submit button could be clicked)"
+                    _print_captcha_summary(_outcome)
                     return True
 
             except Exception:
@@ -2451,6 +2682,7 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
 
         # ── Timeout path ──────────────────────────────────────────────────────
         print(f"          ❌ CAPTCHA not solved in 10 minutes — skipping this job")
+        _print_captcha_summary("timed-out-and-skipped (10 minutes, no solve)")
 
         # RESET browser to Indeed homepage so the next job starts from a clean page
         print(f"          🔄 Resetting browser to Indeed homepage (clearing broken page state)...")
