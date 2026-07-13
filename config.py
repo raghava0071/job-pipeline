@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "1.8.9"
+PIPELINE_VERSION = "1.9.0"
 
 # ── Platform switches — turn a platform off without touching its code ──────────
 # Set to False to skip that platform entirely for the current run.
@@ -30,6 +30,7 @@ LOG_FILE        = DATA_DIR / "apply_log.json"
 TRACKER_FILE    = DATA_DIR / "applications.xlsx"
 SESSION_LI      = Path.home() / ".linkedin_session"
 SESSION_IN      = Path.home() / ".indeed_session"
+RUN_LOCK_PATH   = Path("/tmp/run_all.lock")   # singleton lock — blocks a second run_all.py from starting while one is already running (Jul 13 duplicate-trigger incident)
 SESSION_WD      = BASE_DIR / ".workday_session"
 
 # ── API & Model ────────────────────────────────────────────────────────────────
