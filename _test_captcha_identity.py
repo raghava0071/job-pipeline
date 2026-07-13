@@ -14,12 +14,29 @@ Confirms the new _log_captcha_identity_snapshot() diagnostic:
      labels both snapshots for the same event with the same number.
 """
 import sys
+import datetime as _real_datetime_module
 from unittest.mock import MagicMock
 
 sys.path.insert(0, ".")
 import indeed_apply_now as m
 
-m.time.sleep = lambda *_a, **_kw: None
+# v1.9.3 added a 3-second minimum-time floor before any "solved" declaration
+# is trusted, measured against real datetime.now() — which barely advances
+# with time.sleep() mocked to a no-op. Fake the clock, advanced 1 simulated
+# second per wait-loop tick (matching the real code's time.sleep(1) calls),
+# so SOLVE_AFTER_CHECKS below still lands past the floor instead of being
+# blocked for all 600 ticks until timeout.
+class FakeDatetime(_real_datetime_module.datetime):
+    _current = _real_datetime_module.datetime(2026, 7, 12, 20, 0, 0)
+    @classmethod
+    def now(cls, tz=None):
+        return cls._current
+
+m.datetime = FakeDatetime
+
+def _ticking_sleep(*_a, **_kw):
+    FakeDatetime._current += _real_datetime_module.timedelta(seconds=1)
+m.time.sleep = _ticking_sleep
 
 state = {"visibility_checks": 0, "solved": False}
 captured_prints = []
@@ -83,15 +100,31 @@ class FakeFrame:
         fl.first = FakeBodyLocatorFirst() if sel == "body" else FakeButtonLocatorFirst()
         return fl
     def evaluate(self, js, *a, **kw):
-        if "g-recaptcha-response" in js:
-            # Identity-snapshot JS asks for {value_len, value_preview, probe_id}
-            if "pwProbeId" in js:
-                return {
-                    "value_len": 88 if state["solved"] else 0,
-                    "value_preview": "03AGdBq27abc" if state["solved"] else "",
-                    "probe_id": token_el.stamp_and_read(),
-                }
-            return 88 if state["solved"] else 0
+        # v1.9.3 added _read_scoped_token() (container-walk query, marked by
+        # "ancestorsOf" in its JS) ahead of the plain frame-wide token check
+        # in the real code — this test isn't exercising that container walk
+        # (see _test_captcha_regression_suite.py for that), so it reports
+        # "nothing found" here, which correctly makes the real code fall
+        # through to the frame-wide fallback path below instead.
+        if "ancestorsOf" in js:
+            return None
+        # Identity-snapshot JS asks for {value_len, value_preview, probe_id}
+        # — distinct key shape from the newer token-check paths below, so
+        # match on "value_len" specifically rather than the generic
+        # "g-recaptcha-response" substring both now share.
+        if "value_len" in js:
+            return {
+                "value_len": 88 if state["solved"] else 0,
+                "value_preview": "03AGdBq27abc" if state["solved"] else "",
+                "probe_id": token_el.stamp_and_read(),
+            }
+        # v1.9.3's frame-wide fallback token check — {token_len, element_id}.
+        if "token_len" in js and "g-recaptcha-response" in js:
+            return (
+                {"token_len": 88, "element_id": token_el.stamp_and_read()}
+                if state["solved"] else
+                {"token_len": 0, "element_id": None}
+            )
         if "aria-checked" in js:
             if "pwProbeId" in js:
                 return None  # no anchor checkbox in this mock

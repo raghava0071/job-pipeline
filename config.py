@@ -9,7 +9,19 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "1.9.2"
+PIPELINE_VERSION = "1.9.3"
+
+# Minimum seconds after a CAPTCHA is first detected before a "solved"
+# declaration is trusted, regardless of which signal claims it — added
+# 2026-07-13 after two same-day incidents (see CHANGELOG v1.9.1/v1.9.2/
+# v1.9.3) where a stale/unrelated g-recaptcha-response token caused
+# "solved" to fire ~1s after pinning, well before a human could have
+# actually completed an image-selection challenge. This is a backstop
+# independent of the element-scoping fixes, not a replacement for them —
+# do not remove this thinking it's redundant once scoping looks solid; the
+# whole reason it exists is that scoping was already fixed once (v1.9.2)
+# and still wasn't enough (v1.9.3).
+CAPTCHA_MIN_SOLVE_FLOOR_SEC = 3
 
 # ── Platform switches — turn a platform off without touching its code ──────────
 # Set to False to skip that platform entirely for the current run.

@@ -29,6 +29,7 @@ Checks:
      and still on-screen — only the single initial pin.
 """
 import sys
+import datetime as _real_datetime_module
 from unittest.mock import MagicMock
 
 sys.path.insert(0, ".")
@@ -38,6 +39,20 @@ m.time.sleep = lambda *_a, **_kw: None
 m.notifier.send_captcha_alert = lambda **_kw: True
 m.notifier.send_alert = lambda **_kw: True
 m.random.uniform = lambda *_a, **_kw: 0
+
+# v1.9.3 added a 3-second minimum-time floor before any "solved" declaration
+# is trusted (config.CAPTCHA_MIN_SOLVE_FLOOR_SEC) — measured against real
+# datetime.now(), which barely advances with time.sleep() mocked to a
+# no-op above. Fake the clock too, advanced in lockstep with the tick
+# counter below, so this test still reaches a genuine (post-floor) solve
+# instead of being blocked for all 600 ticks until timeout.
+class FakeDatetime(_real_datetime_module.datetime):
+    _current = _real_datetime_module.datetime(2026, 7, 13, 9, 0, 0)
+    @classmethod
+    def now(cls, tz=None):
+        return cls._current
+
+m.datetime = FakeDatetime
 
 captured = []
 _orig_print = print
@@ -93,6 +108,16 @@ class FakeFrame:
         fl.first = loc
         return fl
     def evaluate(self, js, *a, **kw):
+        # v1.9.3's container-walk query (_read_scoped_token) — this test's
+        # frames don't model a shared DOM container, so report "nothing
+        # found" here and let the real code fall through to the frame-wide
+        # fallback below, which this test DOES model via _token_len_fn.
+        if "ancestorsOf" in js:
+            return None
+        # v1.9.3's frame-wide fallback token check — {token_len, element_id}.
+        if "token_len" in js and "g-recaptcha-response" in js:
+            _len = self._token_len_fn()
+            return {"token_len": _len, "element_id": "stub-id"} if _len else {"token_len": 0, "element_id": None}
         if "g-recaptcha-response" in js and "pwProbeId" not in js:
             return self._token_len_fn()
         if "aria-checked" in js and "pwProbeId" not in js:
@@ -126,6 +151,7 @@ fake_page.url = "https://smartapply.indeed.com/beta/indeedapply/form/review-m"
 _orig_sleep = m.time.sleep
 def _ticking_sleep(*_a, **_kw):
     state["ticks"] += 1
+    FakeDatetime._current += _real_datetime_module.timedelta(seconds=1)
 m.time.sleep = _ticking_sleep
 
 builtins.print = _capturing_print
