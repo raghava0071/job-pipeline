@@ -3362,12 +3362,21 @@ def main():
 
             print(f"\n  📋 {company} — {title}")
 
-            # Score
-            result = ce.score_fit(profile_summary, jd, title, company)
+            # Score fit — Claude (paid) or free ATS keyword match ─────────
+            # Toggle: config.USE_CLAUDE_SCORING (default False, per Raghav's
+            # request 2026-07-06 — no ongoing API cost). Matches the exact
+            # conditional already used in indeed_apply_now.py / linkedin_apply_now.py
+            # so all three platforms behave identically.
+            if getattr(cfg, "USE_CLAUDE_SCORING", True):
+                result = ce.score_fit(profile_summary, jd, title, company)
+            else:
+                result = jdp.ats_fit_score(jd, title, company)
             score  = result.get("score", 0) if isinstance(result, dict) else int(result)
             scored += 1
-            print(f"  🎯 Fit: {score}%  {'✅' if score >= cfg.FIT_THRESHOLD else '❌'}")
-            if score < cfg.FIT_THRESHOLD:
+            _threshold = cfg.FIT_THRESHOLD if getattr(cfg, "USE_CLAUDE_SCORING", True) \
+                         else getattr(cfg, "ATS_FIT_THRESHOLD", 60)
+            print(f"  🎯 Fit: {score}%  {'✅' if score >= _threshold else '❌'}")
+            if score < _threshold:
                 skipped += 1; return
 
             # Build resume
