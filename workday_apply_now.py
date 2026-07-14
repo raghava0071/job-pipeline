@@ -166,7 +166,25 @@ def _exists(page, sel, timeout=3000) -> bool:
         return False
 
 def _click(page, sel, timeout=8000):
-    """Click a Workday element — never hangs. Falls back to JS click."""
+    """Click a Workday element — never hangs. Falls back to JS click.
+
+    2026-07-14: confirmed live on Boeing + Relx (submit_debug_boeing_*.json,
+    submit_debug_relx_*.json — both show coveredBySomethingElse: true) that
+    Workday's Create Account button sits under a separate DIV that actually
+    receives the click — the button itself is aria-hidden/tabindex=-2, a
+    deliberate proxy pattern. The old JS fallback below dispatched its
+    synthetic click on the ORIGINAL selector, which has the same blind spot
+    whenever the real handler lives on whatever's covering it, not the
+    element itself. Since the intercepting element's class differs between
+    companies (css-1n9xe37 vs css-1acu6fs — hashed CSS-module names, not a
+    stable selector) and its data-automation-id/aria-label were never
+    independently confirmed, this doesn't hardcode any assumption about what
+    the overlay is — it just clicks whatever document.elementFromPoint()
+    actually reports at the button's own center, generically. This helper is
+    shared by Sign In, Apply, Submit Application, the agreement checkbox,
+    and the date picker — fixing it here (not just in Create Account) covers
+    all of them the same way.
+    """
     try:
         el = page.locator(sel).first
         el.wait_for(state="visible", timeout=timeout)
@@ -176,13 +194,51 @@ def _click(page, sel, timeout=8000):
         try:
             el.click(timeout=4000, force=False)
         except Exception:
-            # JS fallback — bypasses overlays and disabled state
-            page.evaluate(
-                "(s)=>{const b=document.querySelector(s);"
-                "if(b){b.removeAttribute('disabled');b.removeAttribute('aria-disabled');"
-                "b.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));}}",
+            # Diagnose before falling back — is something actually covering
+            # this element, or did the click just fail for some other reason?
+            # Logged unconditionally (not just when covered) so a future
+            # occurrence of this pattern anywhere else shows up in the log
+            # instead of needing another live investigation to find it.
+            diag = page.evaluate(
+                """(s) => {
+                    const b = document.querySelector(s);
+                    if (!b) return {found: false};
+                    const r = b.getBoundingClientRect();
+                    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+                    const top = document.elementFromPoint(cx, cy);
+                    const covered = !!(top && top !== b && !b.contains(top));
+                    let clicked = false;
+                    if (covered) {
+                        // Click whatever's actually on top — no assumption
+                        // about its selector/attributes, just click it.
+                        top.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
+                        clicked = true;
+                    } else {
+                        b.removeAttribute('disabled');
+                        b.removeAttribute('aria-disabled');
+                        b.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
+                        clicked = true;
+                    }
+                    return {
+                        found: true, covered, clicked,
+                        topTag: top ? top.tagName : null,
+                        topId: (top && top.id) ? top.id : null,
+                        topClass: (top && top.className) ? String(top.className) : null,
+                    };
+                }""",
                 sel
-            )
+            ) or {}
+            if diag.get("found") and diag.get("covered"):
+                top_desc = (diag.get("topTag") or "?") \
+                    + (("#" + diag["topId"]) if diag.get("topId") else "") \
+                    + (("." + str(diag["topClass"]).replace(" ", ".")) if diag.get("topClass") else "")
+                print(f"          ⚠  Click intercepted on {sel} — covered by {top_desc} — "
+                      f"clicked the overlay directly instead")
+            elif diag.get("found"):
+                print(f"          ⚠  Click failed on {sel} — not covered by anything "
+                      f"(elementFromPoint == the button itself) — used direct JS click")
+            else:
+                print(f"          ⚠  Click failed on {sel} — element not found for JS fallback")
         return True
     except Exception:
         return False
