@@ -1647,6 +1647,47 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
                     print(f"          ⚠  Click registered but page didn't change — trying next method")
             except Exception as e:
                 print(f"          ⚠  Playwright click failed: {e}")
+                # 2026-07-14: confirmed live (submit_debug_boeing_20260714_173647.json,
+                # same "intercepts pointer events" signature as v1.9.5's _click() fix)
+                # that this exception IS the overlay-interception pattern — but this
+                # function has its own bespoke click escalation and never calls the
+                # shared _click() helper, so that fix never ran here. Same generic,
+                # no-hardcoded-selector approach: click whatever
+                # document.elementFromPoint() actually reports at the button's own
+                # center, instead of assuming the button itself is the real target.
+                try:
+                    overlay_diag = submit_btn.evaluate("""
+                        (b) => {
+                            const r = b.getBoundingClientRect();
+                            const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+                            const top = document.elementFromPoint(cx, cy);
+                            const covered = !!(top && top !== b && !b.contains(top));
+                            let clicked = false;
+                            if (covered) {
+                                top.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
+                                clicked = true;
+                            }
+                            return {
+                                covered, clicked,
+                                topTag: top ? top.tagName : null,
+                                topId: (top && top.id) ? top.id : null,
+                                topClass: (top && top.className) ? String(top.className) : null,
+                            };
+                        }
+                    """) or {}
+                    if overlay_diag.get("covered") and overlay_diag.get("clicked"):
+                        top_desc = (overlay_diag.get("topTag") or "?") \
+                            + (("#" + overlay_diag["topId"]) if overlay_diag.get("topId") else "") \
+                            + (("." + str(overlay_diag["topClass"]).replace(" ", ".")) if overlay_diag.get("topClass") else "")
+                        print(f"          🖱  Click intercepted — covered by {top_desc} — "
+                              f"clicked the overlay directly, verifying (up to 10s)...")
+                        submitted = _submit_progressed(patience_s=10.0)
+                        if not submitted:
+                            print(f"          ⚠  Overlay click registered but page didn't change — trying next method")
+                    else:
+                        print(f"          ⚠  Playwright click failed but nothing detected covering the button — trying next method")
+                except Exception as e2:
+                    print(f"          ⚠  Overlay-click diagnostic failed: {e2}")
 
         # Method 2: JS click with disabled-attr removal
         if not submitted:
