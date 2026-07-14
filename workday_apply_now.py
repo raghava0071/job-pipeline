@@ -2200,6 +2200,47 @@ def step_review_and_submit(page, dry_run=False) -> bool:
 
 # ── Generic question filler (Claude + cache) ──────────────────────────────────
 
+def _log_stuck_fields(fields: list, job_title: str, company: str, source: str) -> None:
+    """Record fields that NEITHER the cache layers (qa_answers.py /
+    claude_answers.py / SQLite cache) NOR PROFILE_FALLBACK could answer —
+    the free, no-API-cost equivalent of the old live-Claude fallback. Reuses
+    the same data/stuck_questions.json file indeed_apply_now.py already
+    writes to (same list-of-dicts shape) so there's one place to check for
+    "which fields need a manual answer added," not a second file to know
+    about. Never raises — a logging failure must not also fail the job.
+    """
+    if not fields:
+        return
+    try:
+        stuck_file = cfg.BASE_DIR / "data" / "stuck_questions.json"
+        stuck_file.parent.mkdir(parents=True, exist_ok=True)
+        existing = []
+        if stuck_file.exists():
+            try:
+                existing = json.loads(stuck_file.read_text())
+            except Exception:
+                existing = []
+        existing.append({
+            "timestamp": datetime.now().isoformat(),
+            "company": company,
+            "job_title": job_title,
+            "source": source,   # "_smart_fill_questions" or "_smart_fill_custom_dropdowns"
+            "fields": [
+                {"label": f.get("label", ""), "type": f.get("type", ""),
+                 "options": f.get("options", [])}
+                for f in fields
+            ],
+            "status": "no cache/PROFILE_FALLBACK match — needs a manual answer "
+                      "added to qa_answers.py or PROFILE_FALLBACK",
+        })
+        stuck_file.write_text(json.dumps(existing, indent=2))
+        labels = [f.get("label", "") for f in fields]
+        print(f"          📝 {len(fields)} field(s) with no answer anywhere — "
+              f"logged to data/stuck_questions.json: {labels}")
+    except Exception as e:
+        print(f"          ⚠  Could not log stuck field(s): {e}")
+
+
 def _build_profile_context() -> str:
     """Shared candidate-profile block injected into every Claude prompt that
     fills a Workday field or dropdown. Pulled out into one place so
@@ -2415,81 +2456,19 @@ def _smart_fill_questions(page, profile_text: str, job_title: str, company: str,
         else:
             uncached.append(f)
 
-    if uncached:
-        import anthropic
-        client = anthropic.Anthropic(api_key=cfg.get_api_key())
-        fields_desc = "\n".join(
-            f'{i+1}. label="{f["label"]}" type={f["type"]}'
-            + (f' options={f["options"]}' if f.get("options") else '')
-            for i, f in enumerate(uncached)
-        )
+    # LAYER 4 (live Claude call) intentionally REMOVED 2026-07-14 — Raghav's
+    # explicit decision: no anthropic package, no API calls, no cost for
+    # question-answering, full stop. This used to `import anthropic`
+    # unconditionally whenever any field reached here uncached; when
+    # anthropic wasn't installed in whatever Python actually ran, that raised
+    # an unhandled ModuleNotFoundError that crashed the WHOLE job mid-form
+    # (confirmed live on Boeing — stopped right after several fields had
+    # already been filled correctly via QA/SAVED answers). Every uncached
+    # field now goes straight to LAYER 5 (PROFILE_FALLBACK) below, which is
+    # free and was already the safety net for when Claude failed anyway —
+    # this just makes that the ONLY path instead of a fallback for one.
 
-        # Build full profile context for Claude (shared with the custom-dropdown resolver)
-        profile_context = _build_profile_context() + f"""
-EXTRA CONTEXT (resume snippet):
-{profile_text[:600]}
-"""
-
-        prompt = f"""You are filling a Workday job application form for:
-Job:     {job_title}
-Company: {company}
-
-{profile_context}
-
-FORM FIELDS TO FILL:
-{fields_desc}
-
-Return ONLY a JSON object: {{"field label": "answer"}}
-
-RULES (follow exactly):
-- Radio / checkbox / select: copy ONE option text EXACTLY as shown
-- Work authorization / legally authorized: "Yes"
-- Sponsorship now or in future: "No"
-- Visa type: "F-1 STEM OPT"
-- {_salary_rule(jd_text, job_title)}
-- Hourly rate: "40"
-- Notice period / start date: "2 weeks"
-- Willing to relocate: "No"
-- Open to remote: "Yes"
-- Gender / race / ethnicity / disability: "I don't wish to answer" (or closest option)
-- Veteran: "I am not a protected veteran" (or closest option)
-- Any "do you have experience with X": "Yes"
-- Years of experience (generic): "2"
-- Years of experience with a specific skill: look it up in SKILLS & YEARS above
-- Cover letter / why interested: write 2 sentences using the candidate profile
-- NEVER mention Community Dreams Foundation or Mobile Stage Pros
-- If unsure, make the safest choice based on the profile above"""
-
-        try:
-            resp = client.messages.create(
-                model=cfg.CLAUDE_MODEL_FAST, max_tokens=1500,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            raw = resp.content[0].text.strip()
-            m = re.search(r'\{.*\}', raw, re.DOTALL)
-            if m:
-                claude_ans_map = _json.loads(m.group(0))
-                def _n(s): return re.sub(r'[\s\*\?\:]+$', '', s).strip().lower()
-                for f_unc in uncached:
-                    orig = f_unc.get("label", "")
-                    matched = claude_ans_map.get(orig)
-                    if matched is None:
-                        for ck, cv in claude_ans_map.items():
-                            if _n(ck) == _n(orig) or _n(orig) in _n(ck) or _n(ck) in _n(orig):
-                                matched = cv; break
-                    if matched is not None and str(matched).strip():
-                        answers[orig] = matched
-                        # Save to claude_answers.py (permanent, human-readable)
-                        if _claude_ans:
-                            _claude_ans.save(orig, str(matched))
-                        # Also save to SQLite cache (legacy)
-                        _cache.save(orig, str(matched))
-                        print(f"             ✔ Claude → '{orig}': '{str(matched)[:60]}'")
-        except Exception as e:
-            print(f"          ⚠  Claude API error: {e}")
-
-    # LAYER 4 — Profile-based fallback (no API, decided from profile data)
-    # Used when Claude fails or is unavailable — better than leaving fields blank.
+    # LAYER 5 — Profile-based fallback (no API, decided from profile data)
     _smart_salary = _pick_salary(jd_text, job_title)
     PROFILE_FALLBACK = {
         "work authorization":       "Yes",
@@ -2539,6 +2518,9 @@ RULES (follow exactly):
                 if _claude_ans:
                     _claude_ans.save(lbl, val)
                 break
+
+    _still_stuck = [f for f in uncached if not answers.get(f.get("label", ""))]
+    _log_stuck_fields(_still_stuck, job_title, company, "_smart_fill_questions")
 
     # Fill DOM
     filled = _safe_eval(page, """
@@ -2757,60 +2739,22 @@ def _smart_fill_custom_dropdowns(page, job_title: str = "", company: str = "",
         else:
             uncached.append(c)
 
-    if uncached:
-        try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=cfg.get_api_key())
-            fields_desc = "\n".join(
-                f'{i+1}. label="{c["label"]}" options={c["options"]}'
-                for i, c in enumerate(uncached)
-            )
-            prompt = f"""You are filling a Workday job application dropdown for:
-Job:     {job_title or "(unknown)"}
-Company: {company or "(unknown)"}
+    # Live Claude call intentionally REMOVED 2026-07-14 — same no-cost
+    # decision as _smart_fill_questions(). This one was already wrapped in
+    # try/except so it never crashed, but it still cost money and added
+    # nothing the first-option fallback below can't do for free. Uncached
+    # dropdowns now go straight to that fallback.
 
-{_build_profile_context()}
-
-DROPDOWN FIELDS TO ANSWER — pick exactly one option per field:
-{fields_desc}
-
-Return ONLY a JSON object: {{"field label": "exact option text"}}
-Copy the option text EXACTLY as shown in the options list for that field.
-If genuinely unsure, pick the safest/most neutral option (e.g. "I don't
-wish to answer" for demographic questions, or a generic sourcing channel
-like "Company Website" / "Other" for how-did-you-hear-about-us style
-questions)."""
-            resp = client.messages.create(
-                model=cfg.CLAUDE_MODEL_FAST, max_tokens=500,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            raw = resp.content[0].text.strip()
-            m = re.search(r'\{.*\}', raw, re.DOTALL)
-            if m:
-                claude_ans_map = json.loads(m.group(0))
-                def _n(s): return re.sub(r'[\s\*\?\:]+$', '', s).strip().lower()
-                for c in uncached:
-                    orig = c["label"]
-                    matched = claude_ans_map.get(orig)
-                    if matched is None:
-                        for ck, cv in claude_ans_map.items():
-                            if _n(ck) == _n(orig) or _n(orig) in _n(ck) or _n(ck) in _n(orig):
-                                matched = cv; break
-                    if matched is not None and str(matched).strip():
-                        answers[orig] = str(matched)
-                        if _claude_ans:
-                            _claude_ans.save(orig, str(matched))
-                        _cache.save(orig, str(matched))
-                        print(f"             ✔ Claude → '{orig}': '{str(matched)[:60]}'")
-        except Exception as e:
-            print(f"          ⚠  Claude API error (custom dropdowns): {e}")
-
-    # Anything Claude still couldn't answer — pick the first real option
-    # rather than leave it blank. A valid answer beats a hard validation error.
+    # Anything not answered by cache — pick the first real option rather
+    # than leave it blank. A valid answer beats a hard validation error.
+    _still_stuck = []
     for c in uncached:
         if not answers.get(c["label"]) and c.get("options"):
             answers[c["label"]] = c["options"][0]
-            print(f"             ⚠ fallback '{c['label']}' → '{c['options'][0]}' (no cache/Claude match)")
+            print(f"             ⚠ fallback '{c['label']}' → '{c['options'][0]}' (no cache match)")
+        elif not answers.get(c["label"]):
+            _still_stuck.append(c)
+    _log_stuck_fields(_still_stuck, job_title, company, "_smart_fill_custom_dropdowns")
 
     # Reopen each dropdown and click the resolved option
     filled = 0
