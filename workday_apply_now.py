@@ -1752,11 +1752,29 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
 
         time.sleep(5)  # Wait for Workday to process
 
-        # Check for success — Workday shows "check your email" on same page
-        body = _safe_eval(page, "() => document.body.innerText.toLowerCase()", "") or ""
-        SUCCESS_PHRASES = ["check your email", "verify your email", "verification email",
-                           "sent you an email", "please check", "confirm your email"]
-        if any(p in body for p in SUCCESS_PHRASES):
+        # 2026-07-14: confirmed live on Spgi that this exact banner —
+        # "An email has been sent to you. Please verify your account." —
+        # renders on the page Workday redirects to after Create Account
+        # submits, but ISN'T caught by the phrase list below ("has been
+        # sent to you" vs the old "sent you an email" — different word
+        # order, no substring match). Missing here, it fell straight
+        # through to the errors-panel scan further down, which reads the
+        # SAME banner (Workday renders it via [role="alert"], the same
+        # selector used for real validation errors) and — with no phrase
+        # in EXISTS matching either — treated a successful "check your
+        # email" state as a hard failure and abandoned the job, unlike
+        # Relx's sign-in path, which defers cleanly on the equivalent
+        # state. One shared phrase list, checked in BOTH places (body-text
+        # scan below AND the errors-panel scan), so neither can
+        # independently mis-classify this again.
+        EMAIL_VERIFY_PENDING_PHRASES = [
+            "check your email", "verify your email", "verification email",
+            "sent you an email", "an email has been sent",
+            "please verify your account", "verify your account",
+            "please check", "confirm your email",
+        ]
+
+        def _await_email_verification():
             print(f"          ✅ Account created — waiting for Gmail verification link...")
             print(f"          📧 Check Gmail (your_candidate_email@gmail.com) for verification email")
             # Auto-fetch and click the verification link from Gmail
@@ -1775,6 +1793,11 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
                     time.sleep(5)
             except Exception as e:
                 print(f"          ⚠  Gmail check failed: {e}")
+
+        # Check for success — Workday shows "check your email" on same page
+        body = _safe_eval(page, "() => document.body.innerText.toLowerCase()", "") or ""
+        if any(p in body for p in EMAIL_VERIFY_PENDING_PHRASES):
+            _await_email_verification()
         # Also check for intervention detection (OTP, security question etc)
         kind = _detect_intervention(page)
         if kind and kind != "email_verify":
@@ -1791,15 +1814,24 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
         """) or []
 
         if errors:
-            print(f"          ❌ Errors after submit: {errors}")
             blob = " ".join(errors).lower()
-            EXISTS = ["already", "in use", "exists", "associated with an account",
-                      "an account with this", "already registered"]
-            if any(p in blob for p in EXISTS):
-                print(f"          ↩  Email already registered for {company_key}")
-                return "exists"
-            _failure_shot(page, f"createacct_{company_key}")
-            return False
+            if any(p in blob for p in EMAIL_VERIFY_PENDING_PHRASES):
+                # Same state the body-text scan above already recognizes as
+                # success-pending-verification — just rendered via an
+                # alert-styled element instead of plain body text. Not a
+                # real error: don't fail the job, defer it the same way.
+                print(f"          ℹ  Verification-pending message rendered as an "
+                      f"alert element (not a real error): {errors}")
+                _await_email_verification()
+            else:
+                print(f"          ❌ Errors after submit: {errors}")
+                EXISTS = ["already", "in use", "exists", "associated with an account",
+                          "an account with this", "already registered"]
+                if any(p in blob for p in EXISTS):
+                    print(f"          ↩  Email already registered for {company_key}")
+                    return "exists"
+                _failure_shot(page, f"createacct_{company_key}")
+                return False
 
         # Check for OTP/verification after account creation
         kind = _detect_intervention(page)
