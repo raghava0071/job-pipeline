@@ -112,6 +112,13 @@ def run_linkedin(limit, dry_run, result_queue):
             sys.argv = old_argv
 
     except Exception as e:
+        try:
+            import traceback, error_log
+            error_log.record("linkedin", "CRASH",
+                             "LinkedIn engine crashed before finishing.",
+                             context=traceback.format_exc()[-1500:])
+        except Exception:
+            pass
         result_queue.put(("linkedin", f"error: {e}"))
 
 
@@ -143,6 +150,13 @@ def run_indeed(limit, dry_run, result_queue):
             sys.argv = old_argv
 
     except Exception as e:
+        try:
+            import traceback, error_log
+            error_log.record("indeed", "CRASH",
+                             "Indeed engine crashed before finishing.",
+                             context=traceback.format_exc()[-1500:])
+        except Exception:
+            pass
         result_queue.put(("indeed", f"error: {e}"))
 
 
@@ -176,6 +190,13 @@ def run_workday(limit, dry_run, result_queue, queue_only=False):
             sys.argv = old_argv
 
     except Exception as e:
+        try:
+            import traceback, error_log
+            error_log.record("workday", "CRASH",
+                             "Workday engine crashed before finishing.",
+                             context=traceback.format_exc()[-1500:])
+        except Exception:
+            pass
         result_queue.put(("workday", f"error: {e}"))
 
 
@@ -287,7 +308,28 @@ def _auto_diagnose(errors: dict):
         prompt_file.unlink(missing_ok=True)
 
 
+def _keep_mac_awake():
+    """
+    Keep the Mac awake for the whole run. Added 2026-07-21 after a scheduled
+    run ballooned to 46 hours (2768m): the pipeline's timeouts are plain
+    wall-clock time.sleep() calls, and when the Mac sleeps mid-run (lid closed)
+    the whole process freezes — a '5-minute' login wait silently became ~40
+    hours. `caffeinate -w <pid>` runs until THIS process exits, then stops on
+    its own, so it can't leave the Mac awake forever. No plist/launchd change
+    needed — self-contained. macOS only; silently skipped elsewhere.
+    """
+    try:
+        subprocess.Popen(
+            ["caffeinate", "-i", "-m", "-w", str(os.getpid())],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        print("  ☕ caffeinate: Mac will stay awake for this run")
+    except Exception as _e:
+        print(f"  ⚠  Could not start caffeinate ({str(_e)[:60]}) — run continues, but keep the Mac awake manually")
+
+
 def main():
+    _keep_mac_awake()
     parser = argparse.ArgumentParser(description="Run LinkedIn + Indeed + Workday pipelines in parallel")
     parser.add_argument("--li-limit",       type=int, default=50,  help="LinkedIn max applies (default 50)")
     parser.add_argument("--in-limit",       type=int, default=100, help="Indeed max applies (default 100)")
