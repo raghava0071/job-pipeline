@@ -33,6 +33,7 @@ sys.path.insert(0, str(PIPELINE_DIR))
 import config as cfg
 import answer_cache as _cache
 import notifier
+import error_log
 try:
     import qa_answers as _qa
 except ImportError:
@@ -263,6 +264,9 @@ def ensure_login(page):
                 time.sleep(8)
             else:
                 print("  ❌ Could not reach Indeed after 3 attempts — skipping this run")
+                error_log.record("indeed", "UNREACHABLE",
+                                 "Could not load indeed.com after 3 attempts — run skipped.",
+                                 context=f"last error: {str(_e)[:200]}")
                 _indeed_blocked = True
                 return
     time.sleep(3)
@@ -285,6 +289,12 @@ def ensure_login(page):
     # When running via scheduler (no terminal), input() crashes with EOF.
     # Instead: send email alert and wait up to 5 minutes for user to log in.
     print("\n  🔐  Indeed not logged in — sending alert and waiting up to 5 minutes...")
+    error_log.record("indeed", "NOT_LOGGED_IN",
+                     "Indeed homepage loaded but no logged-in account indicator found. "
+                     "Often this is the Cloudflare 'Are you a robot?' / verification page "
+                     "showing instead of the real homepage (the checkbox will not pass in "
+                     "the automated browser window).",
+                     url="https://www.indeed.com/")
     try:
         notifier.send_alert(
             subject="🔐 Indeed Login Required — Pipeline Paused",
@@ -338,6 +348,13 @@ def ensure_login(page):
                 print(f"  🚨 Cloudflare is blocking Indeed entirely right now (not a login issue) — "
                       f"stopping instead of re-hammering the same block for 5 minutes.")
                 print(f"  💡 This session/IP is flagged. Wait before trying again instead of re-running.")
+                error_log.record("indeed", "ROBOT_CHECK",
+                                 "Cloudflare 'Are you a robot?' / 'Additional Verification Required' "
+                                 "wall detected during the login wait. The automated browser is "
+                                 "flagged — the checkbox will NOT pass even on a manual click in "
+                                 "that window. Session/IP is flagged; wait before re-running.",
+                                 context=f"page signal matched in body text (ray id / verify you are human / additional verification required)",
+                                 url="https://www.indeed.com/")
                 _indeed_blocked = True
                 return
             logged_in = page.evaluate("""
@@ -358,6 +375,12 @@ def ensure_login(page):
         print(f"  ⏳ Still waiting for Indeed login... ({(i+1)*_login_wait_interval}s elapsed)")
 
     print("  ❌ Indeed login timeout — skipping this run")
+    error_log.record("indeed", "LOGIN_TIMEOUT",
+                     "Waited the full login window and never detected a logged-in account. "
+                     "Either no one logged in, or the Cloudflare verification page never "
+                     "cleared. Run skipped.",
+                     context=f"waited ~{_login_wait_total}s across {_login_wait_attempts} checks",
+                     url="https://www.indeed.com/")
     _indeed_blocked = True
 
 def extract_job_panel(page):
@@ -2382,6 +2405,11 @@ def _check_and_handle_captcha(page, title="", company="", job_url=""):
         print(f"          👉 Go to your Mac and solve the CAPTCHA in the browser window")
         print(f"          ⚠️  Opening the link on your phone will NOT solve it — wrong session")
         print(f"          ⏳ Waiting up to 10 minutes...")
+        error_log.record("indeed", "CAPTCHA",
+                         "reCAPTCHA image/checkbox challenge appeared mid-application. "
+                         "Pipeline paused up to 10 min waiting for a manual solve on the Mac.",
+                         context=f"{title} @ {company}",
+                         url=current_url)
         _log_captcha_identity_snapshot("DETECTED")
 
         # Start the consolidated event record — everything from here on
@@ -4638,10 +4666,18 @@ def main():
                 headless=False,
                 channel="chrome",
                 args=["--disable-blink-features=AutomationControlled"],
+                # 2026-07-21: strip Playwright's default --enable-automation flag.
+                # It's the last remaining hard automation tell: it shows the
+                # "Chrome is being controlled by automated test software" infobar
+                # and sets a C++-level automation signal that Cloudflare Turnstile
+                # checks — the one stealth gap left after v1.3.0's channel=chrome +
+                # navigator.webdriver patches. Long shot on its own (those already
+                # failed for weeks) but free and removes a real, deterministic tell.
+                ignore_default_args=["--enable-automation"],
                 viewport={"width": 1280, "height": 900},
                 timeout=getattr(cfg, "INDEED_BROWSER_LAUNCH_TIMEOUT_MS", 60000),
             )
-            print("  🌐  Using real Google Chrome (channel=chrome)")
+            print("  🌐  Using real Google Chrome (channel=chrome, automation flag stripped)")
         except Exception as _chrome_err:
             print(f"  ⚠  Real Chrome not available ({str(_chrome_err)[:80]}) — falling back to bundled Chromium")
             browser = pw.chromium.launch_persistent_context(
@@ -4811,6 +4847,11 @@ def main():
                             page.goto(url, wait_until="domcontentloaded", timeout=30000)
                             if _is_cloudflare_page():
                                 print(f"  ❌ Cloudflare still blocking after retry — skipping this query")
+                                error_log.record("indeed", "ROBOT_CHECK",
+                                                 "Cloudflare 'Are you a robot?' challenge on a search "
+                                                 "page — still blocking after one retry, query skipped.",
+                                                 context=f"Query: {query} (page {_page_start//15+1})",
+                                                 url=url)
                                 _consecutive_cf_blocks += 1
                                 break
                             else:
@@ -4829,6 +4870,10 @@ def main():
                         if ("Target page, context or browser has been closed" in _err_str
                                 or "Not attached to an active page" in _err_str):
                             print(f"  🛑 Chrome window closed — can't continue (not a network issue, no point retrying)")
+                            error_log.record("indeed", "BROWSER_CLOSED",
+                                             "The Indeed Chrome window closed/crashed mid-run — "
+                                             "remaining searches stopped.",
+                                             context=f"Query: {query} | {_err_str[:200]}")
                             _browser_window_closed = True
                             break
                         print(f"  ⚠  Search load failed (p{_page_start//15+1}, attempt {_attempt+1}/3): {_err_str[:60]}")
@@ -4897,6 +4942,11 @@ def main():
             if _consecutive_cf_blocks >= _cf_block_bail:
                 print(f"\n  🛑 {_consecutive_cf_blocks} confirmed Cloudflare blocks in a row — "
                       f"stopping Indeed run early instead of continuing to hammer a flagged session.")
+                error_log.record("indeed", "SESSION_BLOCKED",
+                                 f"Stopped Indeed run early after {_consecutive_cf_blocks} confirmed "
+                                 f"Cloudflare 'Are you a robot?' walls in a row. Session/IP is flagged; "
+                                 f"too many requests too quickly. Let it sit a few hours before re-running.",
+                                 context=f"last query: {query}")
                 try:
                     notifier.send_alert(
                         subject=f"🛑 Indeed run stopped — {_consecutive_cf_blocks} Cloudflare blocks in a row",
@@ -4921,6 +4971,11 @@ def main():
                 if _consecutive_empty_queries >= _empty_query_bail:
                     print(f"\n  🛑 {_consecutive_empty_queries} consecutive searches returned 0 cards — "
                           f"Indeed is likely blocking this session. Stopping Indeed run early.")
+                    error_log.record("indeed", "SESSION_BLOCKED",
+                                     f"Stopped Indeed run early after {_consecutive_empty_queries} "
+                                     f"consecutive searches returned 0 cards — usually a silent "
+                                     f"Cloudflare/robot block rather than a real lack of results.",
+                                     context=f"last query: {query}")
                     try:
                         notifier.send_alert(
                             subject=f"🛑 Indeed run stopped — {_consecutive_empty_queries} empty searches in a row, likely blocked",
@@ -4949,6 +5004,12 @@ def main():
                 print(f"\n  🛑 Only {_avg:.1f} cards/query average over {_total_queries_done} "
                       f"searches (expected ~45) — Indeed is likely soft-blocking this session. "
                       f"Stopping Indeed run early.")
+                error_log.record("indeed", "SESSION_BLOCKED",
+                                 f"Stopped Indeed run early — low yield ({_avg:.1f} cards/query over "
+                                 f"{_total_queries_done} searches, expected ~45). Signature of a "
+                                 f"soft-block/throttle where a few cards trickle through but most "
+                                 f"requests are being silently filtered.",
+                                 context=f"last query: {query}")
                 try:
                     notifier.send_alert(
                         subject=f"🛑 Indeed run stopped — low yield ({_avg:.1f} cards/query avg), likely blocked",

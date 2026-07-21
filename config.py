@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "1.9.8"
+PIPELINE_VERSION = "2.0.0"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -39,6 +39,7 @@ RESUMES_DIR     = BASE_DIR / "resumes"
 COVER_DIR       = BASE_DIR / "cover_letters"
 DATA_DIR        = BASE_DIR / "data"
 LOG_FILE        = DATA_DIR / "apply_log.json"
+ERROR_LOG_PATH  = DATA_DIR / "pipeline_errors.log"   # single human-readable error log (robot/Cloudflare blocks + all errors) — see error_log.py
 TRACKER_FILE    = DATA_DIR / "applications.xlsx"
 SESSION_LI      = Path.home() / ".linkedin_session"
 SESSION_IN      = Path.home() / ".indeed_session"
