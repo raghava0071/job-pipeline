@@ -1037,14 +1037,26 @@ Rules:
         except Exception as e:
             print(f"        ⚠ Claude field-fill error: {e}")
             # Profile-based fallback — never leave fields blank
+            # FIXED 2026-08-25: "sponsorship"/"relocat" were hardcoded "No" —
+            # wrong (config.REQUIRES_SPONSORSHIP=True; Raghav confirmed he IS
+            # open to relocating). Same bug fixed the same day in
+            # qa_answers.py, greenhouse_apply_now.py, workday_apply_now.py,
+            # claude_engine.py, and raghav_profile.py itself — derived here
+            # instead of hardcoded so this copy can't drift out of sync again.
+            try:
+                import raghav_profile as _rp_li
+                _relocate_fact_li = "Yes" if _rp_li.PROFILE.get("relocate", False) else "No"
+            except Exception:
+                _relocate_fact_li = "Yes"
+            _sponsor_fact_li = "Yes" if getattr(cfg, "REQUIRES_SPONSORSHIP", False) else "No"
             PROFILE_FALLBACK = {
                 "work authorization": "Yes", "authorized to work": "Yes",
-                "legally authorized": "Yes", "sponsorship": "No",
+                "legally authorized": "Yes", "sponsorship": _sponsor_fact_li,
                 "visa": "F-1 STEM OPT", "salary": _pick_salary(locals().get("jd_text",""), locals().get("job_title","")), "compensation": _pick_salary(locals().get("jd_text",""), locals().get("job_title","")),
                 "hourly rate": "40",
                 "start date": (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y"),
                 "notice": (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y"),
-                "relocat": "No", "remote": "Yes", "gender": "I don't wish to answer",
+                "relocat": _relocate_fact_li, "remote": "Yes", "gender": "I don't wish to answer",
                 "ethnicity": "I don't wish to answer", "race": "I don't wish to answer",
                 "veteran": "I am not a protected veteran", "disability": "I don't wish to answer",
                 "years of experience": "2", "background check": "Yes", "drug test": "Yes",

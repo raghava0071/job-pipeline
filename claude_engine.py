@@ -574,6 +574,24 @@ def vision_assist(screenshot_bytes: bytes, page_text: str,
 
     import base64
 
+    # FIXED 2026-08-25: this prompt used to hardcode "sponsorship = No" and
+    # "relocate = No" as literal text, disagreeing with config.py's real
+    # facts (REQUIRES_SPONSORSHIP=True) and raghav_profile.py's real
+    # PROFILE["relocate"] (now True) — a THIRD place these facts were
+    # duplicated and had drifted wrong, on top of qa_answers.py and the
+    # per-platform PROFILE_FALLBACK dicts. Derived from the same sources now.
+    try:
+        import config as _cfg_va
+        _sponsor_fact  = "Yes" if getattr(_cfg_va, "REQUIRES_SPONSORSHIP", False) else "No"
+        _years_fact    = str(getattr(_cfg_va, "YEARS_EXPERIENCE", "2-3"))
+    except Exception:
+        _sponsor_fact, _years_fact = "Yes", "2-3"
+    try:
+        import raghav_profile as _rp_va
+        _relocate_fact = "Yes" if _rp_va.PROFILE.get("relocate", False) else "No"
+    except Exception:
+        _relocate_fact = "No"
+
     try:
         img_b64 = base64.standard_b64encode(screenshot_bytes).decode("utf-8")
     except Exception as e:
@@ -605,7 +623,7 @@ Rules:
 - If there are unfilled required fields → action = "fill_field", list each field with a value
 - If all fields look filled but no progress → action = "click_button", button = the correct button text
 - If the page looks like a confirmation/success → action = "skip" (already submitted)
-- For candidate Your Name: work auth = Yes, sponsorship = No, salary = 85000, experience = 2-3 years, relocate = No
+- For candidate Your Name: work auth = Yes, sponsorship = {_sponsor_fact}, salary = 85000, experience = {_years_fact} years, relocate = {_relocate_fact}
 - Use short direct values — no long sentences for field values"""
 
     try:

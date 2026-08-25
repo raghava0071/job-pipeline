@@ -2469,13 +2469,29 @@ def _smart_fill_questions(page, profile_text: str, job_title: str, company: str,
     # this just makes that the ONLY path instead of a fallback for one.
 
     # LAYER 5 — Profile-based fallback (no API, decided from profile data)
+    # FIXED 2026-08-25: "sponsorship"/"relocat" below were hardcoded "No" —
+    # wrong on both counts (config.REQUIRES_SPONSORSHIP=True, and Raghav
+    # confirmed he IS open to relocating — raghav_profile.PROFILE["relocate"]
+    # is now True). Same bug found and fixed the same day in qa_answers.py,
+    # greenhouse_apply_now.py, claude_engine.py's vision_assist(), and
+    # raghav_profile.py's own COMMON_QA — this was the fourth/fifth copy of
+    # the same two facts, independently wrong. Derived here instead of
+    # hardcoded so it can't drift out of sync with those again.
+    try:
+        import raghav_profile as _rp_wd
+        _relocate_fact = "Yes" if _rp_wd.PROFILE.get("relocate", False) else "No"
+    except Exception:
+        _relocate_fact = "Yes"
+    _sponsor_fact = "Yes" if getattr(cfg, "REQUIRES_SPONSORSHIP", False) else "No"
+    _auth_fact    = "Yes" if getattr(cfg, "AUTHORIZED_TO_WORK_NOW", True) else "No"
+
     _smart_salary = _pick_salary(jd_text, job_title)
     PROFILE_FALLBACK = {
-        "work authorization":       "Yes",
-        "authorized to work":       "Yes",
-        "legally authorized":       "Yes",
-        "sponsorship":              "No",
-        "require sponsorship":      "No",
+        "work authorization":       _auth_fact,
+        "authorized to work":       _auth_fact,
+        "legally authorized":       _auth_fact,
+        "sponsorship":              _sponsor_fact,
+        "require sponsorship":      _sponsor_fact,
         "visa":                     "F-1 STEM OPT",
         "salary":                   _smart_salary,
         "compensation":             _smart_salary,
@@ -2483,7 +2499,7 @@ def _smart_fill_questions(page, profile_text: str, job_title: str, company: str,
         "start date":               "2 weeks",
         "notice period":            "2 weeks",
         "when can you start":       "2 weeks",
-        "relocat":                  "No",
+        "relocat":                  _relocate_fact,
         "remote":                   "Yes",
         "gender":                   "I don't wish to answer",
         "ethnicity":                "I don't wish to answer",

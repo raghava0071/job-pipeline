@@ -1131,12 +1131,24 @@ Rules:
 
         # ── Fallback: if Claude failed or didn't answer some fields, apply safe defaults ──
         # This ensures required fields are NEVER left blank due to API failure.
+        # FIXED 2026-08-25: "sponsorship"/"relocate"/"relocation" were
+        # hardcoded "No" — wrong (config.REQUIRES_SPONSORSHIP=True; Raghav
+        # confirmed he IS open to relocating). Same bug fixed the same day in
+        # qa_answers.py, greenhouse_apply_now.py, workday_apply_now.py,
+        # linkedin_apply_now.py, claude_engine.py, and raghav_profile.py
+        # itself — derived here instead of hardcoded so it can't drift again.
+        try:
+            import raghav_profile as _rp_in
+            _relocate_fact_in = "Yes" if _rp_in.PROFILE.get("relocate", False) else "No"
+        except Exception:
+            _relocate_fact_in = "Yes"
+        _sponsor_fact_in = "Yes" if getattr(cfg, "REQUIRES_SPONSORSHIP", False) else "No"
         FALLBACK = {
             "work authorization": "Yes",
             "authorized to work": "Yes",
             "legally authorized": "Yes",
-            "sponsorship": "No",
-            "require visa": "No",
+            "sponsorship": _sponsor_fact_in,
+            "require visa": _sponsor_fact_in,
             "salary":        _pick_salary(jd_text or "", job_title or ""),
             "compensation":  _pick_salary(jd_text or "", job_title or ""),
             "expected pay":  _pick_salary(jd_text or "", job_title or ""),
@@ -1145,8 +1157,8 @@ Rules:
             "start date": (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y"),
             "notice period": (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y"),
             "available": (datetime.now() + timedelta(days=14)).strftime("%m/%d/%Y"),
-            "relocate": "No",
-            "relocation": "No",
+            "relocate": _relocate_fact_in,
+            "relocation": _relocate_fact_in,
             "years of experience": "2",
             "how many years": "2",
             "experience with": "2",
