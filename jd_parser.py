@@ -672,11 +672,32 @@ def ats_fit_score(jd_text: str, job_title: str, company: str = "") -> dict:
     threshold = getattr(cfg, "ATS_FIT_THRESHOLD", 60)
     grade = ("A" if score >= 85 else "B" if score >= 72 else
              "C" if score >= 65 else "D" if score >= 50 else "F")
+
+    # Hard experience gate — no amount of keyword/skills/education/title match
+    # (80% combined weight, none of which reflects YOE) can compensate for a
+    # JD asking for far more years than the candidate has. Applies regardless
+    # of title, since SENIOR_WORDS only catches titles that say "senior" —
+    # e.g. a plain "Data Engineer" posting requiring 5+ yrs passes that filter
+    # untouched. See config.MIN_EXPERIENCE_RATIO.
+    required_yoe = parsed.get("yoe_required", 0) or 0
+    min_ratio = getattr(cfg, "MIN_EXPERIENCE_RATIO", 0.7)
+    experience_gate_failed = (
+        required_yoe > 0 and CANDIDATE_YOE_TOTAL < required_yoe * min_ratio
+    )
+
+    reasoning = "Free ATS keyword/skills/experience/education/title match (no AI call)."
+    if experience_gate_failed:
+        reasoning += (
+            f" REJECTED by experience gate: JD requires {required_yoe:.0f}+ yrs, "
+            f"candidate has {CANDIDATE_YOE_TOTAL:.1f} yrs — below "
+            f"{min_ratio:.0%} of required (composite score alone would have passed)."
+        )
+
     return {
         "score": score,
         "grade": grade,
-        "apply": score >= threshold,
-        "reasoning": "Free ATS keyword/skills/experience/education/title match (no AI call).",
+        "apply": (score >= threshold) and not experience_gate_failed,
+        "reasoning": reasoning,
         "strengths": parsed.get("jd_keywords", [])[:5],
         "missing":   parsed.get("coverage_gap", []),
     }

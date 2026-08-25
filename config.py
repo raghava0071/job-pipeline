@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.2.0"
+PIPELINE_VERSION = "2.2.1"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -137,6 +137,17 @@ USE_CLAUDE_SCORING = False
 ATS_FIT_THRESHOLD  = 60   # minimum free ATS score (%) — separate scale from
                           # FIT_THRESHOLD above, watch a run and retune if
                           # apply volume/quality looks off
+
+# Experience-gap hard gate — added 2026-08-25 after confirming a real Anthropic
+# "Data Engineer" posting (5+ yrs required, no senior word in title) scored 75%
+# and would have auto-applied despite Raghav having 3 yrs (60% of what's asked).
+# Keyword/skills/education/title dimensions (80% combined weight) don't care
+# about experience at all, so a big YOE gap alone can't fail the composite
+# score. This ratio is a separate, title-independent reject: if candidate YOE
+# is below (required_yoe * this ratio), the job is rejected no matter how high
+# the rest of the score is. 0.7 == candidate must have at least 70% of the
+# stated required years.
+MIN_EXPERIENCE_RATIO = 0.7
 
 # ── Apply Limits ───────────────────────────────────────────────────────────────
 MAX_APPLIES_PER_RUN    = 200  # total cap per run across all platforms
