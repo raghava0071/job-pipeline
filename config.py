@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.1.0"
+PIPELINE_VERSION = "2.2.0"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -26,9 +26,10 @@ CAPTCHA_MIN_SOLVE_FLOOR_SEC = 3
 # ── Platform switches — turn a platform off without touching its code ──────────
 # Set to False to skip that platform entirely for the current run.
 # Useful when testing a fix on one platform while keeping others live.
-INDEED_ENABLED   = True
-LINKEDIN_ENABLED = True
-WORKDAY_ENABLED  = True
+INDEED_ENABLED     = True
+LINKEDIN_ENABLED   = True
+WORKDAY_ENABLED    = True
+GREENHOUSE_ENABLED = True   # guest-apply only — see greenhouse_apply_now.py
 
 # Indeed hand-off mode: Indeed's Cloudflare wall blocks any automated browser
 # (confirmed for weeks — real Chrome works, the pipeline's does not). When True,
@@ -737,6 +738,19 @@ SALARY_EXPECTED     = "70000"
 # ── Skill experience years — used in form filling ──────────────────────────────
 # ── Workday search queries (used by workday_apply_now.py Google search) ───────
 WORKDAY_QUERIES = [
+    "Data Engineer entry level",
+    "Data Analyst entry level",
+    "Data Scientist entry level",
+    "ML Engineer entry level",
+    "Analytics Engineer",
+    "Business Intelligence Analyst",
+    "ETL Developer",
+    "Machine Learning Engineer",
+    "AI Engineer",
+]
+
+# ── Greenhouse search queries (used by greenhouse_apply_now.py Google search) ──
+GREENHOUSE_QUERIES = [
     "Data Engineer entry level",
     "Data Analyst entry level",
     "Data Scientist entry level",

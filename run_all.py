@@ -25,7 +25,7 @@ sys.path.insert(0, str(PIPELINE_DIR))
 # ── Startup syntax check — catch bad edits before any browser opens ───────────
 import ast
 for _f in ["config.py", "indeed_apply_now.py", "linkedin_apply_now.py", "resume_builder.py",
-           "workday_apply_now.py", "secure_store.py"]:
+           "workday_apply_now.py", "secure_store.py", "greenhouse_apply_now.py"]:
     try:
         ast.parse((PIPELINE_DIR / _f).read_text())
     except SyntaxError as _e:
@@ -216,6 +216,50 @@ def run_workday(limit, dry_run, result_queue, queue_only=False):
         result_queue.put(("workday", f"error: {e}"))
 
 
+def run_greenhouse(limit, dry_run, result_queue):
+    """Run Greenhouse pipeline in a subprocess.
+
+    Not part of the default parallel run yet (see main()/_run_greenhouse
+    below) — guest-apply flow is new and unverified against a live posting,
+    same "opt-in only until proven" treatment Workday got after its own
+    rough start. Run explicitly with --greenhouse-only (and --dry-run first).
+    """
+    try:
+        import sys
+        sys.path.insert(0, str(PIPELINE_DIR))
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "greenhouse_apply_now",
+            str(PIPELINE_DIR / "greenhouse_apply_now.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+
+        old_argv = sys.argv[:]
+        sys.argv = ["greenhouse_apply_now.py", "--limit", str(limit)]
+        if dry_run:
+            sys.argv.append("--dry-run")
+
+        try:
+            spec.loader.exec_module(mod)
+            mod.main()
+            result_queue.put(("greenhouse", "success"))
+        except SystemExit:
+            result_queue.put(("greenhouse", "success"))
+        finally:
+            sys.argv = old_argv
+
+    except Exception as e:
+        try:
+            import traceback, error_log
+            error_log.record("greenhouse", "CRASH",
+                             "Greenhouse engine crashed before finishing.",
+                             context=traceback.format_exc()[-1500:])
+        except Exception:
+            pass
+        result_queue.put(("greenhouse", f"error: {e}"))
+
+
 def _auto_diagnose(errors: dict):
     """
     When a platform errors, automatically call Claude Code CLI to diagnose.
@@ -350,10 +394,12 @@ def main():
     parser.add_argument("--li-limit",       type=int, default=50,  help="LinkedIn max applies (default 50)")
     parser.add_argument("--in-limit",       type=int, default=100, help="Indeed max applies (default 100)")
     parser.add_argument("--wd-limit",       type=int, default=10,  help="Workday max applies (default 10)")
+    parser.add_argument("--gh-limit",       type=int, default=10,  help="Greenhouse max applies (default 10)")
     parser.add_argument("--dry-run",        action="store_true",   help="Dry run on all platforms")
     parser.add_argument("--linkedin-only",  action="store_true",   help="Run LinkedIn only")
     parser.add_argument("--indeed-only",    action="store_true",   help="Run Indeed only")
     parser.add_argument("--workday-only",   action="store_true",   help="Run Workday only")
+    parser.add_argument("--greenhouse-only",action="store_true",   help="Run Greenhouse only")
     parser.add_argument("--no-workday",     action="store_true",   help="Skip Workday (LinkedIn + Indeed only)")
     parser.add_argument("--wd-queue-only",  action="store_true",   help="Workday: only process queue from LinkedIn/Indeed")
     args = parser.parse_args()
@@ -385,6 +431,11 @@ def main():
         run_workday(args.wd_limit, args.dry_run, result_queue, queue_only=args.wd_queue_only)
         return
 
+    if args.greenhouse_only:
+        print("  Running Greenhouse only...\n")
+        run_greenhouse(args.gh_limit, args.dry_run, result_queue)
+        return
+
     # ── Run all three in parallel ──────────────────────────────────────────────
     procs = []
 
@@ -409,6 +460,8 @@ def main():
     platforms = "LinkedIn + Indeed"
     print(f"  Starting {platforms} simultaneously...")
     print(f"  (Workday PAUSED — 0/116 success rate, email verification loops)")
+    print(f"  (Greenhouse not in the default run yet — unverified against a live posting; "
+          f"run --greenhouse-only --dry-run first)")
     print(f"  (Browser windows will open — one per platform)\n")
 
     start = time.time()
@@ -435,9 +488,10 @@ def main():
 
     print(f"\n{'='*65}")
     print(f"  ✅ All pipelines finished in {mins}m {secs}s")
-    print(f"  LinkedIn: {results.get('linkedin', 'unknown')}")
-    print(f"  Indeed:   {results.get('indeed',   'unknown')}")
-    print(f"  Workday:  PAUSED (re-enable with --workday-only)")
+    print(f"  LinkedIn:   {results.get('linkedin', 'unknown')}")
+    print(f"  Indeed:     {results.get('indeed',   'unknown')}")
+    print(f"  Workday:    PAUSED (re-enable with --workday-only)")
+    print(f"  Greenhouse: not run (opt-in only — run with --greenhouse-only)")
     print(f"\n  Check your email for per-job notifications.")
     print(f"  Logs: ~/job_pipeline/data/applied_log.json (LinkedIn)")
     print(f"        ~/job_pipeline/data/indeed_applied_log.json (Indeed)")
