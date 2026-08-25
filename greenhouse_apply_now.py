@@ -30,7 +30,7 @@
 #   python greenhouse_apply_now.py --limit 2 --dry-run
 # =============================================================================
 
-import os, sys, time, json, argparse, re, random
+import os, sys, time, json, argparse, re
 from pathlib import Path
 from datetime import datetime
 
@@ -118,16 +118,18 @@ def _exists(page, sel, timeout=3000) -> bool:
 
 def _click(page, sel, timeout=8000) -> bool:
     """Click an element — never hangs. Falls back to a direct JS click on
-    whatever element[from point] actually covers it, same pattern already
-    proven necessary on Workday (see workday_apply_now.py _click) for
-    overlay-covered buttons — kept here since Greenhouse's "Attach" dropzone
-    buttons are frequently a styled <label> or <div> sitting over the real
-    control, the same class of problem."""
+    whatever element[from point] actually covers it. This is NOT bot evasion
+    — it's a fix for styled overlay elements (e.g. a <label> or <div> sitting
+    on top of the real control, common on custom "Attach" dropzone buttons)
+    physically intercepting the click; same pattern already proven necessary
+    on Workday (see workday_apply_now.py _click). No randomized delays here —
+    Greenhouse guest-apply has no bot/fingerprint check to evade, so Playwright's
+    own actionability auto-wait is used as-is instead of adding artificial
+    "human-like" pacing."""
     try:
         el = page.locator(sel).first
         el.wait_for(state="visible", timeout=timeout)
         el.scroll_into_view_if_needed()
-        time.sleep(random.uniform(0.2, 0.5))
         try:
             el.click(timeout=4000)
         except Exception:
@@ -267,15 +269,15 @@ def _form_fields_visible(page) -> bool:
 def _fill_basic_field(page, css_sel: str, label_words: list, value: str) -> bool:
     """Try the known Greenhouse id first, then fall back to matching any
     visible input whose <label for=...>/aria-label/placeholder text contains
-    one of label_words (covers the React job-boards UI)."""
+    one of label_words (covers the React job-boards UI). Uses Playwright's
+    plain .fill() — no randomized per-keystroke delay. There's no bot check
+    on Greenhouse guest-apply to evade, so this is a direct, deterministic
+    fill, not a "type like a human" simulation."""
     if not value:
         return False
     if _exists(page, css_sel, timeout=1200):
         try:
-            el = page.locator(css_sel).first
-            el.click()
-            page.keyboard.press("Control+A")
-            page.keyboard.type(value, delay=random.randint(30, 60))
+            page.locator(css_sel).first.fill(value)
             return True
         except Exception:
             pass
@@ -301,10 +303,7 @@ def _fill_basic_field(page, css_sel: str, label_words: list, value: str) -> bool
     """, None)
     if sel:
         try:
-            el = page.locator(sel).first
-            el.click()
-            page.keyboard.press("Control+A")
-            page.keyboard.type(value, delay=random.randint(30, 60))
+            page.locator(sel).first.fill(value)
             return True
         except Exception:
             return False
@@ -568,8 +567,23 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
     return filled
 
 # ── Submit ──────────────────────────────────────────────────────────────────
+#
+# IMPORTANT — this is the exact bug class Workday hit at v1.8.1: a submit
+# click that fires with no exception was being treated as success, when in
+# some cases the click landed on nothing (covered element, disabled button,
+# handler silently rejected) and the page never actually changed. Workday's
+# fix (_submit_progressed()) was to require the page's own state to visibly
+# change — not just "the click call didn't raise". _submit_progressed() below
+# is the same fix, ported: it snapshots the page (URL + whether the form/
+# submit button is still there) BEFORE the click, then only reports success
+# if that snapshot is provably different afterward, or explicit confirmation
+# text/URL shows up. "The click didn't throw" is never, by itself, a success
+# condition anywhere in this function.
 
 def _is_confirmed(page) -> bool:
+    """Explicit, positive confirmation signals — safe to trust on their own
+    even without a before/after diff, since this text/URL pattern is not
+    something a not-yet-submitted Greenhouse job page would ever show."""
     body = (_safe_eval(page, "() => document.body.innerText.toLowerCase()", "") or "")
     url = (page.url or "").lower()
     return any(s in body for s in [
@@ -577,12 +591,45 @@ def _is_confirmed(page) -> bool:
         "your application has been submitted", "application was sent",
     ]) or any(s in url for s in ["confirmation", "thank-you", "thanks"])
 
+def _page_signature(page) -> dict:
+    """Snapshot used to detect real progress: current URL + whether the
+    submit button/application form is still present on the page."""
+    return {
+        "url": page.url or "",
+        "form_present": _exists(page, GH["submit_btn"], timeout=300) or _form_fields_visible(page),
+    }
+
+def _submit_progressed(page, before: dict, timeout_s: float = 6.0) -> bool:
+    """Poll for up to timeout_s after a submit click. Only returns True if
+    the page's state actually changed relative to `before`:
+      - explicit confirmation text/URL appears (_is_confirmed), OR
+      - the form/submit button that WAS present before the click is now gone
+        AND the URL moved (a same-page validation-error re-render can also
+        make a button briefly disappear/reappear, so both signals are
+        required together, not just one).
+    Returns False — meaning "not proven submitted" — if none of that happens,
+    even if the click() call itself reported no error.
+    """
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _is_confirmed(page):
+            return True
+        after = _page_signature(page)
+        real_navigation = after["url"] != before["url"]
+        form_disappeared = before["form_present"] and not after["form_present"]
+        if real_navigation and form_disappeared:
+            return True
+        time.sleep(0.4)
+    return False
+
 def submit_greenhouse_application(page, dry_run: bool = False) -> bool:
     print(f"          📋 Review & Submit")
     if dry_run:
-        print(f"          🏁 DRY RUN — Would click Submit here")
+        print(f"          🏁 DRY RUN — stopping BEFORE the Submit click. Nothing below this "
+              f"line runs in dry-run mode.")
         return True
 
+    before = _page_signature(page)
     submit_sel = GH["submit_btn"] if _exists(page, GH["submit_btn"], timeout=2000) else None
     for attempt in range(1, 4):
         print(f"          🚀 Submit attempt {attempt}/3...")
@@ -593,10 +640,13 @@ def submit_greenhouse_application(page, dry_run: bool = False) -> bool:
                 clicked = True
             except Exception:
                 pass
-        time.sleep(4)
-        if _is_confirmed(page):
-            print(f"          🎉 Application submitted!")
+
+        if _submit_progressed(page, before):
+            print(f"          🎉 Application submitted — verified: page state actually "
+                  f"changed (confirmation text/URL, and the form is gone), not just a click "
+                  f"that didn't error")
             return True
+        print(f"          ⚠  Submit click fired but page state did not change — not counted as success")
 
         body = _safe_eval(page, "() => document.body.innerText.toLowerCase()", "") or ""
         captcha = any("bframe" in (f.url or "") for f in list(page.frames)) or \
@@ -612,9 +662,8 @@ def submit_greenhouse_application(page, dry_run: bool = False) -> bool:
                 pass
             time.sleep(60)
 
-    if not _is_confirmed(page):
-        _failure_shot(page, "submit_not_confirmed")
-    return _is_confirmed(page)
+    _failure_shot(page, "submit_not_confirmed")
+    return False
 
 # ── Full apply flow ─────────────────────────────────────────────────────────
 
@@ -805,17 +854,16 @@ def main():
                 str(SESSION_DIR),
                 headless=False,
                 channel="chrome",
-                args=["--disable-blink-features=AutomationControlled"],
                 viewport={"width": 1366, "height": 900},
                 timeout=60000,
             )
-            print("  🌐  Using real Google Chrome (channel=chrome)")
+            print("  🌐  Using real Google Chrome (channel=chrome) — for launch stability, "
+                  "not evasion; no automation-hiding flags are set")
         except Exception as chrome_err:
             print(f"  ⚠  Real Chrome not available ({str(chrome_err)[:80]}) — falling back to bundled Chromium")
             browser = pw.chromium.launch_persistent_context(
                 str(SESSION_DIR),
                 headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
                 viewport={"width": 1366, "height": 900},
                 timeout=60000,
             )
