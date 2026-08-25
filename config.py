@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.3.2"
+PIPELINE_VERSION = "2.4.0"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -985,7 +985,20 @@ def is_us_location(location: str) -> bool:
         return False
     return False
 
-# ── Skill experience years — used in form filling ──────────────────────────────
+# ── Skill experience years — NOT CANONICAL, see raghav_profile.SKILL_YEARS ────
+# Discovered 2026-08-25 while building profile_answers.py: this dict and
+# raghav_profile.py's SKILL_YEARS had silently drifted apart — this one is
+# missing tools raghav_profile.py's version has (R, Java, JavaScript, ELT,
+# data pipelines, data warehouse, Looker, Flask, Django). raghav_profile.py
+# is the correct single source of truth for skill/years — it's the private,
+# gitignored personal-profile file (see raghav_profile.py's own docstring:
+# "Single source of truth for all job application automation"), which is
+# where personal skill facts belong, not here. This dict is left in place
+# unchanged (removing it risks breaking something not yet found) but is no
+# longer read by profile_answers.py, claude_engine.py, or
+# linkedin_apply_now.py — all three now import raghav_profile.SKILL_YEARS
+# directly. Do not add new code that reads config.SKILL_YEARS; use
+# raghav_profile.SKILL_YEARS instead.
 SKILL_YEARS = {
     "python":           "4",
     "sql":              "4",

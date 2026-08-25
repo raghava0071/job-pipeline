@@ -777,7 +777,7 @@ def fill_and_submit_form(page, resume_path, job_title="", company=""):
 
     # ── Full profile context sent to Claude for every form step ───────────────
     skill_years_str = "\n".join(
-        f"  {k}: {v} years" for k,v in cfg.SKILL_YEARS.items()
+        f"  {k}: {v} years" for k,v in rp.SKILL_YEARS.items()
     )
     PROFILE_CONTEXT = f"""
 Candidate: Your Name

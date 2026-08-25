@@ -537,7 +537,10 @@ def _known_factual_yes_no(label: str, company: str) -> str | None:
     m = re.search(r'(\d+)\+?\s*years?', l)
     if m and "year" in l and ("experience" in l or "worked with" in l or "working with" in l):
         threshold = float(m.group(1))
-        skill_years = getattr(cfg, "SKILL_YEARS", {}) or {}
+        # raghav_profile.SKILL_YEARS is canonical — cfg.SKILL_YEARS is a
+        # stale, less-complete duplicate (see config.py's SKILL_YEARS
+        # comment). Fixed 2026-08-25.
+        skill_years = getattr(rp, "SKILL_YEARS", {}) if rp else {}
         actual_years = None
         for skill, yrs in skill_years.items():
             if skill in l:
@@ -728,6 +731,27 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
                 break  # only trust the first source that actually returned something
             if found_valid:
                 continue
+
+            # ── Layer B — Claude API fallback, strictly profile-grounded ──────
+            # Only reached once real facts (_known_factual_yes_no) and every
+            # cache layer (QA — which itself already tried
+            # profile_answers.answer_from_profile() as a fallthrough — SAVED,
+            # CACHE) have all come back empty. Grounded ONLY in
+            # raghav_profile.py facts; must say UNKNOWN (-> None here) rather
+            # than guess. See profile_answers.py's HARD TRUTHFULNESS RULE.
+            try:
+                import profile_answers as _pa
+                claude_fact = _pa.answer_via_claude_fallback(lbl, field_type="yes_no")
+            except Exception as e:
+                claude_fact = None
+                print(f"             ⚠  Claude fallback errored for '{lbl}': {e}")
+            if claude_fact is not None and _looks_yes_no_shaped(claude_fact):
+                answers[lbl] = claude_fact
+                print(f"             ✔ CLAUDE  '{lbl}' → '{claude_fact}' (API, profile-grounded, not a guess)")
+                if _claude_ans:
+                    _claude_ans.save(lbl, claude_fact)
+                continue
+
             uncached.append(f)
             continue
 
@@ -755,6 +779,26 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
                 if _claude_ans:
                     _claude_ans.save(lbl, resolved)
                 continue
+
+            # ── Layer B — Claude API fallback, constrained to the form's
+            # real options. answer_via_claude_fallback() only accepts an
+            # answer that exactly matches one of `options` (or UNKNOWN ->
+            # None) — never a free-form guess dressed up as a selection.
+            try:
+                import profile_answers as _pa
+                claude_dd = _pa.answer_via_claude_fallback(
+                    lbl, field_type="dropdown", options=f.get("options", [])
+                )
+            except Exception as e:
+                claude_dd = None
+                print(f"             ⚠  Claude fallback errored for '{lbl}': {e}")
+            if claude_dd is not None:
+                answers[lbl] = claude_dd
+                print(f"             ✔ CLAUDE  '{lbl}' → '{claude_dd}' (API, profile-grounded, matches a real option)")
+                if _claude_ans:
+                    _claude_ans.save(lbl, claude_dd)
+                continue
+
             uncached.append(f)
             continue
 
@@ -789,6 +833,23 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
             print(f"             ✔ PROFILE '{lbl}' → '{val}'")
             if _claude_ans:
                 _claude_ans.save(lbl, val)
+            continue
+
+        # ── Layer B — Claude API fallback, strictly profile-grounded ─────────
+        # Only reached once QA (which already tried
+        # profile_answers.answer_from_profile() as a fallthrough), SAVED,
+        # CACHE, and PROFILE_FALLBACK have all come back empty.
+        try:
+            import profile_answers as _pa
+            claude_txt = _pa.answer_via_claude_fallback(lbl, field_type="short_text")
+        except Exception as e:
+            claude_txt = None
+            print(f"             ⚠  Claude fallback errored for '{lbl}': {e}")
+        if claude_txt is not None:
+            answers[lbl] = claude_txt
+            print(f"             ✔ CLAUDE  '{lbl}' → '{claude_txt}' (API, profile-grounded, not a guess)")
+            if _claude_ans:
+                _claude_ans.save(lbl, claude_txt)
             continue
 
         uncached.append(f)

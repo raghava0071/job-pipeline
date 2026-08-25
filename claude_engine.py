@@ -505,6 +505,8 @@ def build_profile_summary(profile: dict) -> str:
     Shows ALL skills, correct experience order, and skill years.
     """
     import config as cfg
+    import raghav_profile as _rp   # SKILL_YEARS canonical source — see config.py's
+                                    # SKILL_YEARS comment for why this isn't cfg.SKILL_YEARS
 
     name   = profile.get("name", "Your Name")
     skills = profile.get("skills", [])
@@ -522,7 +524,7 @@ def build_profile_summary(profile: dict) -> str:
 
     # Skill years — key context for scoring
     skill_years_lines = "\n".join(
-        f"  {k}: {v} yrs" for k, v in cfg.SKILL_YEARS.items()
+        f"  {k}: {v} yrs" for k, v in _rp.SKILL_YEARS.items()
     )
 
     # Experience — primary data jobs first, max 3 bullets each
@@ -540,9 +542,16 @@ def build_profile_summary(profile: dict) -> str:
         for b in bullets:
             exp_lines.append(f"    • {b[:120]}")
 
+    _sponsor_line = (
+        "F-1 STEM OPT — authorized to work now, WILL require sponsorship "
+        "(H-1B) in the future"
+        if getattr(cfg, "REQUIRES_SPONSORSHIP", True)
+        else "F-1 STEM OPT — authorized to work now, no future sponsorship needed"
+    )
+
     return f"""CANDIDATE: {name}
 EDUCATION : {edu_line}
-WORK AUTH : F-1 OPT/STEM OPT — authorized, no sponsorship needed
+WORK AUTH : {_sponsor_line}
 TOTAL EXP : 3+ years (undergrad + grad research + professional)
 
 SKILLS (all):
