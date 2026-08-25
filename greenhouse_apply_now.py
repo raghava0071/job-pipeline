@@ -776,6 +776,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit",   type=int, default=5)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--url",     type=str, default=None,
+                         help="Test one exact Greenhouse job URL directly — skips Google-search "
+                              "discovery and the fit-score gate entirely, goes straight to "
+                              "apply_to_greenhouse_job() for this one posting. Still fully respects "
+                              "--dry-run (stops before the Submit click, same as the normal path).")
     args = parser.parse_args()
 
     print(f"\n{'='*60}")
@@ -868,6 +873,73 @@ def main():
                 timeout=60000,
             )
         page = browser.pages[0] if browser.pages else browser.new_page()
+
+        # ── --url override: one exact posting, no discovery, no score gate ──
+        # Skips Google search entirely and every pre-apply filter (senior/
+        # domain/blocked-company/staffing/already-applied/fit-score) — those
+        # all exist to pick WHICH jobs to apply to, and here you're telling it
+        # exactly which job. Still builds a real tailored resume/cover letter
+        # (so the resume-upload step has an actual file to test) and still
+        # calls the exact same apply_to_greenhouse_job() the normal discovery
+        # path uses, with dry_run passed straight through — --dry-run stops
+        # it before the Submit click exactly like every other path.
+        if args.url:
+            print(f"  🎯 --url override: testing exactly one posting — "
+                  f"skipping Google-search discovery and the fit-score gate\n")
+            job = {"title": "", "company": "", "url": args.url, "description": ""}
+            try:
+                page.goto(args.url, wait_until="domcontentloaded", timeout=25000)
+                time.sleep(2)
+                info = extract_greenhouse_job(page)
+                job["title"]       = info.get("title", "")
+                job["company"]     = info.get("company", "")
+                job["description"] = info.get("description", "")
+            except Exception as e:
+                print(f"  ⚠  Could not load the job page to extract title/company/JD: {e}")
+
+            print(f"  📋 {job['company'] or '(unknown company)'} — {job['title'] or '(unknown title)'}")
+
+            resume_path = ""
+            try:
+                parsed = jdp.parse_jd(job["description"], job["title"])
+                res = rb.build_resume(
+                    job_title=job["title"], company=job["company"],
+                    jd_keywords=parsed.get("jd_keywords", []),
+                    injectable_kws=parsed.get("injectable_keywords", []),
+                    initial_score=parsed.get("initial_score", 0),
+                    optimized_score=parsed.get("optimized_score", 0),
+                    jd_text=job["description"],
+                    profile_summary=full_profile.get("summary", ""),
+                )
+                resume_path = res[0] if isinstance(res, tuple) else str(res)
+                print(f"  ✅ Resume: {Path(resume_path).name}")
+            except Exception as e:
+                print(f"  ⚠  Resume build failed ({e}) — continuing with no resume file so you can "
+                      f"still see the rest of the form-fill behavior; the upload step will report "
+                      f"'no upload field found' or fail, which is expected with no file to attach.")
+
+            cover_path = ""
+            try:
+                cl_text = ce.write_cover_letter(
+                    full_profile.get("name", "Your Name"),
+                    profile_summary, job["description"], job["title"], job["company"]
+                )
+                cover_path = cl_mod.save_cover_letter(cl_text, job["title"], job["company"])
+            except Exception:
+                pass
+
+            print(f"  🚀 Running apply_to_greenhouse_job() "
+                  f"({'DRY RUN — will stop before Submit' if args.dry_run else '⚠️  LIVE — will submit for real'})...")
+            try:
+                success, reason = apply_to_greenhouse_job(page, job, resume_path, cover_path, dry_run=args.dry_run)
+            except Exception as e:
+                success, reason = False, str(e)
+
+            status = "Dry-Run" if args.dry_run else ("Applied" if success else "Failed")
+            print(f"\n  {'✅' if success else '❌'} {status}: {reason}")
+
+            browser.close()
+            return
 
         def _process_job(job):
             nonlocal applied, scored, skipped
