@@ -10,29 +10,46 @@
 #   (some companies force a Greenhouse-hosted account) is NOT handled — those
 #   jobs will fail cleanly with a reason and get logged, not silently skipped.
 #
-# NOT VERIFIED AGAINST A LIVE POSTING YET — build environment has no network
-# path to greenhouse.io to inspect real DOM. Selectors below are Greenhouse's
-# well-documented, long-stable field IDs (legacy embed) PLUS a generic
-# label-based fallback (covers the newer job-boards.greenhouse.io React UI,
-# which uses standard <label for> / aria-label associations instead of those
-# IDs). Run with --dry-run against a couple of real job URLs first and watch
-# the "📋 N field(s) on this step" / "⚠ could not find" print lines before
-# trusting this on a live run — see CLAUDE.md safety workflow.
+# FORM-FILL SELECTORS STILL NOT VERIFIED AGAINST A LIVE POSTING — build
+# environment has no network path to greenhouse.io to inspect real DOM (same
+# restriction that forced the discovery rewrite below). Selectors are
+# Greenhouse's well-documented, long-stable field IDs (legacy embed) PLUS a
+# generic label-based fallback (covers the newer job-boards.greenhouse.io
+# React UI, which uses standard <label for> / aria-label associations instead
+# of those IDs). Run with --dry-run against a couple of real job URLs first
+# and watch the "📋 N field(s) on this step" / "⚠ could not find" print lines
+# before trusting this on a live run — see CLAUDE.md safety workflow.
 #
-# ARCHITECTURE: mirrors workday_apply_now.py's shape (Google-search discovery,
-# jd_parser scoring, resume_builder/cover_letter, answer_cache/claude_answers/
+# DISCOVERY (the part below) IS verified as a real, working API — confirmed
+# via live search results showing real job URLs under each configured
+# company token — even though this build environment can't reach it directly
+# to test the actual HTTP call end-to-end; see the --url test command in the
+# CHANGELOG for what to run on a machine with normal network access.
+#
+# ARCHITECTURE: mirrors workday_apply_now.py's shape (discovery, jd_parser
+# scoring, resume_builder/cover_letter, answer_cache/claude_answers/
 # qa_answers layered form filling, notifier + JSON log) but scoped down —
 # Greenhouse guest-apply has no login/account-creation/multi-step wizard, so
 # none of that machinery is ported here.
+#
+# DISCOVERY — Greenhouse public Job Board API, not Google search (2026-08-25):
+# Google started blocking the site:boards.greenhouse.io search this engine
+# used to rely on. Per Raghav: don't fight that with stealth/human-mimicry —
+# dead end, and risks the IP (Indeed already proved this). Discovery now
+# calls Greenhouse's own public, unauthenticated, documented Job Board API
+# (https://developers.greenhouse.io/job-board.html) — a plain JSON endpoint
+# every embeddable Greenhouse careers widget uses, meant to be read
+# programmatically. No login, no scraping, no bot-detection to trigger.
 #
 # USAGE:
 #   python greenhouse_apply_now.py --limit 5
 #   python greenhouse_apply_now.py --limit 2 --dry-run
 # =============================================================================
 
-import os, sys, time, json, argparse, re
+import os, sys, time, json, argparse, re, html
 from pathlib import Path
 from datetime import datetime
+import requests
 
 PIPELINE_DIR = Path.home() / "job_pipeline"
 sys.path.insert(0, str(PIPELINE_DIR))
@@ -972,58 +989,79 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
         return True, "Dry-Run" if dry_run else "confirmed after submit click"
     return False, "submit not confirmed (see failure screenshot)"
 
-# ── Discovery: Google search ───────────────────────────────────────────────────
+# ── Discovery: Greenhouse public Job Board API ─────────────────────────────────
+#
+# https://developers.greenhouse.io/job-board.html — plain, unauthenticated,
+# documented JSON API every embeddable Greenhouse careers widget uses to pull
+# its own listing. This is the intended, sanctioned way to read a company's
+# postings programmatically: no login, no HTML scraping, no rate-limit dance,
+# and nothing here is trying to look like a browser or evade detection — it's
+# a GET request to an API meant to answer exactly this GET request.
 
-def _search_greenhouse_on_google(page, query: str) -> list:
-    """Search Google for Greenhouse-hosted postings. Same pattern as
-    workday_apply_now.py's _search_workday_on_google: load the results page,
-    extract links from raw HTML immediately, no clicks/interaction with
-    Google itself."""
-    import urllib.parse
-    search_url = "https://www.google.com/search?" + urllib.parse.urlencode({
-        "q": f'(site:boards.greenhouse.io OR site:job-boards.greenhouse.io) "{query}"',
-        "num": "10",
-        "tbs": "qdr:w",
-    })
+GREENHOUSE_API_BASE = "https://boards-api.greenhouse.io/v1/boards"
+
+def _strip_html(raw_html: str) -> str:
+    """Greenhouse's `content` field is the company's own HTML-formatted job
+    description. jd_parser's keyword/skills matching works on word-boundary
+    regexes over plain text, so tags just need to become whitespace/newlines
+    — no need for a full HTML-parsing dependency for that."""
+    if not raw_html:
+        return ""
+    text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', raw_html, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'</(p|li|div|h[1-6])>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = html.unescape(text)
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n\s*\n+', '\n', text)
+    return text.strip()
+
+def _fetch_greenhouse_jobs_for_company(company_token: str) -> list:
+    """One GET per company, `content=true` so the full HTML job description
+    comes back in the same response — no separate per-job detail call needed.
+    Returns [] (with a printed reason) on any failure instead of raising, so
+    one bad/retired token in config.GREENHOUSE_COMPANIES doesn't stop the
+    other companies in the list from being checked."""
+    url = f"{GREENHOUSE_API_BASE}/{company_token}/jobs"
     try:
-        page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
-        time.sleep(0.5)
-        page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
-        time.sleep(1.5)
-    except Exception as e:
-        print(f"  ⚠  Google search failed: {e}")
+        resp = requests.get(url, params={"content": "true"}, timeout=15)
+    except requests.RequestException as e:
+        print(f"  ⚠  {company_token}: API request failed ({e})")
         return []
 
-    current_url = page.url or ""
-    if "accounts.google.com" in current_url or "sorry/index" in current_url:
-        print(f"  ⚠  Google blocked — skipping Google search for '{query}'")
+    if resp.status_code == 404:
+        print(f"  ⚠  {company_token}: no Greenhouse board at this token (HTTP 404) — "
+              f"check the slug in config.GREENHOUSE_COMPANIES")
+        return []
+    if resp.status_code != 200:
+        print(f"  ⚠  {company_token}: API returned HTTP {resp.status_code}")
         return []
 
-    links = _safe_eval(page, """
-        () => {
-            const results = [];
-            const seen = new Set();
-            for (const a of document.querySelectorAll('a[href]')) {
-                let href = a.getAttribute('href') || '';
-                if (href.startsWith('/url?')) {
-                    const m = href.match(/[?&]q=([^&]+)/);
-                    if (m) href = decodeURIComponent(m[1]);
-                }
-                if (!href.includes('greenhouse.io')) continue;
-                if (!/\\/jobs\\//.test(href)) continue;
-                if (seen.has(href)) continue;
-                seen.add(href);
-                const sub = (href.match(/greenhouse\\.io\\/([^\\/?]+)/) || [])[1] || '';
-                const company = sub.replace(/-/g, ' ').replace(/\\b\\w/g, c => c.toUpperCase());
-                const title = (a.innerText || a.textContent || '').trim().split('\\n')[0];
-                results.push({ title: title || '', company, url: href, description: '' });
-            }
-            return results.slice(0, 10);
-        }
-    """, []) or []
+    try:
+        data = resp.json()
+    except ValueError:
+        print(f"  ⚠  {company_token}: API returned non-JSON response")
+        return []
 
-    print(f"  🔍 Google→Greenhouse: {len(links)} jobs for '{query}'")
-    return links
+    company_name = company_token.replace("-", " ").replace("_", " ").title()
+    jobs = []
+    for j in data.get("jobs", []):
+        title = (j.get("title") or "").strip()
+        absolute_url = j.get("absolute_url") or ""
+        if not title or not absolute_url:
+            continue
+        location = ((j.get("location") or {}).get("name") or "").strip()
+        jobs.append({
+            "title":       title,
+            "company":     company_name,
+            "url":         absolute_url,
+            "description": _strip_html(j.get("content") or ""),
+            "location":    location,
+            "job_id":      j.get("id"),
+        })
+
+    print(f"  🔍 Greenhouse API: {len(jobs)} live posting(s) for '{company_token}'")
+    return jobs
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
@@ -1032,7 +1070,7 @@ def main():
     parser.add_argument("--limit",   type=int, default=5)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--url",     type=str, default=None,
-                         help="Test one exact Greenhouse job URL directly — skips Google-search "
+                         help="Test one exact Greenhouse job URL directly — skips API-based "
                               "discovery and the fit-score gate entirely, goes straight to "
                               "apply_to_greenhouse_job() for this one posting. Still fully respects "
                               "--dry-run (stops before the Submit click, same as the normal path).")
@@ -1130,7 +1168,7 @@ def main():
         page = browser.pages[0] if browser.pages else browser.new_page()
 
         # ── --url override: one exact posting, no discovery, no score gate ──
-        # Skips Google search entirely and every pre-apply filter (senior/
+        # Skips API-based discovery entirely and every pre-apply filter (senior/
         # domain/blocked-company/staffing/already-applied/fit-score) — those
         # all exist to pick WHICH jobs to apply to, and here you're telling it
         # exactly which job. Still builds a real tailored resume/cover letter
@@ -1140,7 +1178,7 @@ def main():
         # it before the Submit click exactly like every other path.
         if args.url:
             print(f"  🎯 --url override: testing exactly one posting — "
-                  f"skipping Google-search discovery and the fit-score gate\n")
+                  f"skipping API-based discovery and the fit-score gate\n")
             job = {"title": "", "company": "", "url": args.url, "description": ""}
             try:
                 page.goto(args.url, wait_until="domcontentloaded", timeout=25000)
@@ -1306,13 +1344,16 @@ def main():
             save_log(log)
             time.sleep(cfg.APPLY_DELAY_SEC if hasattr(cfg, "APPLY_DELAY_SEC") else 2)
 
-        print(f"\n  🔍 Searching Google for Greenhouse jobs "
-              f"(site:boards.greenhouse.io / site:job-boards.greenhouse.io)...")
-        queries = getattr(cfg, "GREENHOUSE_QUERIES", cfg.TARGET_ROLES)
-        for query in queries:
+        companies = getattr(cfg, "GREENHOUSE_COMPANIES", [])
+        print(f"\n  🔍 Pulling live jobs from Greenhouse's public Job Board API "
+              f"for {len(companies)} compan{'y' if len(companies) == 1 else 'ies'}...")
+        if not companies:
+            print("  ⚠  config.GREENHOUSE_COMPANIES is empty — nothing to check. "
+                  "Add company board tokens (the slug in their Greenhouse URL).")
+        for company_token in companies:
             if applied >= args.limit:
                 break
-            jobs = _search_greenhouse_on_google(page, query)
+            jobs = _fetch_greenhouse_jobs_for_company(company_token)
             for job in jobs:
                 if applied >= args.limit:
                     break

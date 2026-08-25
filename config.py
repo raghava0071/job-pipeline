@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.2.1"
+PIPELINE_VERSION = "2.3.0"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -776,17 +776,27 @@ WORKDAY_QUERIES = [
     "AI Engineer",
 ]
 
-# ── Greenhouse search queries (used by greenhouse_apply_now.py Google search) ──
-GREENHOUSE_QUERIES = [
-    "Data Engineer entry level",
-    "Data Analyst entry level",
-    "Data Scientist entry level",
-    "ML Engineer entry level",
-    "Analytics Engineer",
-    "Business Intelligence Analyst",
-    "ETL Developer",
-    "Machine Learning Engineer",
-    "AI Engineer",
+# ── Greenhouse company board tokens (used by greenhouse_apply_now.py's API
+# discovery — https://boards-api.greenhouse.io/v1/boards/{token}/jobs) ────────
+# Replaces the old GREENHOUSE_QUERIES Google-search terms — added 2026-08-25
+# after Google started blocking the site:boards.greenhouse.io search itself.
+# The public Job Board API pulls ALL of a company's live postings in one call
+# (no per-query search terms needed); this pipeline's own title/keyword
+# filters (SENIOR_WORDS, DATA_KEYWORDS in greenhouse_apply_now.py) still
+# decide which of those postings are relevant, same as before.
+# Each entry is the company's "board token" — the slug in its Greenhouse URL
+# (boards.greenhouse.io/TOKEN or job-boards.greenhouse.io/TOKEN). Seeded with
+# a handful confirmed live via search as of 2026-08-25; a token that stops
+# working (company left Greenhouse, renamed its board) fails loudly with a
+# 404 printed for that company — nothing is invented to fill the gap. Add/
+# remove tokens freely; this is the only place they're listed.
+GREENHOUSE_COMPANIES = [
+    "gitlab",
+    "doordash",
+    "robinhood",
+    "coinbase",
+    "instacart",
+    "affirm",
 ]
 
 # ── Skill experience years — used in form filling ──────────────────────────────
