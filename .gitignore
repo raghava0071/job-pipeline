@@ -60,10 +60,46 @@ afternoon_summary_*.txt
 claude_task_*.log
 
 # ── Browser session files (contain login cookies) ─────────────────────────────
+# Exact per-platform session profiles.
 .indeed_session/
 .linkedin_session/
 .workday_session/
-# Chrome metrics
+.greenhouse_session/
+# Any variant/backup/renamed copy of the above — e.g. the "corrupted_backup"
+# and timestamped snapshots that don't match the exact names above. Added
+# 2026-08-25 after .indeed_session_corrupted_backup_20260708_1615/ (318,402
+# files — a full Chrome profile: Cookies, Login Data, History, Web Data,
+# Trust Tokens, first_party_sets.db, ukm_db) and .greenhouse_session/ (351
+# files, same file types) both got committed because neither matched any
+# pattern below — this repo's rule is "if it contains personal data,
+# credentials, or runtime state → exclude", and any Chrome profile directory
+# always does, regardless of what it's named.
+.*_session/
+.*_session_*/
+*_session_backup*/
+data/session_backups/
+# Chrome profile internals, in case a session dir is ever tracked from
+# OUTSIDE one of the ignored directories above (e.g. copied/renamed) —
+# belt and suspenders on top of the directory-level ignores. Note: gitignore
+# patterns with spaces do NOT need quotes — a literal space in the pattern
+# matches a literal space in the filename.
+Cookies
+Cookies-journal
+Login Data
+Login Data-journal
+Login Data For Account
+Login Data For Account-journal
+Web Data
+Web Data-journal
+Account Web Data
+Account Web Data-journal
+History
+Network Persistent State
+Trust Tokens
+Trust Tokens-journal
+first_party_sets.db
+first_party_sets.db-journal
+ukm_db
 *.pma
 SingletonLock
 SingletonCookie
