@@ -69,12 +69,21 @@ def _skill_years_for(tool: str) -> Optional[str]:
     skill in raghav_profile.SKILL_YEARS — the canonical skill/years source
     (see config.py's SKILL_YEARS comment for why it's not cfg.SKILL_YEARS).
     Returns None if `tool` isn't a real skill — callers must not guess Yes.
+
+    Exact key matches are checked BEFORE synonym-based matches. Some
+    SYNONYMS groups (from jd_parser.py, built for JD keyword matching) are
+    deliberately broad — e.g. "gcp" lists "bigquery" as a synonym, which is
+    right for scoring a JD's overall GCP-family match but wrong here: if
+    SKILL_YEARS has its own explicit "bigquery" entry, that more specific,
+    real figure must win over a broader family match like "gcp".
     """
     tool_n = _norm(tool)
     if not tool_n:
         return None
+    if tool_n in rp.SKILL_YEARS:
+        return rp.SKILL_YEARS[tool_n]
     for key, years in rp.SKILL_YEARS.items():
-        if tool_n == key or tool_n in _expand_tool(key) or key in _expand_tool(tool_n):
+        if tool_n in _expand_tool(key) or key in _expand_tool(tool_n):
             return years
     return None
 
@@ -377,3 +386,125 @@ def answer_via_claude_fallback(
     if len(ans) <= 60:
         return ans
     return None
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Grounded "why this role / why this company" essay drafting
+#
+# Different shape from Layers A/B above on purpose: this NEVER auto-fills a
+# form field. It only produces a draft that the caller must route to
+# stuck_questions.json (or an equivalent review queue) for Raghav's own
+# review before anything is submitted — it's his voice going out under his
+# name, so a human reads it first, always. Grounded strictly in the real
+# JD text and real profile facts; never invents company history/culture
+# not stated in the JD, and never invents personal history not in the
+# profile facts.
+# ══════════════════════════════════════════════════════════════════
+
+_MOTIVATION_ESSAY_RE = re.compile(
+    r"why (do you want to work|are you interested|this role|this position|"
+    r"do you want to join|us\b|here\b)|"
+    r"what draws you|what interests you (about|in)|"
+    r"why .*(excites|excited)|why .*\bjoin\b|"
+    r"what motivates you|tell us why|why .*(this|our) (role|position|team|company)",
+    re.IGNORECASE,
+)
+
+
+def is_motivation_question(label: str) -> bool:
+    """True if `label` is a 'why this role / why this company' style
+    open-ended motivation question, as opposed to some other essay prompt
+    (e.g. 'describe a project', 'what's your testing philosophy') that this
+    module makes no attempt to draft."""
+    return bool(_MOTIVATION_ESSAY_RE.search(label or ""))
+
+
+_ESSAY_SYSTEM_PROMPT = """You are drafting a short first-person answer to a real job
+application's "why this role / why this company" question, on behalf of a real
+candidate. This draft will be shown to the candidate for their own review
+before anything is submitted — it is a starting point in their voice, not a
+final answer, and it will never be submitted automatically.
+
+Ground the answer ONLY in:
+  1. The actual job description text provided below — reference real
+     specifics from it (the team, responsibilities, tech stack, product/
+     mission language it actually uses) rather than generic phrases like
+     "innovative company" or "great culture" unless the JD itself uses
+     that language.
+  2. The candidate facts provided below — real skills, real years of
+     experience, real current role and its real responsibilities, real
+     education.
+
+Never invent:
+  - Facts about the company (history, values, culture, funding, awards,
+    products used personally, etc.) that are not stated in the JD text
+    given to you.
+  - Personal history, projects, employers, or achievements not listed in
+    the candidate facts given to you.
+  - A prior relationship with the company (e.g. "I've long admired...",
+    "as a user of your product...") unless the candidate facts explicitly
+    state one.
+
+Write 2-4 short paragraphs (roughly 120-220 words total), first person,
+professional but not stiff — no corporate buzzword filler. Connect 2-3
+SPECIFIC things from the JD to 2-3 SPECIFIC things in the candidate's real
+background. You may close on a genuine, specific note about what the
+candidate would want to grow into in this role, ONLY if that growth
+direction is actually supported by the candidate facts (e.g. moving from
+more analyst-style work toward deeper data-engineering/infrastructure
+work) — do not invent a growth narrative the facts don't support.
+"""
+
+
+def draft_motivation_essay(
+    label: str,
+    jd_text: str,
+    job_title: str = "",
+    company: str = "",
+) -> Optional[str]:
+    """
+    Draft a grounded "why this role/company" answer for review. Returns
+    None if `label` isn't actually a motivation-style question, if the
+    Claude API is unavailable, or if the call fails — callers must treat
+    None exactly like "no draft, route to stuck_questions.json as-is."
+    Never called for the field types this module already answers
+    deterministically (Layer A/B) — this is strictly for essay/open-ended
+    fields the caller has already classified as such.
+    """
+    if not label or not is_motivation_question(label):
+        return None
+
+    try:
+        import claude_engine
+    except Exception:
+        return None
+
+    edu = rp.EDUCATION[0] if getattr(rp, "EDUCATION", None) else {}
+    exp = rp.EXPERIENCE[0] if getattr(rp, "EXPERIENCE", None) else {}
+    bullets = "\n".join(f"    - {b}" for b in exp.get("bullets", [])[:4])
+    jd_excerpt = (jd_text or "").strip()[:4000]
+
+    prompt = _profile_facts_block()
+    prompt += f"""
+CANDIDATE EDUCATION: {edu.get('degree', '')}, {edu.get('school', '')} ({edu.get('graduated', '')})
+CANDIDATE CURRENT ROLE: {exp.get('title', '')} at {exp.get('company', '')} ({exp.get('duration', '')})
+  {exp.get('summary', '')}
+  Real recent work on this role includes:
+{bullets}
+
+TARGET JOB TITLE: {job_title}
+TARGET COMPANY: {company}
+JOB DESCRIPTION (real, as posted — this is your only source for anything
+about the company or the role itself):
+{jd_excerpt}
+
+QUESTION TO ANSWER: {label}
+
+Write the draft answer now — first person, as the candidate.
+"""
+    try:
+        draft = claude_engine._ask(prompt, system=_ESSAY_SYSTEM_PROMPT, max_tokens=500, fast=False)
+    except Exception:
+        return None
+    draft = (draft or "").strip()
+    return draft if draft else None

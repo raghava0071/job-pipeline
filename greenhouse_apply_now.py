@@ -387,24 +387,40 @@ def upload_greenhouse_resume(page, resume_path: str) -> bool:
 
 def _log_stuck_fields(fields: list, job_title: str, company: str,
                        status: str = "no cache/PROFILE_FALLBACK match — needs a manual answer "
-                                     "added to qa_answers.py or PROFILE_FALLBACK") -> None:
+                                     "added to qa_answers.py or PROFILE_FALLBACK",
+                       drafts: dict | None = None) -> None:
     """Reuses the same data/stuck_questions.json shape as indeed/workday so
     there's one place to check for fields that need a manual answer added.
     `status` distinguishes WHY a field landed here — "genuinely unknown" vs
     "essay question, deliberately not auto-filled" are different situations
-    and the log should say which."""
+    and the log should say which.
+
+    `drafts` (added 2026-08-25): optional {label: draft_text} map — for
+    "why this role/company" essay fields, profile_answers.draft_motivation_essay()
+    may have produced a grounded draft. It's attached to the logged field as
+    "draft_answer" so it's visible for Raghav's review, but it is NEVER used
+    to fill the form field itself — this function only logs, it never types
+    anything."""
     if not fields:
         return
     try:
         stuck_file = cfg.BASE_DIR / "data" / "stuck_questions.json"
         stuck_file.parent.mkdir(parents=True, exist_ok=True)
         existing = json.loads(stuck_file.read_text()) if stuck_file.exists() else []
+        field_entries = []
+        for f in fields:
+            lbl = f.get("label", "")
+            entry = {"label": lbl, "type": f.get("type", ""), "options": f.get("options", [])}
+            if drafts and lbl in drafts:
+                entry["draft_answer"] = drafts[lbl]
+                entry["draft_note"] = ("Grounded draft from profile_answers.draft_motivation_essay() "
+                                        "— REVIEW before using; never auto-submitted.")
+            field_entries.append(entry)
         existing.append({
             "timestamp": datetime.now().isoformat(),
             "company": company, "job_title": job_title,
             "source": "greenhouse_apply_now._smart_fill_greenhouse_fields",
-            "fields": [{"label": f.get("label", ""), "type": f.get("type", ""),
-                        "options": f.get("options", [])} for f in fields],
+            "fields": field_entries,
             "status": status,
         })
         stuck_file.write_text(json.dumps(existing, indent=2))
@@ -676,6 +692,7 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
     }
 
     answers, uncached, essays, eeo_skipped = {}, [], [], []
+    essay_drafts = {}   # {label: grounded draft text} — for review only, never auto-filled
 
     for f in fields:
         lbl = f.get("label", "")
@@ -699,10 +716,31 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
             continue
 
         # ── Essay / open-ended pitch questions — never auto-filled ───────────
+        # "Why this role/company" motivation questions get a GROUNDED DRAFT
+        # attached (real JD text + real profile facts, via
+        # profile_answers.draft_motivation_essay()) for Raghav's own review —
+        # the field itself is still never filled and still routes to
+        # stuck_questions.json exactly like every other essay question. Other
+        # essay prompts (e.g. "describe a project you're proud of") get no
+        # draft attempt; they're not motivation-shaped and this module makes
+        # no attempt to fabricate an answer for them.
         if category == "essay":
             essays.append(f)
-            print(f"             📝 ESSAY    '{lbl}' — needs YOUR real answer, "
-                  f"not auto-filled (routing to stuck_questions.json)")
+            draft = None
+            try:
+                import profile_answers as _pa
+                draft = _pa.draft_motivation_essay(lbl, jd_text, job_title, company)
+            except Exception as e:
+                print(f"             ⚠  Essay draft generation errored for '{lbl}': {e}")
+            if draft:
+                essay_drafts[lbl] = draft
+                print(f"             ✏️  DRAFT   '{lbl}' — grounded draft generated "
+                      f"(review before using — never auto-filled):")
+                for line in draft.splitlines():
+                    print(f"                          {line}")
+            else:
+                print(f"             📝 ESSAY    '{lbl}' — needs YOUR real answer, "
+                      f"not auto-filled (routing to stuck_questions.json)")
             continue
 
         # ── Yes/No — real fact first, then a SHAPE-VALIDATED cache lookup ────
@@ -857,7 +895,10 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
     if essays:
         _log_stuck_fields(essays, job_title, company,
                            status="ESSAY / open-ended question — deliberately NOT auto-filled; "
-                                  "write your own real answer here")
+                                  "write your own real answer here (a grounded draft is attached "
+                                  "under 'draft_answer' for motivation/why-this-role questions — "
+                                  "review it before using, it is never submitted automatically)",
+                           drafts=essay_drafts)
     if eeo_skipped:
         _log_stuck_fields(eeo_skipped, job_title, company,
                            status="EEO/self-identification — intentionally left blank, no "
