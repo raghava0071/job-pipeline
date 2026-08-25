@@ -127,6 +127,22 @@ def run_indeed(limit, dry_run, result_queue):
     try:
         import sys
         sys.path.insert(0, str(PIPELINE_DIR))
+
+        # Hand-off mode: Indeed's Cloudflare wall blocks any automated browser,
+        # so don't launch it. Build the click-through dashboard for the real
+        # browser instead. See indeed_handoff.py / config.INDEED_HANDOFF_MODE.
+        try:
+            import config as _cfg
+            if getattr(_cfg, "INDEED_HANDOFF_MODE", False):
+                import indeed_handoff
+                # Don't auto-open during a scheduled/parallel run — just build it;
+                # the file path is emailed/printed and opened on manual runs.
+                indeed_handoff.generate(open_browser=not dry_run)
+                result_queue.put(("indeed", "success"))
+                return
+        except Exception as _hoff_err:
+            print(f"  ⚠  Indeed hand-off dashboard failed ({str(_hoff_err)[:80]}) — falling back to normal engine")
+
         import importlib.util
 
         spec = importlib.util.spec_from_file_location(
