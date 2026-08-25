@@ -940,14 +940,15 @@ def is_workday_url(url: str) -> bool:
 def is_good_level(title: str) -> bool:
     return not any(bad in title.lower() for bad in cfg.SENIOR_WORDS)
 
-DATA_KEYWORDS = [
-    "data", "analyst", "analytics", "engineer", "scientist", "machine learning",
-    "ml", "ai", "etl", "pipeline", "bi", "business intelligence", "sql",
-    "python", "tableau", "power bi", "spark", "databricks", "snowflake",
-]
-
 def is_relevant_domain(title: str) -> bool:
-    return any(kw in title.lower() for kw in DATA_KEYWORDS)
+    """Delegates to config.is_target_role_title() — the shared, word-boundary
+    -safe role-type filter also used by linkedin_apply_now.py and
+    greenhouse_apply_now.py (2026-08-25). This used to be a local
+    DATA_KEYWORDS list of bare single words ("engineer", "ai", "sql",
+    "python", "bi"...), the same loose check that let generic software-
+    engineering titles through in the Greenhouse dry run that prompted this
+    fix — see config.py's NEGATIVE_ROLE_TITLE_WORDS comment for the details."""
+    return cfg.is_target_role_title(title)
 
 # ── Log helpers ───────────────────────────────────────────────────────────────
 

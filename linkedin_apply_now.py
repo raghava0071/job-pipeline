@@ -69,9 +69,15 @@ def is_relevant_role(title):
     Return True if the job title is in Raghav's target domain.
     Prevents applying to off-domain titles like 'Scheduler', 'Project Engineer',
     'HR Coordinator', etc. that occasionally appear in data-keyword searches.
+
+    Delegates to config.is_target_role_title() — the shared, word-boundary
+    -safe check also used by greenhouse_apply_now.py and workday_apply_now.py
+    (2026-08-25). The old bare `kw in title.lower()` here had the same
+    substring bug the Greenhouse dry run exposed: it would match "ai
+    engineer" inside a title like "...AI Engineering: ..." and pass generic
+    software-engineering roles that happen to overlap one keyword.
     """
-    t = title.lower() + " "
-    return any(kw in t for kw in getattr(cfg, "TARGET_ROLE_KEYWORDS", set()))
+    return cfg.is_target_role_title(title)
 
 def is_fake_job(title, company, description, applicant_count=0, location="",
                 has_safety_warning=False, is_company_verified=False,

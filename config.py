@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.3.0"
+PIPELINE_VERSION = "2.3.2"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -638,6 +638,85 @@ TARGET_ROLE_KEYWORDS = {
     "databricks", "snowflake", "dbt ", "spark engineer",
 }
 
+# ── Negative title filter — hard-excludes generic software-engineering roles
+# even when a TARGET_ROLE_KEYWORDS phrase coincidentally overlaps ─────────────
+# Added 2026-08-25 after a Greenhouse dry run (8/8 GitLab jobs) showed
+# "Backend Engineer (Ruby)" (78%), "Fullstack Engineer (TypeScript)" (67%),
+# "Forward Deployed Engineer" (64%), and "Customer Success Engineer" (73%)
+# passing the fit gate. Raghav is a DATA engineer/analyst, not a general
+# software engineer — these titles were slipping through Greenhouse's old
+# per-engine keyword check because a bare "engineer"/"ai" substring matches
+# almost any tech title. A title on this list is rejected UNLESS one of
+# DATA_QUALIFIER_WORDS also appears as its own word (so "Data Platform
+# Engineer" survives, bare "Platform Engineer" doesn't). See
+# is_target_role_title() below — the single place this logic runs.
+NEGATIVE_ROLE_TITLE_WORDS = {
+    "backend engineer", "back-end engineer", "back end engineer",
+    "frontend engineer", "front-end engineer", "front end engineer",
+    "fullstack engineer", "full stack engineer", "full-stack engineer",
+    "forward deployed engineer",
+    "software engineer", "software developer",
+    "site reliability engineer",
+    "devops engineer",
+    "solutions engineer", "sales engineer",
+    "customer success engineer", "support engineer", "field engineer",
+    "security engineer",
+    "infrastructure engineer",
+    "platform engineer",       # bare — "data platform engineer" is rescued below
+    "qa engineer", "test engineer", "automation engineer",
+    "mobile engineer", "ios engineer", "android engineer",
+    "web developer", "ui engineer", "ux engineer",
+    "embedded engineer", "firmware engineer", "hardware engineer",
+    "game developer", "game engineer",
+}
+
+# A NEGATIVE_ROLE_TITLE_WORDS hit is forgiven if one of these appears as its
+# own word in the title too — real data-flavored roles that also happen to
+# say "engineer" ("Data Platform Engineer", "Analytics Infrastructure Engineer").
+DATA_QUALIFIER_WORDS = {
+    "data", "analytics", "analyst", "machine learning", "ml", "etl",
+    "data science", "data scientist", "bi", "business intelligence",
+    "quantitative", "nlp", "database", "warehouse", "pipeline",
+}
+
+import re as _re
+
+def _word_in(word: str, padded_lower_text: str) -> bool:
+    """Word-boundary substring match — NOT a naive `word in text` check.
+    The old per-engine filters used bare `kw in title.lower()`, which matches
+    "ai engineer" inside "AI Engineering" (GitLab's team/org name, not the
+    role itself) — exactly how "Backend Engineer, AI Engineering: Agent
+    Observability" slipped past the old TARGET_ROLE_KEYWORDS check. Word
+    boundaries close that gap: "engineer" no longer matches inside
+    "engineering" because the character right after it (`i`) is a word char."""
+    return _re.search(r'(?<!\w)' + _re.escape(word.strip().lower()) + r'(?!\w)',
+                       padded_lower_text) is not None
+
+def is_target_role_title(title: str) -> bool:
+    """
+    Single source of truth for "is this title actually in Raghav's target
+    domain (data engineering / analytics / ML)?" — greenhouse_apply_now.py,
+    linkedin_apply_now.py, and workday_apply_now.py all call this instead of
+    keeping their own copy-pasted substring-matching checks (each had a
+    slightly different, all equally loose, version before 2026-08-25).
+
+    Logic:
+      1. If the title matches a NEGATIVE_ROLE_TITLE_WORDS phrase (generic
+         software-engineering role) AND no DATA_QUALIFIER_WORDS word rescues
+         it, reject immediately — no amount of positive keyword overlap
+         elsewhere in the title matters.
+      2. Otherwise, accept only if a TARGET_ROLE_KEYWORDS phrase is present
+         (word-boundary matched, so "ai engineer" no longer matches inside
+         "ai engineering").
+    """
+    t = f" {(title or '').lower()} "
+
+    for bad in NEGATIVE_ROLE_TITLE_WORDS:
+        if _word_in(bad, t) and not any(_word_in(q, t) for q in DATA_QUALIFIER_WORDS):
+            return False
+
+    return any(_word_in(kw, t) for kw in TARGET_ROLE_KEYWORDS)
+
 # ── Blocked companies — skip entirely, don't even attempt ─────────────────────
 # Add any company name or Workday subdomain key here to permanently skip it.
 # Matching is case-insensitive and partial (e.g. "airbus" matches "Airbus Group").
@@ -791,13 +870,120 @@ WORKDAY_QUERIES = [
 # 404 printed for that company — nothing is invented to fill the gap. Add/
 # remove tokens freely; this is the only place they're listed.
 GREENHOUSE_COMPANIES = [
-    "gitlab",
-    "doordash",
-    "robinhood",
-    "coinbase",
-    "instacart",
-    "affirm",
+    # Verified HTTP 200 + confirmed non-senior (no Sr/Staff/Principal/Lead/
+    # Director/Manager/etc in title) data-engineer/analyst/analytics/BI
+    # postings live on the board as of 2026-08-25 — see CHANGELOG for the
+    # exact per-company counts. "doordash" was a dead token (404); the
+    # correct slug is "doordashusa". "gitlab", "robinhood", and "instacart"
+    # were dropped — re-checked the same day and each had 0-1 non-senior
+    # data postings, all software-engineering-heavy. Ranked roughly by
+    # non-senior data-role yield observed on the verification date; expect
+    # this to drift as postings churn — re-verify with the --url/API check
+    # in the CHANGELOG before adding new tokens, a 404 is silently skipped
+    # per-company but still wastes a request every run.
+    "brex",             # fintech — Data Analyst II, Data Engineer (US + intl)
+    "doordashusa",      # logistics/marketplace — Analytics Engineer, Data Analyst, SWE-Data Platform
+    "affirm",           # fintech
+    "coinbase",         # fintech/crypto
+    "gusto",            # HR/payroll SaaS
+    "cultureamp",       # HR SaaS
+    "sigmacomputing",   # BI/data analytics platform
+    "asana",            # productivity SaaS
+    "klaviyo",          # marketing SaaS — Analytics Engineer (Boston)
+    "fivetran",         # data infrastructure/ELT
+    "samsara",          # IoT/fleet data
+    "chime",            # fintech/neobank
+    "faire",            # wholesale marketplace
+    "smartsheet",       # productivity SaaS
+    "amplitude",        # product analytics platform
 ]
+
+# ── US-only location filter — Greenhouse ────────────────────────────────────
+# Greenhouse's public Job Board API returns a structured `location.name` per
+# posting (e.g. "Remote, Canada; Remote, United States" for a role open to
+# either country, or "Bangalore, India" for a single-country listing).
+# Raghav is on F-1 STEM OPT — US work authorization only — so a posting whose
+# location.name doesn't mention the US isn't one he can actually take, no
+# matter how high it scores. Added 2026-08-25 after a dry run passed a
+# Bangalore-based "AI Engineer" (72%), a Bangalore "Backend Engineer, Geo
+# Team" (76%), a Canada-only "Backend Engineer (Ruby)" (78%), a UAE "Forward
+# Deployed Engineer - META" (64%), and an EMEA-only "Forward Deployed
+# Engineer - EMEA" (64%) — greenhouse_apply_now.py was already fetching
+# `location` from the API but never checked it against anything.
+US_LOCATION_SIGNALS = ("united states", "usa", "u.s.a", "u.s.")
+
+# Countries/regions that mean NOT US, checked before the positive signals so
+# a listing that mixes one of these with an actual US option ("Remote,
+# Canada; Remote, United States") still correctly returns True — the
+# non-US check only wins when NO US signal is also present.
+NON_US_LOCATION_SIGNALS = (
+    "canada", "mexico", "brazil", "united kingdom", "ireland", "germany",
+    "france", "italy", "netherlands", "sweden", "denmark", "spain",
+    "portugal", "poland", "india", "bangalore", "pakistan", "philippines",
+    "bangladesh", "sri lanka", "nigeria", "ghana", "kenya", "south africa",
+    "australia", "new zealand", "singapore", "japan", "china", "hong kong",
+    "uae", "united arab emirates", "dubai", "saudi arabia", "israel",
+    "emea", "latam", "apac",
+)
+
+# Standard 2-letter USPS state codes — the dominant Greenhouse format for
+# purely-domestic US postings is bare "City, ST" with no country name at
+# all (confirmed against DoorDash, Brex, Gusto, Klaviyo, Samsara listings
+# 2026-08-25). Matched against the ORIGINAL-case location string (not
+# lowercased) so e.g. "OR" (Oregon) can't accidentally match the English
+# word "or" elsewhere in the string.
+US_STATE_ABBREVS = (
+    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN",
+    "IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV",
+    "NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN",
+    "TX","UT","VT","VA","WA","WV","WI","WY","DC",
+)
+
+US_STATE_NAMES = (
+    "alabama","alaska","arizona","arkansas","california","colorado",
+    "connecticut","delaware","florida","georgia","hawaii","idaho",
+    "illinois","indiana","iowa","kansas","kentucky","louisiana","maine",
+    "maryland","massachusetts","michigan","minnesota","mississippi",
+    "missouri","montana","nebraska","nevada","new hampshire","new jersey",
+    "new mexico","north carolina","north dakota","ohio","oklahoma",
+    "oregon","pennsylvania","rhode island","south carolina","south dakota",
+    "tennessee","texas","utah","vermont","virginia","west virginia",
+    "wisconsin","wyoming",
+)
+
+_US_STATE_ABBR_RE = _re.compile(r',\s*(' + '|'.join(US_STATE_ABBREVS) + r')\b')
+
+def is_us_location(location: str) -> bool:
+    """True if `location` (Greenhouse's location.name field) lists the US as
+    an eligible location. Handles BOTH formats Greenhouse companies actually
+    use: explicit country name ("San Francisco, California, United States")
+    and the far more common domestic-only format that never spells out the
+    country at all ("San Francisco, CA" / "Remote - US"). An earlier version
+    of this function only checked for the literal string "united states" and
+    would have wrongly rejected almost every purely-domestic US company —
+    confirmed 2026-08-25 against real DoorDash/Brex/Gusto/Klaviyo/Samsara
+    postings, none of which say "United States" anywhere.
+
+    Non-US country/region signals are checked first, but only reject when NO
+    US signal is present either — so "Remote, Canada; Remote, United States"
+    still returns True (the US option makes it reachable) while "São Paulo,
+    São Paulo, Brazil" correctly returns False. A blank/fully-unrecognized
+    location fails closed (treated as NOT US)."""
+    loc = (location or "").lower()
+    if not loc:
+        return False
+
+    has_us_signal = (
+        any(sig in loc for sig in US_LOCATION_SIGNALS)
+        or bool(_US_STATE_ABBR_RE.search(location or ""))
+        or any(name in loc for name in US_STATE_NAMES)
+        or bool(_re.search(r'\bremote\s*[-,]?\s*us\b', loc))
+    )
+    if has_us_signal:
+        return True
+    if any(sig in loc for sig in NON_US_LOCATION_SIGNALS):
+        return False
+    return False
 
 # ── Skill experience years — used in form filling ──────────────────────────────
 SKILL_YEARS = {

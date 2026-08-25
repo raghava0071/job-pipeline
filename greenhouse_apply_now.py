@@ -199,17 +199,34 @@ def _dismiss_cookie_banner(page) -> bool:
 def is_greenhouse_url(url: str) -> bool:
     return "greenhouse.io" in (url or "")
 
-def is_good_level(title: str) -> bool:
-    return not any(bad in title.lower() for bad in cfg.SENIOR_WORDS)
-
-DATA_KEYWORDS = [
-    "data", "analyst", "analytics", "engineer", "scientist", "machine learning",
-    "ml", "ai", "etl", "pipeline", "bi", "business intelligence", "sql",
-    "python", "tableau", "power bi", "spark", "databricks", "snowflake",
-]
+def is_good_level(title: str, jd_text: str = "") -> bool:
+    """Title-level seniority check, PLUS a body-level check for postings
+    whose seniority is stated in the JD's own subtitle/overview but not in
+    Greenhouse's title field — e.g. GitLab's "Forward Deployed Engineer -
+    EMEA" listing has that exact string as its title, but the JD's own first
+    line reads "Staff Forward Deployed Engineer, Agentic SDLC". Title-only
+    SENIOR_WORDS matching misses that. Only the first 400 chars of the JD are
+    scanned (the subtitle/overview area) — scanning the whole JD would
+    false-positive on unrelated sentences like "you'll work alongside senior
+    engineers" deep in the body. Added 2026-08-25 alongside the role-type and
+    location fixes — see config.py's NEGATIVE_ROLE_TITLE_WORDS comment for
+    the full context of that dry run."""
+    if any(bad in title.lower() for bad in cfg.SENIOR_WORDS):
+        return False
+    if jd_text and any(bad in jd_text[:400].lower() for bad in cfg.SENIOR_WORDS):
+        return False
+    return True
 
 def is_relevant_domain(title: str) -> bool:
-    return any(kw in title.lower() for kw in DATA_KEYWORDS)
+    """Delegates to config.is_target_role_title() — the shared, word-boundary
+    -safe role-type filter also used by linkedin_apply_now.py and
+    workday_apply_now.py. This used to be a local DATA_KEYWORDS list of bare
+    single words ("engineer", "ai", "sql", "python", "bi"...), which is why
+    "Backend Engineer (Ruby)", "Fullstack Engineer (TypeScript)", "Forward
+    Deployed Engineer", and "Customer Success Engineer" all passed this check
+    in the 2026-08-25 dry run — a single word like "engineer" matches almost
+    any tech title. See config.py for the actual matching logic."""
+    return cfg.is_target_role_title(title)
 
 # ── Log helpers ───────────────────────────────────────────────────────────────
 
@@ -1247,7 +1264,12 @@ def main():
             if sk in seen:
                 return
             seen.add(sk)
-            if title and (not is_good_level(title) or not is_relevant_domain(title)):
+            if title and (not is_good_level(title, jd) or not is_relevant_domain(title)):
+                skipped += 1; return
+
+            location = job.get("location", "")
+            if not cfg.is_us_location(location):
+                print(f"  🚫 Non-US location ({location or 'unknown'}) — skipping: {title} @ {company}")
                 skipped += 1; return
 
             blocked = getattr(cfg, "BLOCKED_COMPANIES", set())
