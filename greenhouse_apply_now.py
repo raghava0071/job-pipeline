@@ -56,6 +56,11 @@ try:
 except ImportError:
     _claude_ans = None
 
+try:
+    import raghav_profile as rp
+except ImportError:
+    rp = None
+
 DATA_DIR    = cfg.DATA_DIR
 SESSION_DIR = cfg.BASE_DIR / ".greenhouse_session"
 LOG_FILE    = cfg.BASE_DIR / "data" / "greenhouse_applied_log.json"
@@ -346,9 +351,14 @@ def upload_greenhouse_resume(page, resume_path: str) -> bool:
 # ── Generic question filler (cache layers, no live API — matches Raghav's
 #    2026-07-14 decision on Workday: no anthropic calls for Q&A, ever) ────────
 
-def _log_stuck_fields(fields: list, job_title: str, company: str) -> None:
+def _log_stuck_fields(fields: list, job_title: str, company: str,
+                       status: str = "no cache/PROFILE_FALLBACK match — needs a manual answer "
+                                     "added to qa_answers.py or PROFILE_FALLBACK") -> None:
     """Reuses the same data/stuck_questions.json shape as indeed/workday so
-    there's one place to check for fields that need a manual answer added."""
+    there's one place to check for fields that need a manual answer added.
+    `status` distinguishes WHY a field landed here — "genuinely unknown" vs
+    "essay question, deliberately not auto-filled" are different situations
+    and the log should say which."""
     if not fields:
         return
     try:
@@ -361,14 +371,152 @@ def _log_stuck_fields(fields: list, job_title: str, company: str) -> None:
             "source": "greenhouse_apply_now._smart_fill_greenhouse_fields",
             "fields": [{"label": f.get("label", ""), "type": f.get("type", ""),
                         "options": f.get("options", [])} for f in fields],
-            "status": "no cache/PROFILE_FALLBACK match — needs a manual answer "
-                      "added to qa_answers.py or PROFILE_FALLBACK",
+            "status": status,
         })
         stuck_file.write_text(json.dumps(existing, indent=2))
-        print(f"          📝 {len(fields)} field(s) with no answer anywhere — "
-              f"logged to data/stuck_questions.json: {[f.get('label','') for f in fields]}")
+        print(f"          📝 {len(fields)} field(s) → data/stuck_questions.json "
+              f"({status}): {[f.get('label','') for f in fields]}")
     except Exception as e:
         print(f"          ⚠  Could not log stuck field(s): {e}")
+
+# ── Field-type classifier ──────────────────────────────────────────────────
+#
+# WHY THIS EXISTS: the original version looked up an answer by label text
+# alone and typed whatever it found into the field, with no check that the
+# answer's SHAPE matched the QUESTION's TYPE. Confirmed real bugs from that:
+# a yes/no question ("...applied in the last 6 months?") got a month name
+# ("August") because qa_answers.py had a bare 5-char "month" key that
+# partial-matched the word "months" inside a completely unrelated question
+# (fixed separately in qa_answers.py — see _EXACT_ONLY_KEYS there) — and
+# essay-type questions ("describe your approach to testing") were getting
+# one-word cache hits that read as a bot answered them, because nothing
+# distinguished "this needs a paragraph" from "this needs one word." Every
+# field is now classified BEFORE any answer is looked up, and the category
+# decides which answer sources are even allowed to apply.
+
+_EEO_SIGNALS = (
+    "gender", "ethnicity", "race", "hispanic", "latino", "latina",
+    "veteran", "disability", "disabilit", "sexual orientation",
+    "self-identif", "self identif", "protected class",
+)
+
+_ESSAY_SIGNALS = (
+    "describe", "why do you", "why are you", "why anthropic", "why this",
+    "why do you want", "tell us about", "walk us through", "approach to",
+    "explain how", "explain your", "what interests you", "cover letter",
+    "in your own words", "pitch us", "what makes you", "share a time",
+    "give an example",
+)
+
+_YES_NO_OPTION_WORDS = {"yes", "no", "true", "false"}
+
+_DECLINE_PHRASES = (
+    "decline to self-identify", "decline to answer", "prefer not to answer",
+    "i don't wish to answer", "do not wish to answer", "prefer not to say",
+    "choose not to disclose",
+)
+
+def _classify_field(f: dict) -> str:
+    """Returns one of: "eeo", "essay", "yes_no", "dropdown", "short_text".
+    This decision is made from the field's real DOM type + its options +
+    its label — never from what answer happens to be cached for it."""
+    label = f.get("label", "").lower().strip()
+    ftype = f.get("type", "")
+    options = [str(o).strip().lower() for o in f.get("options", [])]
+
+    if any(s in label for s in _EEO_SIGNALS):
+        return "eeo"
+
+    if ftype == "textarea" or any(s in label for s in _ESSAY_SIGNALS) or len(label) > 90:
+        return "essay"
+
+    if options and len(options) <= 3 and all(o in _YES_NO_OPTION_WORDS for o in options):
+        return "yes_no"
+
+    if ftype == "select" and options:
+        return "dropdown"
+
+    # A yes/no-phrased question Greenhouse rendered as a plain text/number
+    # field instead of a radio group (seen on some companies' custom
+    # questions) — still route as yes_no so the answer gets shape-validated
+    # before typing, instead of accepting whatever a label-based cache hit
+    # happened to return.
+    if ftype in ("text", "number") and re.match(
+        r'^(are|do|does|is|have|has|will|can|would|did)\b', label
+    ):
+        return "yes_no"
+
+    return "short_text"
+
+def _looks_yes_no_shaped(answer) -> bool:
+    """Does this answer actually look like a yes/no response? Used to reject
+    a cache hit that's the WRONG SHAPE for a yes/no field (a month name, a
+    country name, a number) instead of typing it in anyway."""
+    a = str(answer or "").strip().lower()
+    if not a:
+        return False
+    if a in ("yes", "no", "y", "n", "true", "false"):
+        return True
+    # Allow short explanatory sentences that still clearly START with a
+    # yes/no (e.g. qa_answers.py's W2 answer: "Yes, I am able to work on W2...")
+    return a.startswith("yes") or a.startswith("no,") or a.startswith("no ")
+
+def _previously_applied_to_company(company: str) -> bool:
+    """Ground truth from THIS pipeline's own apply log — not a guess. Only
+    knows about applications made through this pipeline; a False here means
+    "not in our records", not an absolute guarantee about every application
+    ever made anywhere."""
+    if not company:
+        return False
+    c = company.lower().strip()
+    for e in load_log():
+        if e.get("status") == "Applied" and e.get("company", "").lower().strip() == c:
+            return True
+    return False
+
+def _known_factual_yes_no(label: str, company: str) -> str | None:
+    """Returns the TRUE 'Yes'/'No' for a fixed set of facts this pipeline
+    actually knows — from config.py, raghav_profile.py, or its own apply
+    log — never a guess. Returns None for anything outside this list, and
+    the caller must NOT invent an answer when this returns None; it falls
+    through to the cache layers (still shape-validated) or to
+    stuck_questions.json."""
+    l = label.lower().strip()
+
+    if any(p in l for p in ("authorized to work", "legally authorized", "eligible to work in")):
+        return "Yes" if getattr(cfg, "AUTHORIZED_TO_WORK_NOW", True) else "No"
+
+    if any(p in l for p in ("require sponsorship", "need sponsorship", "visa sponsorship",
+                              "sponsorship now or in the future", "require visa",
+                              "require any kind of visa")):
+        return "Yes" if getattr(cfg, "REQUIRES_SPONSORSHIP", False) else "No"
+
+    if "relocat" in l:
+        relocate = bool(rp.PROFILE.get("relocate", False)) if rp else False
+        return "Yes" if relocate else "No"
+
+    if "applied" in l and any(p in l for p in ("before", "previously", "prior", "months", "past")):
+        return "Yes" if _previously_applied_to_company(company) else "No"
+
+    # "Do you have N+ years of <skill> experience?" — answered HONESTLY
+    # against the real years-of-experience figures, never a blind "Yes".
+    m = re.search(r'(\d+)\+?\s*years?', l)
+    if m and "year" in l and ("experience" in l or "worked with" in l or "working with" in l):
+        threshold = float(m.group(1))
+        skill_years = getattr(cfg, "SKILL_YEARS", {}) or {}
+        actual_years = None
+        for skill, yrs in skill_years.items():
+            if skill in l:
+                try:
+                    actual_years = float(yrs)
+                except (TypeError, ValueError):
+                    pass
+                break
+        if actual_years is None:
+            actual_years = float(getattr(cfg, "YEARS_EXPERIENCE", 3))
+        return "Yes" if actual_years >= threshold else "No"
+
+    return None
 
 def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: str) -> int:
     """Fills every remaining labeled field on the form: Greenhouse custom
@@ -459,28 +607,124 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
     print(f"          📋 {len(fields)} field(s) to fill (custom questions + EEO)")
 
     _smart_salary = _pick_salary(jd_text, job_title)
+    # Defense-in-depth only — the primary answer for every fact below now
+    # comes from _known_factual_yes_no() (config.py-backed) BEFORE this dict
+    # is ever consulted, for anything classified "yes_no". This dict is what
+    # a "short_text"-classified field falls back to if no cache layer has an
+    # answer, so a couple of these keys (sponsorship, relocat) are kept as a
+    # safety net in case a field with that meaning doesn't get picked up by
+    # the yes_no classifier for some reason — pulled from the same config
+    # constants, never a separate hardcoded literal.
     PROFILE_FALLBACK = {
-        "work authorization": "Yes", "authorized to work": "Yes", "legally authorized": "Yes",
-        "sponsorship": "No", "require sponsorship": "No", "visa": "F-1 STEM OPT",
+        "work authorization": "Yes" if getattr(cfg, "AUTHORIZED_TO_WORK_NOW", True) else "No",
+        "authorized to work": "Yes" if getattr(cfg, "AUTHORIZED_TO_WORK_NOW", True) else "No",
+        "legally authorized": "Yes" if getattr(cfg, "AUTHORIZED_TO_WORK_NOW", True) else "No",
+        "sponsorship": "Yes" if getattr(cfg, "REQUIRES_SPONSORSHIP", False) else "No",
+        "visa": "F-1 STEM OPT",
         "salary": _smart_salary, "compensation": _smart_salary, "hourly rate": "40",
-        "start date": "2 weeks", "notice period": "2 weeks", "when can you start": "2 weeks",
-        "relocat": "No", "remote": "Yes",
-        "gender": "I don't wish to answer", "ethnicity": "I don't wish to answer",
-        "race": "I don't wish to answer", "hispanic": "I don't wish to answer",
-        "veteran": "I am not a protected veteran", "disability": "I don't wish to answer",
-        "years of experience": "3", "background check": "Yes", "drug test": "Yes",
-        "18 or older": "Yes", "us citizen": "No", "green card": "No", "permanent resident": "No",
+        "earliest start date": getattr(cfg, "EARLIEST_START_DATE", "Immediately"),
+        "earliest available start date": getattr(cfg, "EARLIEST_START_DATE", "Immediately"),
+        "when can you start": getattr(cfg, "EARLIEST_START_DATE", "Immediately"),
+        "available to start": getattr(cfg, "EARLIEST_START_DATE", "Immediately"),
+        "notice period": "2 weeks",
+        "relocat": "Yes" if (rp and rp.PROFILE.get("relocate", False)) else "No",
+        "remote": "Yes",
+        "years of experience": str(getattr(cfg, "YEARS_EXPERIENCE", 3)),
+        "background check": "Yes", "drug test": "Yes", "18 or older": "Yes",
+        "us citizen": "No", "green card": "No", "permanent resident": "No",
         "linkedin": "https://www.linkedin.com/in/yourusername",
         "github": "https://github.com/raghava0071",
         "how did you hear": "LinkedIn / Online Job Board",
         "pronoun": "He/Him",
     }
 
-    answers, uncached = {}, []
+    answers, uncached, essays, eeo_skipped = {}, [], [], []
+
     for f in fields:
         lbl = f.get("label", "")
         lbl_l = lbl.lower().strip().rstrip(" *:?")
+        category = _classify_field(f)
 
+        # ── EEO / self-identification — never auto-filled ────────────────────
+        if category == "eeo":
+            options = f.get("options", [])
+            decline_opt = next(
+                (o for o in options if any(p in str(o).lower() for p in _DECLINE_PHRASES)), None
+            )
+            if decline_opt:
+                answers[lbl] = decline_opt
+                print(f"             ⏭  EEO      '{lbl}' → '{decline_opt}' "
+                      f"(the form's own decline-to-answer option, not a guess)")
+            else:
+                eeo_skipped.append(f)
+                print(f"             ⏭  EEO      '{lbl}' — left blank (self-identification, "
+                      f"no decline option found on this form)")
+            continue
+
+        # ── Essay / open-ended pitch questions — never auto-filled ───────────
+        if category == "essay":
+            essays.append(f)
+            print(f"             📝 ESSAY    '{lbl}' — needs YOUR real answer, "
+                  f"not auto-filled (routing to stuck_questions.json)")
+            continue
+
+        # ── Yes/No — real fact first, then a SHAPE-VALIDATED cache lookup ────
+        if category == "yes_no":
+            fact = _known_factual_yes_no(lbl, company)
+            if fact is not None:
+                answers[lbl] = fact
+                print(f"             ✔ FACT    '{lbl}' → '{fact}' (config.py, not a guess)")
+                continue
+
+            found_valid = False
+            for source_name, source_val in (
+                ("QA",    _qa.get_answer(lbl) if (_qa and lbl) else None),
+                ("SAVED", _claude_ans.get(lbl) if (_claude_ans and lbl) else None),
+                ("CACHE", _cache.get(lbl) if lbl else None),
+            ):
+                if source_val is None:
+                    continue
+                if _looks_yes_no_shaped(source_val):
+                    answers[lbl] = source_val
+                    print(f"             ✔ {source_name:<6}  '{lbl}' → '{str(source_val)[:60]}'")
+                    found_valid = True
+                else:
+                    print(f"             ⚠  {source_name} had '{str(source_val)[:40]}' for a yes/no "
+                          f"question '{lbl}' — wrong shape, discarding instead of using it")
+                break  # only trust the first source that actually returned something
+            if found_valid:
+                continue
+            uncached.append(f)
+            continue
+
+        # ── Dropdown — answer must match one of the form's REAL options ──────
+        if category == "dropdown":
+            options_l = [str(o).lower() for o in f.get("options", [])]
+            resolved = None
+            for source_val in (
+                _qa.get_answer(lbl) if (_qa and lbl) else None,
+                _claude_ans.get(lbl) if (_claude_ans and lbl) else None,
+                _cache.get(lbl) if lbl else None,
+            ):
+                if source_val and any(str(source_val).lower() in o or o in str(source_val).lower()
+                                       for o in options_l):
+                    resolved = source_val
+                    break
+            if resolved is None:
+                for kw, val in sorted(PROFILE_FALLBACK.items(), key=lambda kv: -len(kv[0])):
+                    if kw in lbl_l and any(str(val).lower() in o or o in str(val).lower() for o in options_l):
+                        resolved = val
+                        break
+            if resolved is not None:
+                answers[lbl] = resolved
+                print(f"             ✔ DROPDOWN '{lbl}' → '{resolved}' (matches a real option)")
+                if _claude_ans:
+                    _claude_ans.save(lbl, resolved)
+                continue
+            uncached.append(f)
+            continue
+
+        # ── Short text — normal cache chain, longest-key-wins fallback ───────
         qa = _qa.get_answer(lbl) if (_qa and lbl) else None
         if qa is not None:
             answers[lbl] = qa
@@ -501,19 +745,30 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
                 _claude_ans.save(lbl, cached)
             continue
 
-        matched = False
-        for kw, val in PROFILE_FALLBACK.items():
-            if kw in lbl_l:
-                answers[lbl] = val
-                print(f"             ✔ PROFILE '{lbl}' → '{val}'")
-                if _claude_ans:
-                    _claude_ans.save(lbl, val)
-                matched = True
-                break
-        if not matched:
-            uncached.append(f)
+        # Longest matching key wins (same principle as qa_answers.get_answer)
+        # instead of first-in-dict-order — avoids a short generic key
+        # shadowing a more specific one purely because of dict ordering.
+        fallback_matches = [(kw, val) for kw, val in PROFILE_FALLBACK.items() if kw in lbl_l]
+        if fallback_matches:
+            kw, val = max(fallback_matches, key=lambda kv: len(kv[0]))
+            answers[lbl] = val
+            print(f"             ✔ PROFILE '{lbl}' → '{val}'")
+            if _claude_ans:
+                _claude_ans.save(lbl, val)
+            continue
 
-    _log_stuck_fields(uncached, job_title, company)
+        uncached.append(f)
+
+    if essays:
+        _log_stuck_fields(essays, job_title, company,
+                           status="ESSAY / open-ended question — deliberately NOT auto-filled; "
+                                  "write your own real answer here")
+    if eeo_skipped:
+        _log_stuck_fields(eeo_skipped, job_title, company,
+                           status="EEO/self-identification — intentionally left blank, no "
+                                  "decline-to-answer option was found on this form to select")
+    if uncached:
+        _log_stuck_fields(uncached, job_title, company)
 
     filled = _safe_eval(page, """
         (itemsJson) => {

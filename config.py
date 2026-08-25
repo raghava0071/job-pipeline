@@ -39,6 +39,22 @@ GREENHOUSE_ENABLED = True   # guest-apply only — see greenhouse_apply_now.py
 # blocking the automated browser.
 INDEED_HANDOFF_MODE = True
 
+# ── Factual answers — single source of truth for every platform ────────────────
+# These are the ONLY place these facts should be hardcoded. Every apply engine's
+# form-answering logic must read from here, never carry its own copy — added
+# 2026-08-25 after finding qa_answers.py's sponsorship-question answers were all
+# hardcoded to "No"/"False" (wrong — Raghav will need H-1B sponsorship in the
+# future) and greenhouse_apply_now.py's PROFILE_FALLBACK had "sponsorship": "No"
+# copied verbatim from Workday's, same wrong value in a second place. Two
+# different files disagreeing about the same fact is exactly the bug class this
+# section exists to prevent.
+AUTHORIZED_TO_WORK_NOW = True    # F-1 STEM OPT — currently authorized, no gap
+REQUIRES_SPONSORSHIP   = True    # will need H-1B sponsorship in the future — answer "Yes", not "No"
+YEARS_EXPERIENCE       = 3       # real total professional experience — used to answer
+                                  # "do you have N+ years" questions HONESTLY (No if
+                                  # N > this), never blindly "Yes" and never skipped
+EARLIEST_START_DATE    = "Immediately"   # distinct from notice-period fields (still "2 weeks")
+
 from pathlib import Path
 import os
 
