@@ -16,9 +16,18 @@
 # Greenhouse's well-documented, long-stable field IDs (legacy embed) PLUS a
 # generic label-based fallback (covers the newer job-boards.greenhouse.io
 # React UI, which uses standard <label for> / aria-label associations instead
-# of those IDs). Run with --dry-run against a couple of real job URLs first
-# and watch the "📋 N field(s) on this step" / "⚠ could not find" print lines
-# before trusting this on a live run — see CLAUDE.md safety workflow.
+# of those IDs). The script ALWAYS dry-runs (stops before the Submit click)
+# unless you pass --live — run without --live against a couple of real job
+# URLs first and watch the "📋 N field(s) on this step" / "⚠ could not find"
+# print lines before ever adding --live — see CLAUDE.md safety workflow.
+#
+# LIVE-SUBMIT MODE (2026-08-26, --live): before every Submit click, the form
+# is checked for any REQUIRED field with no truthful answer (still routed to
+# essays/EEO/uncached with nothing resolved) — that job is skipped, never
+# submitted incomplete, and never given a fabricated answer to force it
+# through. Every job --live actually reaches this gate for (submitted or
+# skipped) gets a full record — every field + the value resolved for it,
+# and the outcome — in data/submitted_applications.json.
 #
 # DISCOVERY (the part below) IS verified as a real, working API — confirmed
 # via live search results showing real job URLs under each configured
@@ -42,8 +51,10 @@
 # programmatically. No login, no scraping, no bot-detection to trigger.
 #
 # USAGE:
-#   python greenhouse_apply_now.py --limit 5
-#   python greenhouse_apply_now.py --limit 2 --dry-run
+#   python greenhouse_apply_now.py --limit 5              # dry-run (default — no --live, nothing is ever submitted)
+#   python greenhouse_apply_now.py --limit 2 --dry-run     # same as above, explicit
+#   python greenhouse_apply_now.py --live --limit 3        # LIVE — actually submits, small batch first
+#   python greenhouse_apply_now.py --live --dry-run        # --dry-run wins: still just a dry-run
 # =============================================================================
 
 import os, sys, time, json, argparse, re, html
@@ -81,6 +92,13 @@ except ImportError:
 DATA_DIR    = cfg.DATA_DIR
 SESSION_DIR = cfg.BASE_DIR / ".greenhouse_session"
 LOG_FILE    = cfg.BASE_DIR / "data" / "greenhouse_applied_log.json"
+# Live-submit audit log (added 2026-08-26 with --live) — one record per job
+# that actually reached the post-fill gate in LIVE mode: every field the form
+# had + the value (if any) resolved for it + whether it was submitted and why/
+# why not. Separate from LOG_FILE (greenhouse_applied_log.json), which stays
+# the terse per-run summary used for already_applied() dedup; this is the
+# detailed record for auditing what a live submission actually contained.
+SUBMITTED_LOG_FILE = cfg.BASE_DIR / "data" / "submitted_applications.json"
 SCREENSHOTS = cfg.BASE_DIR / "screenshots"
 
 for d in [SCREENSHOTS, DATA_DIR, SESSION_DIR]:
@@ -238,6 +256,22 @@ def load_log():
 
 def save_log(log):
     LOG_FILE.write_text(json.dumps(log, indent=2))
+
+def _log_submitted_application(record: dict) -> None:
+    """Appends one full audit record to data/submitted_applications.json.
+    Called for every job that reaches the post-fill gate while running with
+    --live — both jobs that got skipped for having an unresolved required
+    field AND jobs that were actually submitted (success or fail) — so this
+    file is a complete account of what --live did and why, not just a
+    success tally. Never called in dry-run mode (nothing was actually
+    attempted, so there's nothing to audit)."""
+    try:
+        SUBMITTED_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        existing = json.loads(SUBMITTED_LOG_FILE.read_text()) if SUBMITTED_LOG_FILE.exists() else []
+        existing.append(record)
+        SUBMITTED_LOG_FILE.write_text(json.dumps(existing, indent=2))
+    except Exception as e:
+        print(f"          ⚠  Could not write data/submitted_applications.json: {e}")
 
 def already_applied(url: str, log: list, title="", company="") -> bool:
     key = re.sub(r'\?.*', '', url).rstrip("/")
@@ -477,24 +511,35 @@ def _classify_field(f: dict) -> str:
     if any(s in label for s in _EEO_SIGNALS):
         return "eeo"
 
-    if ftype == "textarea" or any(s in label for s in _ESSAY_SIGNALS) or len(label) > 90:
-        return "essay"
-
+    # Yes/No shape checks run BEFORE the essay/length heuristic below — a
+    # field's REAL shape (an actual Yes/No radio/select, or plain text/
+    # number field phrased as a yes/no question) must never be miscategorized
+    # as an essay just because the question is dressed in a long sentence.
+    # FIXED 2026-08-26: this was the root cause of a live run applying to
+    # ZERO jobs — DoorDash/Affirm/Chime's real sponsorship questions are
+    # genuine Yes/No questions but phrased as 150+ character legal-boilerplate
+    # sentences ("Will you now require immigration sponsorship by our company
+    # to attain or maintain your employment eligibility (e.g., H-1B, E-3,
+    # TN, O-1, STEM OPT...)?"), so the OLD `len(label) > 90` check below fired
+    # first and routed them to "essay" — which is NEVER auto-filled by design
+    # — before they ever reached the yes_no branch where a truthful "Yes"
+    # (from config.REQUIRES_SPONSORSHIP) was available. Combined with the
+    # required-field completeness gate added the same day, that meant every
+    # job with one of these long-but-answerable required questions got
+    # skipped, even though the honest answer was known.
     if options and len(options) <= 3 and all(o in _YES_NO_OPTION_WORDS for o in options):
         return "yes_no"
 
+    if ftype in ("text", "number", "radio", "checkbox", "select") and "?" in label and re.match(
+        r'^(are|do|does|is|have|has|will|can|would|did)\b', label
+    ) and not any(s in label for s in _ESSAY_SIGNALS):
+        return "yes_no"
+
+    if ftype == "textarea" or any(s in label for s in _ESSAY_SIGNALS) or len(label) > 90:
+        return "essay"
+
     if ftype == "select" and options:
         return "dropdown"
-
-    # A yes/no-phrased question Greenhouse rendered as a plain text/number
-    # field instead of a radio group (seen on some companies' custom
-    # questions) — still route as yes_no so the answer gets shape-validated
-    # before typing, instead of accepting whatever a label-based cache hit
-    # happened to return.
-    if ftype in ("text", "number") and re.match(
-        r'^(are|do|does|is|have|has|will|can|would|did)\b', label
-    ):
-        return "yes_no"
 
     return "short_text"
 
@@ -550,9 +595,38 @@ def _known_factual_yes_no(label: str, company: str) -> str | None:
 
     # "Do you have N+ years of <skill> experience?" — answered HONESTLY
     # against the real years-of-experience figures, never a blind "Yes".
-    m = re.search(r'(\d+)\+?\s*years?', l)
-    if m and "year" in l and ("experience" in l or "worked with" in l or "working with" in l):
-        threshold = float(m.group(1))
+    # FIXED 2026-08-26 — two real overclaiming risks found while diagnosing
+    # a live run that got blocked by the (now-fixed) essay-misclassification
+    # bug above; once that bug stopped hiding these questions from ever
+    # being evaluated, both of these would otherwise have started producing
+    # real false "Yes" answers on real applications:
+    #   1. MULTI-CLAUSE questions like "1+ years of industry experience post
+    #      PhD OR 3+ years post graduate degree of developing ML models..."
+    #      have TWO distinct thresholds for two different degree levels.
+    #      The old code took re.search()'s FIRST match (here, "1+", the
+    #      post-PhD threshold — which doesn't even apply, Raghav has a
+    #      Master's, not a PhD) and compared it against his real ML years
+    #      (2), producing "Yes" — but the clause that actually applies to
+    #      him (3+ years post-grad-degree) he does NOT meet. Now: if more
+    #      than one DISTINCT number appears, this pattern is genuinely
+    #      ambiguous — return None rather than guess which clause applies.
+    #   2. UNMATCHED SPECIFIC DOMAINS silently fell back to comparing against
+    #      cfg.YEARS_EXPERIENCE (total professional years) even when the
+    #      question named a specific skill/domain not in SKILL_YEARS (e.g.
+    #      "years analyzing product data... in a SaaS environment" — not a
+    #      real SKILL_YEARS entry, but the old code still answered "Yes"
+    #      because total years (3) happened to clear the threshold). Now:
+    #      if the named domain isn't a real, matched skill, return None —
+    #      the QA -> profile_answers.py fallthrough chain that runs next
+    #      already has the correct, narrower logic for this (only falls
+    #      back to total years for a genuinely GENERIC "years of experience"
+    #      question with no specific domain named at all).
+    numbers = re.findall(r'(\d+)\+?\s*years?', l)
+    if numbers and "year" in l and ("experience" in l or "worked with" in l or "working with" in l):
+        distinct = set(numbers)
+        if len(distinct) > 1:
+            return None   # multiple distinct thresholds in one question — ambiguous, don't guess
+        threshold = float(numbers[0])
         # raghav_profile.SKILL_YEARS is canonical — cfg.SKILL_YEARS is a
         # stale, less-complete duplicate (see config.py's SKILL_YEARS
         # comment). Fixed 2026-08-25.
@@ -566,18 +640,36 @@ def _known_factual_yes_no(label: str, company: str) -> str | None:
                     pass
                 break
         if actual_years is None:
-            actual_years = float(getattr(cfg, "YEARS_EXPERIENCE", 3))
+            # A specific domain may still be named even though it's not a
+            # SKILL_YEARS key — don't assume it's generic, let the more
+            # careful downstream logic (profile_answers.answer_from_profile,
+            # which distinguishes truly-generic phrasing from a named-but-
+            # unmatched domain) decide instead of guessing here.
+            return None
         return "Yes" if actual_years >= threshold else "No"
 
     return None
 
-def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: str) -> int:
+def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: str) -> dict:
     """Fills every remaining labeled field on the form: Greenhouse custom
     questions + the standard EEO/voluntary-disclosure block. Ported from
     workday_apply_now.py's _smart_fill_questions — that function is already
     selector-agnostic (label[for] / aria-label / placeholder / fieldset+legend
     for radio-checkbox groups), which is exactly what Greenhouse's standard
-    HTML forms use, both the legacy embed and the React job-boards UI."""
+    HTML forms use, both the legacy embed and the React job-boards UI.
+
+    Returns a dict, not just a fill count (changed 2026-08-26 for live-submit
+    gating — see apply_to_greenhouse_job()):
+        "filled"              — count of DOM fields actually written to
+        "total_fields"        — count of fields found on the form
+        "answers"             — {label: value} for every field that got a
+                                 real, truthful answer (from any layer —
+                                 fact/QA/SAVED/CACHE/PROFILE/CLAUDE)
+        "unresolved_required" — labels of REQUIRED fields that got NO answer
+                                 (essay/EEO-no-decline-option/uncached fields
+                                 that also happen to be required). Non-empty
+                                 means this application cannot be honestly
+                                 completed — the caller must not submit it."""
     fields = _safe_eval(page, r"""
         () => {
             function getLabel(el) {
@@ -624,7 +716,9 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
                 const opts = type === 'select'
                     ? Array.from(inp.options).map(o => o.text.trim()).filter(o => o && o !== '--')
                     : [];
-                results.push({ label: lbl, type, options: opts, sel: uniqueSel(inp) });
+                const required = inp.required || inp.getAttribute('aria-required') === 'true'
+                    || /\*\s*$/.test((lbl || '').trim());
+                results.push({ label: lbl, type, options: opts, sel: uniqueSel(inp), required });
             }
             const groups = {};
             const skippedGroups = new Set();
@@ -647,7 +741,11 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
                             const le = document.querySelector('label[for="'+CSS.escape(r.id)+'"]');
                             return le ? le.innerText.trim() : r.value;
                         }).filter(Boolean);
-                    groups[gname] = { label: lbl, type: inp.type, options: opts, gname };
+                    const groupRequired = Array.from(document.querySelectorAll(
+                        'input[name="'+CSS.escape(gname)+'"]'
+                    )).some(r => r.required || r.getAttribute('aria-required') === 'true')
+                        || /\*\s*$/.test((lbl || '').trim());
+                    groups[gname] = { label: lbl, type: inp.type, options: opts, gname, required: groupRequired };
                 }
             }
             for (const k in groups) results.push(groups[k]);
@@ -656,7 +754,7 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
     """, []) or []
 
     if not fields:
-        return 0
+        return {"filled": 0, "total_fields": 0, "answers": {}, "unresolved_required": []}
     print(f"          📋 {len(fields)} field(s) to fill (custom questions + EEO)")
 
     _smart_salary = _pick_salary(jd_text, job_title)
@@ -955,7 +1053,24 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         "gname": f.get("gname", ""), "answer": str(answers.get(f.get("label", ""), ""))
     } for f in fields])) or 0
 
-    return filled
+    # ── Required-field completeness check — for live-submit gating ───────────
+    # A field lands here (no key in `answers`) only if it was routed to
+    # essays/eeo_skipped/uncached above — i.e. exactly the fields already
+    # logged to stuck_questions.json. If any of THOSE are also required,
+    # this application cannot be honestly completed; apply_to_greenhouse_job()
+    # uses this list to refuse to submit rather than leave a required field
+    # blank. Never computed from a guess — straight from this same fill pass.
+    unresolved_required = [
+        f.get("label", "") for f in fields
+        if f.get("required") and f.get("label", "") not in answers
+    ]
+
+    return {
+        "filled": filled,
+        "total_fields": len(fields),
+        "answers": dict(answers),
+        "unresolved_required": unresolved_required,
+    }
 
 # ── Submit ──────────────────────────────────────────────────────────────────
 #
@@ -1060,18 +1175,43 @@ def submit_greenhouse_application(page, dry_run: bool = False) -> bool:
 
 def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path: str,
                              dry_run: bool = False):
-    """Guest-apply flow, single page. Returns (success: bool, reason: str)."""
+    """Guest-apply flow, single page. Returns (success: bool, reason: str, record: dict).
+
+    `record` is the full audit record for this job — job identity, every
+    field the form had and the value (if any) resolved for it, and the
+    submit outcome — always returned regardless of what happened, so the
+    caller can log it. In LIVE mode (dry_run=False) the caller is expected
+    to write `record` to data/submitted_applications.json via
+    _log_submitted_application(); this function doesn't write it itself so
+    dry-run callers (which pass dry_run=True) don't have to special-case
+    skipping that write.
+
+    Required-field completeness gate (added 2026-08-26, --live): after
+    filling, if any REQUIRED field has no truthful answer (still an
+    essay/EEO/uncached question with nothing resolved for it), Submit is
+    NEVER clicked for this job, live or not — the honest-answer rules do
+    not get relaxed just because --live is on. The job is skipped and the
+    reason is both printed and included in `record`."""
     title   = job.get("title", "")
     company = job.get("company", "")
     job_url = job.get("url", "")
     jd_text = job.get("description", "")
+
+    record = {
+        "timestamp": datetime.now().isoformat(),
+        "title": title, "company": company, "url": job_url,
+        "dry_run": dry_run,
+        "submitted": False, "success": False, "skipped_incomplete": False,
+        "fields": {}, "unresolved_required": [], "reason": "",
+    }
 
     print(f"          🌐 {job_url[:70]}")
     try:
         page.goto(job_url, wait_until="domcontentloaded", timeout=25000)
         time.sleep(2)
     except Exception as e:
-        return False, f"navigation failed: {e}"
+        record["reason"] = f"navigation failed: {e}"
+        return False, record["reason"], record
 
     _dismiss_cookie_banner(page)
 
@@ -1080,11 +1220,13 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
         title   = title   or info.get("title", "")
         company = company or info.get("company", "")
         jd_text = jd_text or info.get("description", "")
+        record["title"], record["company"] = title, company
 
     print(f"          👆 Opening application form...")
     if not click_greenhouse_apply(page):
         _failure_shot(page, f"no_apply_form_{company}")
-        return False, "could not find/open the application form"
+        record["reason"] = "could not find/open the application form"
+        return False, record["reason"], record
     time.sleep(1)
     _wait_for_dom_stable(page)
 
@@ -1100,13 +1242,35 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
     print(f"          {'✅' if uploaded else '⚠ '} Resume upload: {'attached' if uploaded else 'no upload field found — will need manual attach'}")
     time.sleep(1)
 
-    _smart_fill_greenhouse_fields(page, title, company, jd_text)
+    fill_result = _smart_fill_greenhouse_fields(page, title, company, jd_text)
     time.sleep(1)
 
+    record["fields"] = fill_result["answers"]
+    record["unresolved_required"] = fill_result["unresolved_required"]
+
+    # ── Required-field completeness gate — never submit an incomplete form,
+    # never fabricate an answer to force one through. This check runs
+    # regardless of dry_run, but it only actually changes anything in LIVE
+    # mode: dry-run already stops before Submit for every job anyway.
+    if fill_result["unresolved_required"]:
+        reason = ("SKIPPED — required field(s) with no truthful answer available: "
+                   + "; ".join(fill_result["unresolved_required"]))
+        print(f"          🚫 {reason}")
+        print(f"          🚫 Never submitting an incomplete required field, and never "
+              f"fabricating an answer to force it through — this job needs your review "
+              f"in stuck_questions.json first.")
+        record["skipped_incomplete"] = True
+        record["reason"] = reason
+        return False, reason, record
+
     ok = submit_greenhouse_application(page, dry_run=dry_run)
+    record["submitted"] = not dry_run
+    record["success"] = ok
     if ok:
-        return True, "Dry-Run" if dry_run else "confirmed after submit click"
-    return False, "submit not confirmed (see failure screenshot)"
+        record["reason"] = "Dry-Run" if dry_run else "confirmed after submit click"
+        return True, record["reason"], record
+    record["reason"] = "submit not confirmed (see failure screenshot)"
+    return False, record["reason"], record
 
 # ── Discovery: Greenhouse public Job Board API ─────────────────────────────────
 #
@@ -1187,16 +1351,36 @@ def _fetch_greenhouse_jobs_for_company(company_token: str) -> list:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit",   type=int, default=5)
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--dry-run", action="store_true",
+                         help="Stop before the Submit click. This is the DEFAULT behavior "
+                              "with or without this flag — only --live turns real submission "
+                              "on. Kept as an explicit, harmless flag for backward "
+                              "compatibility with existing scripts/schedules that already "
+                              "pass it, and as a safety override: if both --live and "
+                              "--dry-run are given, --dry-run wins.")
+    parser.add_argument("--live", action="store_true",
+                         help="Actually click Submit and apply for real. REQUIRED to submit "
+                              "anything — without it, every run stops before the Submit click "
+                              "no matter what. Before each submit, the form is checked for any "
+                              "REQUIRED field with no truthful answer; a job with one is "
+                              "skipped (never submitted incomplete, never given a fabricated "
+                              "answer) and logged to data/submitted_applications.json with the "
+                              "reason. Test on a small batch first: --live --limit 3.")
     parser.add_argument("--url",     type=str, default=None,
                          help="Test one exact Greenhouse job URL directly — skips API-based "
                               "discovery and the fit-score gate entirely, goes straight to "
                               "apply_to_greenhouse_job() for this one posting. Still fully respects "
-                              "--dry-run (stops before the Submit click, same as the normal path).")
+                              "--dry-run/--live (stops before the Submit click unless --live is set, "
+                              "same as the normal path).")
     args = parser.parse_args()
+    # Safe-by-default: dry-run unless --live was explicitly passed, and
+    # --dry-run (if given) always wins even over --live. `args.dry_run` stays
+    # the single flag every downstream check already reads, so nothing else
+    # in this file needs to change to get the safer default.
+    args.dry_run = args.dry_run or not args.live
 
     print(f"\n{'='*60}")
-    print(f"  Greenhouse Apply Engine  {'[DRY RUN]' if args.dry_run else ''}")
+    print(f"  Greenhouse Apply Engine  {'[DRY RUN]' if args.dry_run else '[LIVE — will submit for real]'}")
     print(f"  Limit: {args.limit} applications")
     print(f"{'='*60}\n")
 
@@ -1343,12 +1527,20 @@ def main():
             print(f"  🚀 Running apply_to_greenhouse_job() "
                   f"({'DRY RUN — will stop before Submit' if args.dry_run else '⚠️  LIVE — will submit for real'})...")
             try:
-                success, reason = apply_to_greenhouse_job(page, job, resume_path, cover_path, dry_run=args.dry_run)
+                success, reason, record = apply_to_greenhouse_job(page, job, resume_path, cover_path, dry_run=args.dry_run)
             except Exception as e:
-                success, reason = False, str(e)
+                success, reason, record = False, str(e), None
 
-            status = "Dry-Run" if args.dry_run else ("Applied" if success else "Failed")
+            if record and record.get("skipped_incomplete"):
+                status = "Skipped-Incomplete"
+            elif args.dry_run:
+                status = "Dry-Run"
+            else:
+                status = "Applied" if success else "Failed"
             print(f"\n  {'✅' if success else '❌'} {status}: {reason}")
+
+            if record and not args.dry_run:
+                _log_submitted_application(record)
 
             browser.close()
             return
@@ -1443,14 +1635,22 @@ def main():
 
             print(f"  🚀 Applying to {company}...")
             try:
-                success, reason = apply_to_greenhouse_job(
+                success, reason, record = apply_to_greenhouse_job(
                     page, job, resume_path, cover_path, dry_run=args.dry_run
                 )
             except Exception as e:
-                success, reason = False, str(e)
+                success, reason, record = False, str(e), None
 
-            status = "Applied" if (success and not args.dry_run) else ("Dry-Run" if args.dry_run else "Failed")
+            if record and record.get("skipped_incomplete"):
+                status = "Skipped-Incomplete"
+            elif args.dry_run:
+                status = "Dry-Run"
+            else:
+                status = "Applied" if success else "Failed"
             print(f"  {'✅' if success else '❌'} {status}: {reason}")
+
+            if record and not args.dry_run:
+                _log_submitted_application(record)
 
             if success and not args.dry_run:
                 notifier.notify_applied(

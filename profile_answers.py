@@ -195,6 +195,23 @@ def answer_from_profile(label: str) -> Optional[str]:
         return None
     l = _norm(label)
 
+    # ── Multi-clause / compound-threshold guard ───────────────────────────
+    # A question with more than one distinct year-linked number (e.g. "1+
+    # years post PhD OR 3+ years post graduate degree of developing ML
+    # models with business impact?") is a compound conditional — no single
+    # branch below (degree-level, years-threshold, etc.) can safely resolve
+    # it, because whichever branch happens to match first ends up answering
+    # the WRONG clause. Real bug found 2026-08-26 while diagnosing a live
+    # run: this exact question was caught by the degree-level branch further
+    # down (which saw "PhD"/"graduate degree" as vocabulary to match, not as
+    # part of a threshold it wasn't being asked about) and returned "No" —
+    # coincidentally the truthful answer that time, but not reliably so; a
+    # different pair of numbers would have produced a real false answer.
+    # Bail to None (-> Claude fallback / stuck for human review) before ANY
+    # other branch below gets a chance to guess which clause applies.
+    if "year" in l and len(set(re.findall(r'\d+', l))) > 1:
+        return None
+
     # ── Work authorization ──────────────────────────────────────────────
     if re.search(
         r"authorized to work|legally (able|authorized|permitted) to work|"
@@ -251,6 +268,8 @@ def answer_from_profile(label: str) -> Optional[str]:
         return years if years is not None else None
 
     # ── "Do you have N+ years [of X]?" ────────────────────────────────────
+    # (multi-clause/compound-threshold questions already bailed to None at
+    # the top of this function — see the guard right after `l = _norm(...)`)
     m = _YEARS_QUESTION_RE.search(l)
     if m:
         n = int(m.group("n"))

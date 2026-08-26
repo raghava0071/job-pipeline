@@ -239,6 +239,15 @@ def run_greenhouse(limit, dry_run, result_queue):
         sys.argv = ["greenhouse_apply_now.py", "--limit", str(limit)]
         if dry_run:
             sys.argv.append("--dry-run")
+        else:
+            # 2026-08-26: greenhouse_apply_now.py now defaults to dry-run and
+            # requires an explicit --live flag to actually submit (safety
+            # fix — it used to default to live). Without this, a live
+            # run_all.py run would have silently stopped submitting via
+            # Greenhouse instead of erroring, which is worse than a crash —
+            # pass --live through here so this call site's existing
+            # live-submit behavior is preserved, not silently downgraded.
+            sys.argv.append("--live")
 
         try:
             spec.loader.exec_module(mod)
