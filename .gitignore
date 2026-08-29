@@ -42,6 +42,8 @@ data/~$Application_Tracker.xlsx
 data/stuck_questions.json
 data/answer_cache.db
 data/*.db
+data/answer_bank.json
+data/answer_bank_import_review.json
 # fingerprint store (runtime state)
 data/desc_fingerprints.json
 
