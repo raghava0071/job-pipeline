@@ -44,6 +44,8 @@ data/answer_cache.db
 data/*.db
 data/answer_bank.json
 data/answer_bank_import_review.json
+data/answer_bank_review.csv
+data/answer_bank_review_groups.json
 # fingerprint store (runtime state)
 data/desc_fingerprints.json
 
