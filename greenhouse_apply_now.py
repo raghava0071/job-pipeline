@@ -382,6 +382,161 @@ def _fill_basic_field(page, css_sel: str, label_words: list, value: str) -> bool
             return False
     return False
 
+# ── Country field ─────────────────────────────────────────────────────────────
+#
+# ROOT CAUSE of the 2026-08-26 Affirm --live failure (screenshots/
+# gh_fail_submit_not_confirmed_20260826_175845.png — 3 submit attempts, all
+# rejected): Country was never explicitly handled anywhere in this file —
+# not in GH{} (no known id), not in the _fill_basic_field() calls above (only
+# first/last/email/phone), and not excluded from _smart_fill_greenhouse_fields()'s
+# generic scrape either. So it fell to that generic scrape's SELECT-tag
+# handling — a raw `el.value = matchedOption.value` plus a synthetic `change`
+# event (see the "filled" JS in _smart_fill_greenhouse_fields()) — which
+# _smart_fill_greenhouse_fields() then genuinely believed had worked (it was
+# logged as `"Country*": "United States of America"` in
+# data/submitted_applications.json for that exact failed run) with NO
+# read-back check that the value actually took. The screenshot shows why
+# that belief was wrong: Greenhouse's job-boards.greenhouse.io React UI
+# renders Country as a custom combobox widget, not a real <select> — setting
+# a DOM `.value` and firing a plain synthetic event doesn't reach a
+# React-controlled widget's own internal selection state, so the widget kept
+# showing its "Select a country" placeholder AND a red "Select a country"
+# validation error, Greenhouse's own client-side validation correctly
+# blocked the form from advancing on every one of the 3 submit clicks, and
+# _submit_progressed() (page-state-diff — see its own comment below) correctly
+# reported "not confirmed" each time. That detector was never the bug; it
+# was working exactly as designed. The actual gap was upstream: nothing
+# verified the Country fill actually stuck before Submit was ever clicked.
+#
+# Fix, below: (1) an explicit, dedicated Country filler tried BEFORE the
+# generic scrape gets anywhere near it, that tries a real <select> first
+# (Playwright's own .select_option() — fires the events frameworks actually
+# listen for, unlike a raw JS .value= assignment) and only falls back to a
+# click-open-then-click-the-option combobox interaction if no real <select>
+# is found; (2) it NEVER reports success without reading the field's own
+# selected/displayed text back and confirming it actually shows the
+# country, not the placeholder — same "the click/call not throwing is not
+# success" rule _submit_progressed() already applies to the Submit button.
+# apply_to_greenhouse_job() below uses that verified result to add "Country"
+# to the required-field gate if it's present, required, and still couldn't
+# be filled — the same "never submit an incomplete required field" rule
+# that already existed for every other field, just applied here for the
+# first time.
+
+_COUNTRY_WANTED = ("united states",)   # substring match — real option text on
+                                        # different Greenhouse boards varies
+                                        # ("United States" vs "United States
+                                        # of America"); an exact-text match
+                                        # against qa_answers.py's canonical
+                                        # "United States of America" would
+                                        # miss the shorter, more common form.
+
+def _select_native_option(page, select_sel: str, wanted_substrings) -> bool:
+    """Selects an option on a REAL <select> whose visible text contains any
+    of wanted_substrings (case-insensitive), via Playwright's own
+    .select_option() — not a raw JS .value= assignment, which is what
+    silently failed to register on Greenhouse's React Country widget (see
+    the block comment above). Returns True only after reading the select's
+    OWN post-selection text back and confirming it matches — never assumes
+    success just because select_option() didn't raise."""
+    try:
+        loc = page.locator(select_sel).first
+        if loc.count() == 0 or not loc.is_visible(timeout=800):
+            return False
+        texts = loc.evaluate("el => Array.from(el.options).map(o => o.text)") or []
+        match = next((t for t in texts if any(w in t.lower() for w in wanted_substrings)), None)
+        if not match:
+            return False
+        loc.select_option(label=match)
+        after = loc.evaluate("el => (el.options[el.selectedIndex] || {}).text || ''") or ""
+        return any(w in after.lower() for w in wanted_substrings)
+    except Exception:
+        return False
+
+
+def _select_combobox_option(page, trigger_selectors: list, wanted_text: str, wanted_substrings) -> bool:
+    """For a custom (non-<select>) combobox/listbox widget: click whatever
+    trigger element opens it, then click the visible option matching
+    wanted_substrings — the actual UI interaction the widget expects,
+    instead of trying to poke its internal state directly from JS. Tried
+    only after _select_native_option() finds no real <select> to work with.
+    Only reached from _fill_country_field(), never from the generic
+    dropdown-answer path, so a wrong guess here can't touch any other
+    field. Verifies the click landed on a real, visible option before
+    returning True."""
+    for trig_sel in trigger_selectors:
+        try:
+            trig = page.locator(trig_sel).first
+            if trig.count() == 0 or not trig.is_visible(timeout=800):
+                continue
+            trig.click(timeout=3000)
+            time.sleep(0.3)
+
+            def _find_option():
+                opt = page.get_by_role("option", name=re.compile(re.escape(wanted_text), re.I)).first
+                if opt.count() > 0 and opt.is_visible(timeout=1500):
+                    return opt
+                opt = page.locator(f'[role="listbox"] >> text=/{re.escape(wanted_text)}/i').first
+                if opt.count() > 0 and opt.is_visible(timeout=1500):
+                    return opt
+                return None
+
+            opt = _find_option()
+            if opt is None:
+                # Some comboboxes need the country typed into a search box
+                # before the matching option renders at all.
+                try:
+                    page.keyboard.type(wanted_text, delay=20)
+                    time.sleep(0.4)
+                    opt = _find_option()
+                except Exception:
+                    opt = None
+            if opt is not None:
+                opt.click(timeout=3000)
+                time.sleep(0.3)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _has_country_field(page) -> dict:
+    """Returns {"present": bool, "required": bool} — checked BEFORE any fill
+    attempt so a form with no Country field at all (some configurations
+    omit it) is never wrongly treated as a fill failure."""
+    return _safe_eval(page, r"""
+        () => {
+            const sel = document.querySelector('select[id*="country" i], select[name*="country" i]');
+            const lbl = Array.from(document.querySelectorAll('label')).find(l => /^country\b/i.test(l.innerText.trim()));
+            const el = sel || (lbl && lbl.htmlFor ? document.getElementById(lbl.htmlFor) : null);
+            const present = !!(sel || lbl);
+            const labelText = lbl ? lbl.innerText.trim() : '';
+            const required = !!(el && (el.required || el.getAttribute('aria-required') === 'true'))
+                || /\*\s*$/.test(labelText);
+            return { present, required };
+        }
+    """, {"present": False, "required": False}) or {"present": False, "required": False}
+
+
+def _fill_country_field(page, value: str = "United States of America") -> bool:
+    """See the block comment above this section for the full root-cause
+    story. Tries a real <select> first (legacy embed UI), then a
+    click-and-choose combobox interaction (the React job-boards UI's actual
+    widget). Returns True only if verified — see both helper functions."""
+    if _select_native_option(page, 'select[id*="country" i], select[name*="country" i]', _COUNTRY_WANTED):
+        return True
+
+    trigger_candidates = [
+        '[aria-label*="country" i]',
+        'label:has-text("Country") ~ * [role="combobox"]',
+        'label:has-text("Country") ~ * button',
+        'label:has-text("Country") + * [role="combobox"]',
+        'label:has-text("Country") + * button',
+        '#country', '[id*="country" i][role="combobox"]',
+    ]
+    return _select_combobox_option(page, trigger_candidates, "United States", _COUNTRY_WANTED)
+
+
 def upload_greenhouse_resume(page, resume_path: str) -> bool:
     """Resume upload: legacy #resume / #s3_upload_for_resume ids first, then
     the first visible file input whose surrounding text mentions resume/CV
@@ -1238,6 +1393,21 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
         print(f"          ⚠  Could not fill all basic fields "
               f"(first={filled_first} last={filled_last} email={filled_email} phone={filled_phone})")
 
+    # ── Country — see the block comment above _fill_country_field() for why
+    # this needs its own dedicated, verified fill instead of the generic
+    # dropdown path. Checked/filled BEFORE the generic smart-fill scrape so
+    # that scrape sees a genuinely-selected value (or an honestly-still-empty
+    # one) rather than a value it wrongly believes already stuck.
+    country_missing_required = False
+    country_status = _has_country_field(page)
+    if country_status.get("present"):
+        filled_country = _fill_country_field(page, "United States of America")
+        print(f"          {'✅' if filled_country else '⚠ '} Country: "
+              f"{'United States of America' if filled_country else 'COULD NOT confirm the widget accepted a selection'}")
+        if not filled_country and country_status.get("required"):
+            country_missing_required = True
+            _failure_shot(page, f"country_fill_failed_{company}")
+
     uploaded = upload_greenhouse_resume(page, resume_path)
     print(f"          {'✅' if uploaded else '⚠ '} Resume upload: {'attached' if uploaded else 'no upload field found — will need manual attach'}")
     time.sleep(1)
@@ -1252,6 +1422,28 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
     # never fabricate an answer to force one through. This check runs
     # regardless of dry_run, but it only actually changes anything in LIVE
     # mode: dry-run already stops before Submit for every job anyway.
+    #
+    # Country is checked separately from fill_result["unresolved_required"]
+    # and given its own honest reason string, deliberately NOT folded into
+    # the "no truthful answer available" message below: that phrasing is
+    # for essay/EEO/uncached fields where the real gap is Raghav hasn't
+    # given an answer to save. Country's true answer (United States of
+    # America) IS known — 2026-08-26's Affirm failure was a UI-automation
+    # gap (the widget wouldn't accept the value), not a missing-fact one,
+    # and the skip reason should say that plainly rather than implying a
+    # question needs manual review it doesn't actually need.
+    if country_missing_required:
+        reason = ("SKIPPED — Country is required but the page would not accept "
+                   "a selection (tried a real <select> and a combobox click-and-choose "
+                   "interaction, neither verified — see the country_fill_failed "
+                   "screenshot). The answer is known (United States of America); this "
+                   "is a form-automation gap, not a missing-fact one — report this "
+                   "back rather than retrying, the same failure will repeat.")
+        print(f"          🚫 {reason}")
+        record["skipped_incomplete"] = True
+        record["reason"] = reason
+        return False, reason, record
+
     if fill_result["unresolved_required"]:
         reason = ("SKIPPED — required field(s) with no truthful answer available: "
                    + "; ".join(fill_result["unresolved_required"]))
