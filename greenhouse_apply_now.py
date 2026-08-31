@@ -649,19 +649,159 @@ _ESSAY_SIGNALS = (
 
 _YES_NO_OPTION_WORDS = {"yes", "no", "true", "false"}
 
-_DECLINE_PHRASES = (
-    "decline to self-identify", "decline to answer", "prefer not to answer",
-    "i don't wish to answer", "do not wish to answer", "prefer not to say",
-    "choose not to disclose",
+# ── Pure acknowledgment/consent checkboxes ────────────────────────────────
+#
+# Added 2026-08-29. THE RULE (per Raghav's explicit spec): a checkbox is
+# safe to auto-tick ONLY if it does nothing but confirm "I have read /
+# acknowledge / agree to / consent to [a company policy document]" — it
+# asserts NOTHING about Raghav himself. The moment a checkbox asserts a
+# FACT or QUALIFICATION about him ("I certify this is true", "I am at
+# least 18", "I am eligible to work"), it stops being pure boilerplate and
+# becomes a truthfulness claim — those must go through the normal
+# fact-checked yes/no path (or stay stuck if unknown), never a blanket
+# auto-tick. _ACK_EXCLUDE_SIGNALS is checked FIRST and wins over
+# _ACK_CONSENT_SIGNALS if both match, so a checkbox can never be
+# miscategorized as pure boilerplate just because it also contains a
+# policy-sounding word.
+#
+# This also intentionally excludes demographic/EEO-linked consent (e.g. a
+# GDPR "I consent to my demographic data being processed" checkbox) — that
+# stays with the EEO bucket below (declined via the form's own decline
+# option, or routed to Raghav), never auto-ticked, per his explicit "do not
+# store or auto-fill my actual demographic values" instruction. A generic
+# "Applicant Privacy Acknowledgement" (required of every applicant, not
+# specifically about voluntary demographic disclosure) is the case this IS
+# meant to catch.
+_ACK_CONSENT_SIGNALS = (
+    "acknowledge", "acknowledgement", "acknowledgment",
+    "i have read", "i've read", "have read and understood",
+    "agree to the privacy", "privacy policy", "privacy notice",
+    "applicant privacy", "i consent to", "consent to the",
+    "terms of service", "terms and conditions",
 )
 
+_ACK_EXCLUDE_SIGNALS = (
+    # demographic/EEO-linked consent — handled by the EEO bucket instead
+    "demographic", "race", "ethnicity", "gender", "disability", "veteran",
+    "sexual orientation", "self-identif", "self identif",
+    # factual/qualification assertions about Raghav himself — not a mere
+    # "I read this document" acknowledgment, so this must go through the
+    # normal truthfulness-checked path instead of a blanket auto-tick
+    "i certify", "i confirm that i", "i am at least", "i am eligible",
+    "i am currently eligible", "i am authorized", "i have not been",
+    "i possess", "i hold a", "under penalty of perjury", "true and accurate",
+    "true and correct", "to the best of my knowledge",
+)
+
+def _is_pure_ack_consent(label: str) -> bool:
+    """See the block comment above — the ONLY things this may return True
+    for are checkboxes that do nothing but acknowledge/consent to reading a
+    policy document. Never a fact or qualification claim about Raghav."""
+    l = label.lower()
+    if any(s in l for s in _ACK_EXCLUDE_SIGNALS):
+        return False
+    return any(s in l for s in _ACK_CONSENT_SIGNALS)
+
+_DECLINE_PHRASES = (
+    "decline to self-identify", "decline to self identify",
+    "declined to self-identify", "declined to self identify",
+    "decline to answer", "declined to answer",
+    "decline to identify", "decline to disclose",
+    "prefer not to answer", "prefer not to disclose", "prefer not to say",
+    "i prefer not to answer", "i prefer not to say",
+    "i don't wish to answer", "i do not wish to answer",
+    "do not wish to answer", "don't wish to answer",
+    "choose not to disclose", "not specified", "not wish to identify",
+)
+
+def _normalize_decline_text(s: str) -> str:
+    """Curly quotes and non-breaking hyphens are a common real-world reason
+    a literal substring match on 'don't'/'self-identify' silently misses —
+    Greenhouse's actual option text sometimes uses a Unicode apostrophe
+    (') or non-breaking hyphen instead of the plain ASCII ' and -. Without
+    this, _DECLINE_PHRASES could fail to match a decline option that IS
+    genuinely present in the scraped options list — exactly the "the scrape
+    has it, the phrase-matching missed it" gap Raghav flagged."""
+    return (s.replace("’", "'").replace("‘", "'")
+             .replace("–", "-").replace("—", "-")
+             .replace("‑", "-"))
+
+def _find_decline_option(options: list) -> str | None:
+    """Returns the form's OWN decline-to-self-identify option text if one
+    exists among the real scraped options, or None if it genuinely doesn't
+    — never a guess, never invented text. Checked against a normalized copy
+    of each option (see _normalize_decline_text) so punctuation-variant
+    phrasing of the same real option isn't missed."""
+    for o in options:
+        norm = _normalize_decline_text(str(o).strip().lower())
+        if any(p in norm for p in _DECLINE_PHRASES):
+            return o
+    return None
+
+# ── EEO — Raghav's own real answers (added 2026-08-29, given directly by
+# him in chat) ────────────────────────────────────────────────────────────
+#
+# Everything above this point (_find_decline_option et al.) is still the
+# fallback for anything NOT covered here. This layer only ever fires for
+# the six specific questions raghav_profile.EEO_ANSWERS has a real value
+# for, and only when that value genuinely matches one of THIS form's real
+# options — never typed in blind, never assumed present.
+
+def _eeo_subcategory(label: str) -> str | None:
+    """Which specific EEO question is this — one of the six Raghav has
+    given a real answer for, or None (sexual orientation, or anything else
+    not covered — falls through to the existing decline/route behavior
+    unchanged). Order matters: 'transgender' and 'sexual orientation' are
+    checked BEFORE the generic 'gender' signal so neither is misread as the
+    plain gender question — 'transgender' contains the substring 'gender',
+    and Raghav has given no answer for sexual orientation."""
+    l = label.lower()
+    if "sexual orientation" in l:
+        return None
+    if "transgender" in l:
+        return "transgender"
+    if "veteran" in l:
+        return "veteran"
+    if "disabilit" in l:
+        return "disability"
+    if "hispanic" in l or "latino" in l or "latinx" in l:
+        return "hispanic_latino"
+    if "race" in l or "ethnicity" in l:
+        return "race"
+    if "gender" in l or re.search(r'\bsex\b', l):
+        return "gender"
+    return None
+
+def _find_eeo_answer_option(options: list, wanted: str) -> str | None:
+    """Matches Raghav's real EEO_ANSWERS value against THIS form's ACTUAL
+    options — returns None (never a guess) if his answer doesn't correspond
+    to any real option here. Exact match first (most forms use short exact
+    text: "Male", "No", "Asian"); then a prefix-of-a-full-sentence-option
+    match for forms that phrase the same answer as a longer sentence ("No,
+    I do not have a disability and have not had one in the past") — never a
+    bare substring-anywhere match, which would risk a short word like "no"
+    matching the wrong option."""
+    w = wanted.lower().strip()
+    for o in options:
+        if str(o).strip().lower() == w:
+            return o
+    for o in options:
+        ol = str(o).strip().lower()
+        if ol.startswith(w + ",") or ol.startswith(w + " ") or ol.startswith(w + "."):
+            return o
+    return None
+
 def _classify_field(f: dict) -> str:
-    """Returns one of: "eeo", "essay", "yes_no", "dropdown", "short_text".
-    This decision is made from the field's real DOM type + its options +
-    its label — never from what answer happens to be cached for it."""
+    """Returns one of: "ack_consent", "eeo", "essay", "yes_no", "dropdown",
+    "short_text". This decision is made from the field's real DOM type +
+    its options + its label — never from what answer happens to be cached
+    for it."""
     label = f.get("label", "").lower().strip()
     ftype = f.get("type", "")
     options = [str(o).strip().lower() for o in f.get("options", [])]
+
+    if ftype == "checkbox" and _is_pure_ack_consent(label):
+        return "ack_consent"
 
     if any(s in label for s in _EEO_SIGNALS):
         return "eeo"
@@ -952,12 +1092,44 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         lbl_l = lbl.lower().strip().rstrip(" *:?")
         category = _classify_field(f)
 
-        # ── EEO / self-identification — never auto-filled ────────────────────
+        # ── Pure acknowledgment/consent checkbox — safe to auto-tick ─────────
+        # See _is_pure_ack_consent()'s block comment for the exact rule. This
+        # is deliberately the ONLY checkbox category ever auto-checked here —
+        # never a fact/qualification checkbox, never a demographic-consent
+        # checkbox (both excluded before classification ever reaches this
+        # branch). The answer is set to the checkbox's OWN real label text so
+        # it self-matches in the DOM-filling step below (same idiom already
+        # used for "i consent" / "save my answers for pre-filling" in
+        # qa_answers.py), not an invented generic "checked" token.
+        if category == "ack_consent":
+            answers[lbl] = lbl.rstrip(" *:")
+            print(f"             ✔ ACK      '{lbl}' → auto-checked "
+                  f"(privacy/consent acknowledgment — reading/agreeing to a "
+                  f"policy document, not a claim about Raghav)")
+            continue
+
+        # ── EEO / self-identification ─────────────────────────────────────────
+        # Raghav's own real answers (raghav_profile.EEO_ANSWERS) are tried
+        # first for the six specific questions he's given one for — but ONLY
+        # if that answer matches one of THIS form's actual options
+        # (_find_eeo_answer_option never invents a match). Everything else
+        # (sexual orientation, or a mismatched option wording on any of the
+        # six) keeps the original behavior: the form's own decline option,
+        # or routed to Raghav — never guessed.
         if category == "eeo":
             options = f.get("options", [])
-            decline_opt = next(
-                (o for o in options if any(p in str(o).lower() for p in _DECLINE_PHRASES)), None
-            )
+            subcat = _eeo_subcategory(lbl)
+            real_opt = None
+            if subcat and rp:
+                wanted = rp.EEO_ANSWERS.get(subcat)
+                if wanted:
+                    real_opt = _find_eeo_answer_option(options, wanted)
+            if real_opt:
+                answers[lbl] = real_opt
+                print(f"             ✔ EEO      '{lbl}' → '{real_opt}' "
+                      f"(Raghav's own real answer, matched to this form's actual option)")
+                continue
+            decline_opt = _find_decline_option(options)
             if decline_opt:
                 answers[lbl] = decline_opt
                 print(f"             ⏭  EEO      '{lbl}' → '{decline_opt}' "
@@ -965,7 +1137,8 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
             else:
                 eeo_skipped.append(f)
                 print(f"             ⏭  EEO      '{lbl}' — left blank (self-identification, "
-                      f"no decline option found on this form)")
+                      f"no decline option found on this form). Real options seen: "
+                      f"{options if options else '(none captured)'}")
             continue
 
         # ── Essay / open-ended pitch questions — never auto-filled ───────────
@@ -1642,24 +1815,51 @@ def main():
         return
 
     with sync_playwright() as pw:
-        try:
-            browser = pw.chromium.launch_persistent_context(
-                str(SESSION_DIR),
-                headless=False,
-                channel="chrome",
-                viewport={"width": 1366, "height": 900},
-                timeout=60000,
-            )
-            print("  🌐  Using real Google Chrome (channel=chrome) — for launch stability, "
-                  "not evasion; no automation-hiding flags are set")
-        except Exception as chrome_err:
-            print(f"  ⚠  Real Chrome not available ({str(chrome_err)[:80]}) — falling back to bundled Chromium")
-            browser = pw.chromium.launch_persistent_context(
-                str(SESSION_DIR),
-                headless=False,
-                viewport={"width": 1366, "height": 900},
-                timeout=60000,
-            )
+        browser = None
+        # ── Tier 1 — your real, logged-in Chrome profile (opt-in only) ───────
+        # config.GREENHOUSE_CHROME_USER_DATA_DIR is blank by default (see its
+        # comment in config.py for why: Chrome allows only one process per
+        # user-data-dir, and this pipeline runs on a schedule — launching
+        # against your everyday profile while it's already open elsewhere
+        # can fail or force-close your own Chrome windows). Only attempted
+        # at all if you've explicitly set that value.
+        if getattr(cfg, "GREENHOUSE_CHROME_USER_DATA_DIR", ""):
+            try:
+                browser = pw.chromium.launch_persistent_context(
+                    cfg.GREENHOUSE_CHROME_USER_DATA_DIR,
+                    headless=False,
+                    channel="chrome",
+                    viewport={"width": 1366, "height": 900},
+                    timeout=60000,
+                )
+                print(f"  🌐  Using your real Chrome profile: {cfg.GREENHOUSE_CHROME_USER_DATA_DIR}")
+            except Exception as real_chrome_err:
+                print(f"  ⚠  Could not open your real Chrome profile "
+                      f"({str(real_chrome_err)[:100]}) — is Chrome already running on it? "
+                      f"Falling back to the pipeline's own separate profile.")
+                browser = None
+
+        # ── Tier 2 — the pipeline's own separate, persistent Chrome profile ──
+        if browser is None:
+            try:
+                browser = pw.chromium.launch_persistent_context(
+                    str(SESSION_DIR),
+                    headless=False,
+                    channel="chrome",
+                    viewport={"width": 1366, "height": 900},
+                    timeout=60000,
+                )
+                print("  🌐  Using real Google Chrome (channel=chrome), pipeline's own profile "
+                      "— for launch stability, not evasion; no automation-hiding flags are set")
+            except Exception as chrome_err:
+                # ── Tier 3 — bundled Chromium, last resort ────────────────────
+                print(f"  ⚠  Real Chrome not available ({str(chrome_err)[:80]}) — falling back to bundled Chromium")
+                browser = pw.chromium.launch_persistent_context(
+                    str(SESSION_DIR),
+                    headless=False,
+                    viewport={"width": 1366, "height": 900},
+                    timeout=60000,
+                )
         page = browser.pages[0] if browser.pages else browser.new_page()
 
         # ── --url override: one exact posting, no discovery, no score gate ──

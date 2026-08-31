@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.7.2"
+PIPELINE_VERSION = "2.9.0"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -71,6 +71,24 @@ SESSION_LI      = Path.home() / ".linkedin_session"
 SESSION_IN      = Path.home() / ".indeed_session"
 RUN_LOCK_PATH   = Path("/tmp/run_all.lock")   # singleton lock — blocks a second run_all.py from starting while one is already running (Jul 13 duplicate-trigger incident)
 SESSION_WD      = BASE_DIR / ".workday_session"
+
+# ── Greenhouse: real Chrome profile (optional) ────────────────────────────────
+# Empty by default. When blank, greenhouse_apply_now.py launches its own
+# separate, pipeline-owned Chrome profile at ~/job_pipeline/.greenhouse_session
+# — persists across runs, but starts with none of your real logins/autofill.
+# Set this to your REAL Chrome user-data-dir (below is the normal macOS
+# location) to run --live against your actual logged-in Chrome instead.
+#
+# IMPORTANT — Chrome allows only ONE process per user-data-dir at a time.
+# This pipeline runs on a schedule (8am/12pm/6pm — see run_all.py). If your
+# everyday Chrome is open on this same profile when a scheduled run fires,
+# launching against it will either fail outright or force-close your open
+# Chrome windows/tabs. greenhouse_apply_now.py falls back to its own separate
+# profile (then to bundled Chromium) if this fails to launch, so a run won't
+# crash — but your browser session could still get interrupted without
+# warning. Leave this blank unless you're OK with that trade-off, or only
+# run --live when you know Chrome (on this profile) is closed.
+GREENHOUSE_CHROME_USER_DATA_DIR = ""   # e.g. str(Path.home() / "Library" / "Application Support" / "Google" / "Chrome")
 
 # ── API & Model ────────────────────────────────────────────────────────────────
 def get_api_key() -> str:
