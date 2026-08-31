@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.9.0"
+PIPELINE_VERSION = "2.10.0"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -915,6 +915,31 @@ GREENHOUSE_COMPANIES = [
     "smartsheet",       # productivity SaaS
     "amplitude",        # product analytics platform
 ]
+
+# ── Greenhouse skip-cache re-check window ───────────────────────────────────
+# Added 2026-08-30. Root cause of "every run re-processes the same DoorDash
+# postings and never gets to Affirm/Sigma/Chime in reasonable time": a job
+# skipped for a genuinely unresolved required field (no truthful answer
+# available — an EEO field with no decline option, a factual essay question,
+# etc.) was NOT remembered — already_applied() only recognizes "Applied"/
+# "Already Applied", so the exact same doomed posting got fully re-scored,
+# re-resumed, re-cover-lettered, and re-filled (including live Claude essay-
+# draft calls) from scratch on every run, burning most of a run's time on
+# postings that couldn't have changed. greenhouse_apply_now.py now
+# remembers a skip (URL + reason + the PIPELINE_VERSION active when it was
+# checked) and skips it FAST on a later run — no browser/API calls at all —
+# as long as neither of these has changed:
+#   1. PIPELINE_VERSION is the same (a version bump means the logic that
+#      produced the skip may have changed — e.g. this exact release fixed
+#      the ack-consent checkbox and EEO combobox reading — so a bump always
+#      forces one fresh re-check).
+#   2. The cached skip is younger than this many days (a backstop in case
+#      the FORM itself changed without any pipeline code changing).
+# Only ever applied to the "no truthful answer available" skip reason —
+# NEVER to a transient UI-automation gap (e.g. the Country-widget-click
+# failure), which could easily succeed on a plain retry and shouldn't be
+# permanently suppressed.
+GREENHOUSE_SKIP_RECHECK_DAYS = 14
 
 # ── US-only location filter — Greenhouse ────────────────────────────────────
 # Greenhouse's public Job Board API returns a structured `location.name` per

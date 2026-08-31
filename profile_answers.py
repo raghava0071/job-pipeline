@@ -438,6 +438,50 @@ def is_motivation_question(label: str) -> bool:
     return bool(_MOTIVATION_ESSAY_RE.search(label or ""))
 
 
+# Added 2026-08-30, per Raghav's explicit request: a grounded motivation
+# draft may now be auto-filled into the form field (previously it was only
+# ever attached for his own review — see draft_motivation_essay()'s
+# docstring, and greenhouse_apply_now.py's caller). THE RULE stays narrow:
+# only PURE "why this role/company" motivation essays get auto-filled.
+# Never a factual essay, never a qualification question, never anything
+# that would assert experience/credentials Raghav doesn't have — those
+# still route to him untouched, exactly as before. A question can be
+# motivation-SHAPED and still smuggle in a factual ask in the same
+# sentence ("Why do you want to join us, and how many years of Python
+# experience do you have?") — is_motivation_question() alone doesn't catch
+# that, so this is a stricter, separate gate checked only when deciding
+# whether to type the draft into the field, not whether to draft one at
+# all (drafting is still attempted for every is_motivation_question() hit,
+# since the draft itself is harmless to generate — only auto-FILLING is
+# gated more tightly).
+_MOTIVATION_AUTOFILL_EXCLUDE_RE = re.compile(
+    r"years? of (relevant )?experience|"
+    r"\bcertify\b|\battest\b|authorized to work|"
+    r"require(s|d)? .*sponsorship|visa (status|sponsorship)|\bsponsorship\b|"
+    r"salary (expectation|requirement)|compensation expectation|"
+    r"notice period|available to start|start date|"
+    r"\bcitizenship\b|background check|\bcriminal\b|"
+    r"\bgpa\b|degree (in|from)|"
+    r"true and accurate|true and correct|to the best of my knowledge|"
+    r"confirm that you|under penalty of perjury|"
+    r"how many years|how much experience",
+    re.IGNORECASE,
+)
+
+
+def is_pure_motivation_question(label: str) -> bool:
+    """True only if `label` is a motivation-style question
+    (is_motivation_question) AND doesn't also smuggle in a factual or
+    qualification claim (years of experience, certifications, sponsorship,
+    salary, dates, citizenship, degrees, etc.) in the same prompt. This is
+    the gate greenhouse_apply_now.py checks before typing a draft into the
+    field — is_motivation_question() alone still gates whether a draft is
+    generated at all for Raghav's review."""
+    if not is_motivation_question(label):
+        return False
+    return not _MOTIVATION_AUTOFILL_EXCLUDE_RE.search(label or "")
+
+
 _ESSAY_SYSTEM_PROMPT = """You are drafting a short first-person answer to a real job
 application's "why this role / why this company" question, on behalf of a real
 candidate. This draft will be shown to the candidate for their own review

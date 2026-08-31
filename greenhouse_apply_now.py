@@ -286,6 +286,59 @@ def already_applied(url: str, log: list, title="", company="") -> bool:
                 return True
     return False
 
+# ── Skip-cache — remember a genuinely-unresolvable job so re-runs don't
+#    redo the expensive work (see the block comment on
+#    config.GREENHOUSE_SKIP_RECHECK_DAYS for the full root-cause story:
+#    without this, the SAME doomed DoorDash postings were fully re-scored/
+#    re-resumed/re-filled — including live Claude essay-draft calls — on
+#    every single run, which is the actual mechanism behind "every run
+#    stalls on DoorDash"). Keyed by normalized URL, same normalization
+#    already_applied() uses. Only ever written for the "no truthful answer
+#    available" skip reason — never for a transient UI-automation gap. ────
+SKIP_CACHE_FILE = cfg.BASE_DIR / "data" / "gh_skip_cache.json"
+
+def _skip_cache_key(url: str) -> str:
+    return re.sub(r'\?.*', '', url or '').rstrip("/")
+
+def _load_skip_cache() -> dict:
+    try:
+        return json.loads(SKIP_CACHE_FILE.read_text()) if SKIP_CACHE_FILE.exists() else {}
+    except Exception:
+        return {}
+
+def _save_skip_cache(cache: dict) -> None:
+    try:
+        SKIP_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SKIP_CACHE_FILE.write_text(json.dumps(cache, indent=2))
+    except Exception as e:
+        print(f"          ⚠  Could not write data/gh_skip_cache.json: {e}")
+
+def _skip_cache_entry_valid(entry: dict) -> bool:
+    """A cached skip is still trusted (safe to skip fast, no re-check) only
+    if BOTH: the pipeline version hasn't changed since it was recorded (a
+    version bump means the logic that produced the skip may now behave
+    differently — always worth one fresh look), and it's younger than
+    cfg.GREENHOUSE_SKIP_RECHECK_DAYS (a backstop for the form itself
+    changing with no pipeline change at all)."""
+    if not entry:
+        return False
+    if entry.get("pipeline_version") != getattr(cfg, "PIPELINE_VERSION", None):
+        return False
+    try:
+        age_days = (datetime.now() - datetime.fromisoformat(entry.get("timestamp", ""))).days
+    except Exception:
+        return False
+    return age_days < getattr(cfg, "GREENHOUSE_SKIP_RECHECK_DAYS", 14)
+
+def _remember_skip(url: str, company: str, title: str, reason: str) -> None:
+    cache = _load_skip_cache()
+    cache[_skip_cache_key(url)] = {
+        "company": company, "title": title, "reason": reason,
+        "pipeline_version": getattr(cfg, "PIPELINE_VERSION", None),
+        "timestamp": datetime.now().isoformat(),
+    }
+    _save_skip_cache(cache)
+
 # ── Job page extraction ────────────────────────────────────────────────────────
 
 def extract_greenhouse_job(page) -> dict:
@@ -791,6 +844,116 @@ def _find_eeo_answer_option(options: list, wanted: str) -> str | None:
             return o
     return None
 
+# ── EEO react-select combobox reading (added 2026-08-30) ───────────────────
+#
+# Real evidence from data/submitted_applications.json (today's --live run,
+# 2026-08-30 20:36-20:37): all six EEO fields (Gender, transgender,
+# Hispanic/Latinx, Race, Veteran, Disability) still come back with EMPTY
+# options on DoorDash's real form — "Real options seen: (none captured)" —
+# even after v2.9.0 added real-answer matching. Same root cause already
+# proven for Country above: job-boards.greenhouse.io's React UI renders
+# these as react-select comboboxes, not real <select> elements, and their
+# real option text only exists in the DOM once the widget is OPENED (a
+# portal-rendered listbox) — the static field-scrape in
+# _smart_fill_greenhouse_fields() runs once, before anything is clicked, so
+# it can only ever see an empty options list for these.
+#
+# Fix: when an EEO field's scraped options are empty, open its combobox
+# (same click-the-real-widget approach as _select_combobox_option(), proven
+# on Country) and read back the REAL rendered option text — then hand that
+# list to the EXISTING, UNCHANGED _find_eeo_answer_option()/
+# _find_decline_option() matching functions to decide, and only then click
+# the decided option. This file's honesty rule doesn't change: still "the
+# form's own real option or nothing", now just able to actually see what
+# those real options are on this UI.
+
+def _eeo_trigger_candidates(label_text: str) -> list:
+    """Candidate selectors for the clickable element that opens a
+    react-select-style EEO combobox — the same trigger-discovery idiom
+    already proven for Country (_fill_country_field), generalized to any
+    field label via Playwright's :has-text(). Quotes/backslashes are
+    stripped from the label before embedding it in the selector string —
+    EEO label text is Greenhouse's own wording and shouldn't contain them,
+    but this is defense-in-depth against a malformed selector, not a
+    trust boundary."""
+    esc = re.sub(r'["\\]', '', (label_text or "").split("*")[0].strip())[:40]
+    if not esc:
+        return []
+    return [
+        f'label:has-text("{esc}") ~ * [role="combobox"]',
+        f'label:has-text("{esc}") ~ * button',
+        f'label:has-text("{esc}") + * [role="combobox"]',
+        f'label:has-text("{esc}") + * button',
+        f'[aria-label*="{esc}" i]',
+    ]
+
+
+def _read_open_listbox_options(page) -> list:
+    """After a combobox trigger was just clicked open, reads every visible
+    option's REAL text from the now-rendered listbox. Never invents an
+    option — only returns what's actually rendered on the page right now."""
+    try:
+        opts = page.locator('[role="listbox"] [role="option"], [role="option"]')
+        n = min(opts.count(), 30)
+        out = []
+        for i in range(n):
+            try:
+                t = opts.nth(i).inner_text(timeout=500).strip()
+                if t:
+                    out.append(t)
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return []
+
+
+def _open_eeo_combobox(page, label_text: str):
+    """For an EEO field whose static scrape found zero options: opens its
+    combobox and reads back the REAL rendered option text. Returns
+    (trigger_selector, options) so the caller can decide (via the existing,
+    unchanged _find_eeo_answer_option()/_find_decline_option()) and then
+    re-use trigger_selector to click the decided option without
+    re-searching for the widget. Returns (None, []) if no combobox could be
+    found/opened for this label — the caller falls through to the existing
+    "no options captured, route to Raghav" behavior, now after a real
+    attempt was made rather than none at all."""
+    for trig_sel in _eeo_trigger_candidates(label_text):
+        try:
+            trig = page.locator(trig_sel).first
+            if trig.count() == 0 or not trig.is_visible(timeout=500):
+                continue
+            trig.click(timeout=2500)
+            time.sleep(0.25)
+            opts = _read_open_listbox_options(page)
+            if opts:
+                return trig_sel, opts
+            page.keyboard.press("Escape")
+        except Exception:
+            continue
+    return None, []
+
+
+def _click_open_combobox_option(page, trigger_sel: str, option_text: str) -> bool:
+    """Clicks option_text inside the listbox opened by trigger_sel.
+    option_text is always a value just read back from THIS SAME widget by
+    _open_eeo_combobox() — never invented. Re-opens the widget first if it
+    already closed itself (some implementations close on blur/Escape)."""
+    try:
+        opt = page.get_by_role("option", name=re.compile(f"^{re.escape(option_text)}$", re.I)).first
+        if opt.count() == 0 or not opt.is_visible(timeout=500):
+            trig = page.locator(trigger_sel).first
+            if trig.count() and trig.is_visible(timeout=500):
+                trig.click(timeout=2000)
+                time.sleep(0.2)
+            opt = page.get_by_role("option", name=re.compile(f"^{re.escape(option_text)}$", re.I)).first
+        opt.click(timeout=2000)
+        time.sleep(0.2)
+        return True
+    except Exception:
+        return False
+
+
 def _classify_field(f: dict) -> str:
     """Returns one of: "ack_consent", "eeo", "essay", "yes_no", "dropdown",
     "short_text". This decision is made from the field's real DOM type +
@@ -1018,8 +1181,48 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
             const groups = {};
             const skippedGroups = new Set();
             for (const inp of document.querySelectorAll('input[type=radio],input[type=checkbox]')) {
-                if (!inp.offsetParent) continue;
+                // Visibility: check the input's own box first, then fall back
+                // to its associated <label> via the native .labels API (this
+                // covers BOTH label[for=id] AND the input being a CHILD of
+                // its label — <label><input type=checkbox> I acknowledge...
+                // </label> — which offsetParent-on-the-input-alone misses
+                // whenever the raw input is visually hidden behind a styled
+                // sibling, a very common custom-checkbox pattern). Added
+                // 2026-08-30: root cause of DoorDash's "Applicant Privacy
+                // Acknowledgement" never being found/ticked — its native
+                // input had offsetParent === null (display:none, replaced by
+                // a styled visual box) and the old code dropped it outright.
+                const assocLabel = (inp.labels && inp.labels.length) ? inp.labels[0] : null;
+                if (!inp.offsetParent && !(assocLabel && assocLabel.offsetParent)) continue;
+
                 const gname = inp.name || '';
+
+                // Standalone checkbox with NO name/group — e.g. a single
+                // required "I acknowledge..." box, not a radio-style group.
+                // The old code required a non-empty `gname` and silently
+                // dropped every nameless checkbox — also a real cause of the
+                // same DoorDash symptom (React forms commonly key a lone
+                // checkbox by id only, no name attribute). Give it a group
+                // of one, keyed by a real selector rather than a shared name
+                // — soloSel:true tells the fill step below (and the Python
+                // side) to query that selector directly instead of
+                // input[name=...].
+                if (inp.type === 'checkbox' && !gname) {
+                    if (inp.checked) continue;
+                    let lbl = assocLabel ? assocLabel.innerText.trim().split('\n')[0] : '';
+                    if (!lbl) {
+                        const fs = inp.closest('fieldset,[role="group"],.field');
+                        if (fs) { const h = fs.querySelector('legend,label'); if (h) lbl = h.innerText.trim().split('\n')[0]; }
+                    }
+                    if (!lbl || seen[lbl.toLowerCase()]) continue;
+                    seen[lbl.toLowerCase()] = true;
+                    const sel = uniqueSel(inp);
+                    const required = inp.required || inp.getAttribute('aria-required') === 'true'
+                        || /\*\s*$/.test(lbl.trim());
+                    groups[sel] = { label: lbl, type: 'checkbox', options: [lbl], gname: sel, soloSel: true, required };
+                    continue;
+                }
+
                 if (!gname || groups[gname] || skippedGroups.has(gname)) continue;
                 const already = Array.from(document.querySelectorAll('input[name="'+CSS.escape(gname)+'"]')).some(r => r.checked);
                 if (already) { skippedGroups.add(gname); continue; }
@@ -1028,12 +1231,15 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
                 if (fs) {
                     const leg = fs.querySelector('legend,label');
                     if (leg) lbl = leg.innerText.trim().split('\n')[0];
+                } else if (assocLabel) {
+                    lbl = assocLabel.innerText.trim().split('\n')[0] || lbl;
                 }
                 if (!seen[lbl.toLowerCase()]) {
                     seen[lbl.toLowerCase()] = true;
                     const opts = Array.from(document.querySelectorAll('input[name="'+CSS.escape(gname)+'"]'))
                         .map(r => {
-                            const le = document.querySelector('label[for="'+CSS.escape(r.id)+'"]');
+                            const le = (r.labels && r.labels.length) ? r.labels[0]
+                                : document.querySelector('label[for="'+CSS.escape(r.id)+'"]');
                             return le ? le.innerText.trim() : r.value;
                         }).filter(Boolean);
                     const groupRequired = Array.from(document.querySelectorAll(
@@ -1086,6 +1292,9 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
 
     answers, uncached, essays, eeo_skipped = {}, [], [], []
     essay_drafts = {}   # {label: grounded draft text} — for review only, never auto-filled
+    eeo_live_filled = set()   # labels resolved via _open_eeo_combobox() + a direct
+                               # Playwright click — must be excluded from the generic
+                               # blast-fill pass below (see its itemsJson comment)
 
     for f in fields:
         lbl = f.get("label", "")
@@ -1116,52 +1325,121 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         # (sexual orientation, or a mismatched option wording on any of the
         # six) keeps the original behavior: the form's own decline option,
         # or routed to Raghav — never guessed.
+        #
+        # Added 2026-08-30: if the static scrape found zero options (the
+        # react-select-combobox symptom — see the block comment above
+        # _open_eeo_combobox()), open the real widget and read its real
+        # options before giving up. This ONLY changes where the options list
+        # comes from; the matching rules below (_find_eeo_answer_option /
+        # _find_decline_option) are untouched.
         if category == "eeo":
             options = f.get("options", [])
+            live_trigger = None
+            if not options:
+                live_trigger, live_opts = _open_eeo_combobox(page, lbl)
+                if live_opts:
+                    options = live_opts
+                    f["options"] = live_opts   # so it shows up correctly in the audit record too
             subcat = _eeo_subcategory(lbl)
             real_opt = None
             if subcat and rp:
                 wanted = rp.EEO_ANSWERS.get(subcat)
                 if wanted:
                     real_opt = _find_eeo_answer_option(options, wanted)
+            chosen, chosen_kind, click_failed = None, None, False
             if real_opt:
-                answers[lbl] = real_opt
-                print(f"             ✔ EEO      '{lbl}' → '{real_opt}' "
+                chosen, chosen_kind = real_opt, "real"
+            else:
+                decline_opt = _find_decline_option(options)
+                if decline_opt:
+                    chosen, chosen_kind = decline_opt, "decline"
+
+            if chosen and live_trigger:
+                # Resolved via the live-opened combobox — the generic
+                # blast-fill pass can't drive a react-select widget (see the
+                # Country block comment), so click the real option directly,
+                # right now, through Playwright. Never claim success without
+                # verifying the click actually landed — same rule
+                # _submit_progressed()/_fill_country_field() already apply
+                # everywhere else in this file.
+                if _click_open_combobox_option(page, live_trigger, chosen):
+                    answers[lbl] = chosen
+                    eeo_live_filled.add(lbl)
+                else:
+                    click_failed = True
+                    print(f"             ⚠  EEO      '{lbl}' — found the real "
+                          f"'{chosen}' ({chosen_kind}) option in the opened widget but the "
+                          f"click didn't land; leaving unresolved rather than claiming success.")
+                    chosen = None
+
+            if chosen and lbl not in answers:
+                # Not filled via the live-click path above — either the
+                # static scrape already had real options (no combobox-open
+                # needed), or this ran with no live_trigger at all. Record
+                # the same decision either way; the generic blast-fill pass
+                # further down does the actual DOM click for these.
+                answers[lbl] = chosen
+
+            if chosen and chosen_kind == "real":
+                print(f"             ✔ EEO      '{lbl}' → '{chosen}' "
                       f"(Raghav's own real answer, matched to this form's actual option)")
                 continue
-            decline_opt = _find_decline_option(options)
-            if decline_opt:
-                answers[lbl] = decline_opt
-                print(f"             ⏭  EEO      '{lbl}' → '{decline_opt}' "
+            if chosen and chosen_kind == "decline":
+                print(f"             ⏭  EEO      '{lbl}' → '{chosen}' "
                       f"(the form's own decline-to-answer option, not a guess)")
+                continue
+
+            if live_trigger:
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+            eeo_skipped.append(f)
+            if click_failed:
+                print(f"             ⏭  EEO      '{lbl}' — left blank; a real option was found "
+                      f"but the widget click failed (see the ⚠ line above), not a missing-option case.")
             else:
-                eeo_skipped.append(f)
                 print(f"             ⏭  EEO      '{lbl}' — left blank (self-identification, "
                       f"no decline option found on this form). Real options seen: "
                       f"{options if options else '(none captured)'}")
             continue
 
-        # ── Essay / open-ended pitch questions — never auto-filled ───────────
+        # ── Essay / open-ended pitch questions ────────────────────────────────
         # "Why this role/company" motivation questions get a GROUNDED DRAFT
-        # attached (real JD text + real profile facts, via
-        # profile_answers.draft_motivation_essay()) for Raghav's own review —
-        # the field itself is still never filled and still routes to
-        # stuck_questions.json exactly like every other essay question. Other
-        # essay prompts (e.g. "describe a project you're proud of") get no
-        # draft attempt; they're not motivation-shaped and this module makes
-        # no attempt to fabricate an answer for them.
+        # (real JD text + real profile facts, via
+        # profile_answers.draft_motivation_essay()). Added 2026-08-30, per
+        # Raghav's explicit request: a PURE motivation essay (checked via
+        # profile_answers.is_pure_motivation_question() — is_motivation_
+        # question() plus a check that no factual/qualification claim is
+        # mixed into the same prompt) now gets that draft typed directly
+        # into the field — it's grounded in his real JD + real background,
+        # not fabricated. Every other essay prompt (a mixed motivation+
+        # factual question, or a non-motivation prompt like "describe a
+        # project you're proud of") is UNCHANGED: no auto-fill, routes to
+        # stuck_questions.json exactly as before, with the draft attached
+        # for review if one was generated.
         if category == "essay":
-            essays.append(f)
             draft = None
             try:
                 import profile_answers as _pa
                 draft = _pa.draft_motivation_essay(lbl, jd_text, job_title, company)
             except Exception as e:
                 print(f"             ⚠  Essay draft generation errored for '{lbl}': {e}")
+
+            if draft and _pa.is_pure_motivation_question(lbl):
+                answers[lbl] = draft
+                print(f"             ✔ ESSAY    '{lbl}' → auto-filled with a grounded "
+                      f"motivation draft (real JD + real profile facts, not fabricated):")
+                for line in draft.splitlines():
+                    print(f"                          {line}")
+                continue
+
+            essays.append(f)
             if draft:
                 essay_drafts[lbl] = draft
                 print(f"             ✏️  DRAFT   '{lbl}' — grounded draft generated "
-                      f"(review before using — never auto-filled):")
+                      f"(motivation-shaped but mixed with a factual/qualification ask — "
+                      f"review before using, not auto-filled):")
                 for line in draft.splitlines():
                     print(f"                          {line}")
             else:
@@ -1343,14 +1621,23 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
                 if (!item.answer) continue;
                 const ans = item.answer;
                 if (item.type === 'radio' || item.type === 'checkbox') {
-                    const opts = item.gname ? Array.from(document.querySelectorAll('input[name="'+CSS.escape(item.gname)+'"]')) : [];
+                    // soloSel (added 2026-08-30, see the scraper above): a
+                    // standalone nameless checkbox — item.gname holds a
+                    // real CSS selector (its own #id, or a generated
+                    // data-attr) instead of a shared `name`, so it must be
+                    // queried directly rather than via input[name=...],
+                    // which would never match a nameless input.
+                    const opts = !item.gname ? []
+                        : item.soloSel ? Array.from(document.querySelectorAll(item.gname))
+                        : Array.from(document.querySelectorAll('input[name="'+CSS.escape(item.gname)+'"]'));
                     const ansL = ans.toLowerCase().trim();
                     for (const opt of opts) {
                         let lbl = '';
-                        const le = document.querySelector('label[for="'+CSS.escape(opt.id)+'"]');
+                        const le = (opt.labels && opt.labels.length) ? opt.labels[0]
+                            : document.querySelector('label[for="'+CSS.escape(opt.id)+'"]');
                         if (le) lbl = le.innerText.toLowerCase().trim();
                         const val = (opt.value||'').toLowerCase();
-                        if (val === ansL || lbl === ansL || val.includes(ansL) || ansL.includes(val) ||
+                        if (item.soloSel || val === ansL || lbl === ansL || val.includes(ansL) || ansL.includes(val) ||
                             (lbl && (lbl.includes(ansL) || ansL.includes(lbl)))) {
                             if (!opt.checked) { opt.click(); fire(opt); }
                             filled++; break;
@@ -1378,7 +1665,14 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         }
     """, json.dumps([{
         "sel": f.get("sel", ""), "type": f.get("type", "text"),
-        "gname": f.get("gname", ""), "answer": str(answers.get(f.get("label", ""), ""))
+        "gname": f.get("gname", ""), "soloSel": bool(f.get("soloSel", False)),
+        # EEO fields resolved via the live-combobox path (see the "eeo"
+        # branch above) were already clicked directly through Playwright —
+        # forcing their answer blank here keeps this generic blast-fill pass
+        # from also touching them (a react-select widget doesn't respond to
+        # a raw .value= assignment; see the Country block comment for why
+        # that already failed once for a different field).
+        "answer": "" if f.get("label", "") in eeo_live_filled else str(answers.get(f.get("label", ""), ""))
     } for f in fields])) or 0
 
     # ── Required-field completeness check — for live-submit gating ───────────
@@ -1615,6 +1909,11 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
         print(f"          🚫 {reason}")
         record["skipped_incomplete"] = True
         record["reason"] = reason
+        # Deliberately NOT tagged "no_truthful_answer" — a transient UI-
+        # automation gap could well succeed on a plain retry, so this must
+        # never be persisted to the skip-cache (see config.py's
+        # GREENHOUSE_SKIP_RECHECK_DAYS comment for why).
+        record["unresolved_reason_type"] = "country_automation_gap"
         return False, reason, record
 
     if fill_result["unresolved_required"]:
@@ -1626,6 +1925,11 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
               f"in stuck_questions.json first.")
         record["skipped_incomplete"] = True
         record["reason"] = reason
+        # This IS the structural, likely-to-recur reason (an essay/EEO/
+        # uncached field genuinely has no truthful answer available) — safe
+        # to skip-cache so a re-run doesn't redo all this work on the exact
+        # same posting under the exact same pipeline logic.
+        record["unresolved_reason_type"] = "no_truthful_answer"
         return False, reason, record
 
     ok = submit_greenhouse_application(page, dry_run=dry_run)
@@ -1972,6 +2276,24 @@ def main():
                 print(f"  ↩  Already applied: {company} — {title}")
                 skipped += 1; return
 
+            # ── Skip-cache fast path — see config.GREENHOUSE_SKIP_RECHECK_DAYS
+            # and _skip_cache_entry_valid()'s comments for the full story:
+            # this is what stops a run from re-doing the full score/resume/
+            # cover-letter/fill pass (including live Claude essay-draft
+            # calls) on a posting that's already known, under this EXACT
+            # pipeline version, to have no truthful answer for a required
+            # field — which was the actual mechanism behind "every run
+            # stalls on DoorDash" (the loop was always structurally able to
+            # reach Affirm/Sigma/Chime; it just took far too long re-proving
+            # the same doomed jobs every time). No browser/API calls here —
+            # nothing but a dict lookup.
+            cached_skip = _load_skip_cache().get(_skip_cache_key(url))
+            if _skip_cache_entry_valid(cached_skip):
+                print(f"  ⏭  SKIP (previously unresolved, unchanged since v{cached_skip['pipeline_version']}, "
+                      f"{(datetime.now() - datetime.fromisoformat(cached_skip['timestamp'])).days}d ago): "
+                      f"{company} — {title}: {cached_skip['reason'][:110]}")
+                skipped += 1; return
+
             if not jd:
                 try:
                     page.goto(url, wait_until="domcontentloaded", timeout=20000)
@@ -2039,7 +2361,18 @@ def main():
                 status = "Dry-Run"
             else:
                 status = "Applied" if success else "Failed"
-            print(f"  {'✅' if success else '❌'} {status}: {reason}")
+            print(f"  {'✅ SUBMITTED' if (success and not args.dry_run) else '🧪 would submit' if (success and args.dry_run) else '⏭  SKIPPED' if status == 'Skipped-Incomplete' else '❌ FAILED'} "
+                  f"— {company} — {title}: {reason}")
+
+            # Remember a genuinely-structural skip (never a transient
+            # UI-automation gap — see apply_to_greenhouse_job()'s comments)
+            # so a later run doesn't redo all this work on the exact same
+            # posting under the exact same pipeline version. Written in
+            # BOTH dry-run and live mode — the required-field gate computes
+            # the same answer either way, and a --dry-run preview run
+            # should benefit from the fast-skip too, not just --live.
+            if record and record.get("unresolved_reason_type") == "no_truthful_answer":
+                _remember_skip(url, company, title, reason)
 
             if record and not args.dry_run:
                 _log_submitted_application(record)
