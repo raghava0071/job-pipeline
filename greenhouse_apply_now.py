@@ -888,12 +888,63 @@ def _eeo_trigger_candidates(label_text: str) -> list:
     ]
 
 
-def _read_open_listbox_options(page) -> list:
-    """After a combobox trigger was just clicked open, reads every visible
-    option's REAL text from the now-rendered listbox. Never invents an
-    option — only returns what's actually rendered on the page right now."""
+def _scoped_listbox(page, trig):
+    """Returns a Locator scoped to the SPECIFIC listbox associated with
+    `trig` (the trigger element that was just clicked to open a combobox)
+    — or None if it can't be determined. Added 2026-08-30 after a real
+    live run showed EEO fields reading back PHONE COUNTRY-CALLING-CODE
+    options ("Afghanistan +93", "Åland Islands +358", ...) instead of
+    Gender/Race/Veteran/Disability's own choices: the previous reader
+    queried '[role="option"]' across the WHOLE PAGE with no scoping at
+    all, so whichever combobox's options happened to come first in DOM
+    order (the phone field's country-code list, rendered earlier in the
+    form and apparently large enough to fill the entire 30-item cap) won
+    over the EEO widget actually just opened. This fixes that at the
+    root: scope to ONLY the popup this specific trigger controls.
+
+    Prefers the WAI-ARIA combobox pattern — trig's aria-controls/aria-owns
+    attribute names the listbox's real element id — since that's the
+    precise, unambiguous link a real accessible combobox implementation
+    sets between a trigger and its OWN popup, not a guess. Falls back to
+    the most-recently-added, currently-visible [role="listbox"] in the DOM
+    (React portals are appended, so the widget just opened is normally
+    last) only when aria-controls/aria-owns isn't present — still scoped
+    to ONE specific listbox element, never a flat page-wide option query."""
     try:
-        opts = page.locator('[role="listbox"] [role="option"], [role="option"]')
+        listbox_id = trig.get_attribute("aria-controls") or trig.get_attribute("aria-owns")
+    except Exception:
+        listbox_id = None
+    if listbox_id:
+        try:
+            scoped = page.locator(f'[id="{listbox_id}"]')
+            if scoped.count() > 0:
+                return scoped.first
+        except Exception:
+            pass
+    try:
+        boxes = page.locator('[role="listbox"]')
+        n = boxes.count()
+        for i in range(n - 1, -1, -1):   # most-recently-added first
+            box = boxes.nth(i)
+            if box.is_visible(timeout=300):
+                return box
+    except Exception:
+        pass
+    return None
+
+
+def _read_scoped_listbox_options(page, trig) -> list:
+    """After `trig` was just clicked open, reads every visible option's
+    REAL text from ITS OWN listbox (see _scoped_listbox() above for why
+    this must be scoped, not a global page-wide query). Never invents an
+    option — only returns what's actually rendered in this specific popup
+    right now. Returns [] if this trigger's listbox can't be identified at
+    all — the caller treats that exactly like "no options found"."""
+    box = _scoped_listbox(page, trig)
+    if box is None:
+        return []
+    try:
+        opts = box.locator('[role="option"]')
         n = min(opts.count(), 30)
         out = []
         for i in range(n):
@@ -910,7 +961,8 @@ def _read_open_listbox_options(page) -> list:
 
 def _open_eeo_combobox(page, label_text: str):
     """For an EEO field whose static scrape found zero options: opens its
-    combobox and reads back the REAL rendered option text. Returns
+    combobox and reads back the REAL rendered option text — scoped to that
+    SPECIFIC widget only (see _scoped_listbox()). Returns
     (trigger_selector, options) so the caller can decide (via the existing,
     unchanged _find_eeo_answer_option()/_find_decline_option()) and then
     re-use trigger_selector to click the decided option without
@@ -925,7 +977,7 @@ def _open_eeo_combobox(page, label_text: str):
                 continue
             trig.click(timeout=2500)
             time.sleep(0.25)
-            opts = _read_open_listbox_options(page)
+            opts = _read_scoped_listbox_options(page, trig)
             if opts:
                 return trig_sel, opts
             page.keyboard.press("Escape")
@@ -935,19 +987,30 @@ def _open_eeo_combobox(page, label_text: str):
 
 
 def _click_open_combobox_option(page, trigger_sel: str, option_text: str) -> bool:
-    """Clicks option_text inside the listbox opened by trigger_sel.
-    option_text is always a value just read back from THIS SAME widget by
-    _open_eeo_combobox() — never invented. Re-opens the widget first if it
-    already closed itself (some implementations close on blur/Escape)."""
+    """Clicks option_text inside the listbox opened by trigger_sel — SCOPED
+    to that specific widget (see _scoped_listbox()), never a page-wide
+    "the first option anywhere matching this text" search, which could
+    click into a different, unrelated open widget if its options happen to
+    share text with this one (e.g. a plain "No"). option_text is always a
+    value just read back from THIS SAME widget by _open_eeo_combobox() —
+    never invented. Re-opens the widget first if it already closed itself
+    (some implementations close on blur/Escape)."""
     try:
-        opt = page.get_by_role("option", name=re.compile(f"^{re.escape(option_text)}$", re.I)).first
-        if opt.count() == 0 or not opt.is_visible(timeout=500):
-            trig = page.locator(trigger_sel).first
+        trig = page.locator(trigger_sel).first
+        box = _scoped_listbox(page, trig) if trig.count() else None
+        pattern = re.compile(f"^{re.escape(option_text)}$", re.I)
+        target = box.get_by_role("option", name=pattern).first if box is not None else None
+
+        if target is None or target.count() == 0 or not target.is_visible(timeout=500):
             if trig.count() and trig.is_visible(timeout=500):
                 trig.click(timeout=2000)
                 time.sleep(0.2)
-            opt = page.get_by_role("option", name=re.compile(f"^{re.escape(option_text)}$", re.I)).first
-        opt.click(timeout=2000)
+            box = _scoped_listbox(page, trig)
+            target = box.get_by_role("option", name=pattern).first if box is not None else None
+
+        if target is None or target.count() == 0:
+            return False
+        target.click(timeout=2000)
         time.sleep(0.2)
         return True
     except Exception:
