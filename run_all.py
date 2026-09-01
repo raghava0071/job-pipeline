@@ -466,11 +466,32 @@ def main():
     # --no-workday is now the default unless explicitly overridden.
     _run_workday = args.workday_only  # only if explicitly requested
 
+    # ── Greenhouse — automatic DRY-RUN only, added 2026-08-31 ──────────────────
+    # See config.GREENHOUSE_AUTO_DRY_RUN's comment for why this exists. dry_run
+    # is hardcoded True here — NEVER args.dry_run — so this can't turn into a
+    # live Greenhouse submission just because someone runs `run_all.py --dry-run`
+    # (which would otherwise flip it False) or a bare `run_all.py` (which
+    # defaults args.dry_run to False, i.e. live, for LinkedIn/Indeed). Live
+    # Greenhouse submission stays exactly what it always was: only
+    # `--greenhouse-only --live`, run explicitly, never from this path.
+    _run_greenhouse_auto = getattr(config, "GREENHOUSE_AUTO_DRY_RUN", False)
+    gh_proc = None
+    if _run_greenhouse_auto:
+        gh_proc = mp.Process(
+            target=run_greenhouse,
+            args=(args.gh_limit, True, result_queue),
+            name="Greenhouse"
+        )
+
     platforms = "LinkedIn + Indeed"
     print(f"  Starting {platforms} simultaneously...")
     print(f"  (Workday PAUSED — 0/116 success rate, email verification loops)")
-    print(f"  (Greenhouse not in the default run yet — unverified against a live posting; "
-          f"run --greenhouse-only --dry-run first)")
+    if _run_greenhouse_auto:
+        print(f"  (Greenhouse: automatic DRY-RUN pass — diagnostic only, never submits live; "
+              f"run --greenhouse-only --live yourself to actually apply)")
+    else:
+        print(f"  (Greenhouse not in the default run — unverified against a live posting; "
+              f"run --greenhouse-only --dry-run first)")
     print(f"  (Browser windows will open — one per platform)\n")
 
     start = time.time()
@@ -481,6 +502,11 @@ def main():
     time.sleep(4)   # stagger so browsers don't fight for login at once
     in_proc.start()
     procs.append(in_proc)
+
+    if gh_proc is not None:
+        time.sleep(4)   # same stagger — don't fight LinkedIn/Indeed for startup resources
+        gh_proc.start()
+        procs.append(gh_proc)
 
     for p in procs:
         p.join()
@@ -500,10 +526,16 @@ def main():
     print(f"  LinkedIn:   {results.get('linkedin', 'unknown')}")
     print(f"  Indeed:     {results.get('indeed',   'unknown')}")
     print(f"  Workday:    PAUSED (re-enable with --workday-only)")
-    print(f"  Greenhouse: not run (opt-in only — run with --greenhouse-only)")
+    if _run_greenhouse_auto:
+        print(f"  Greenhouse: {results.get('greenhouse', 'unknown')} (automatic DRY-RUN — "
+              f"nothing submitted; see data/greenhouse_applied_log.json)")
+    else:
+        print(f"  Greenhouse: not run (opt-in only — run with --greenhouse-only)")
     print(f"\n  Check your email for per-job notifications.")
     print(f"  Logs: ~/job_pipeline/data/applied_log.json (LinkedIn)")
     print(f"        ~/job_pipeline/data/indeed_applied_log.json (Indeed)")
+    if _run_greenhouse_auto:
+        print(f"        ~/job_pipeline/data/greenhouse_applied_log.json (Greenhouse, dry-run)")
     print(f"{'='*65}\n")
 
     # ── Auto-diagnose errors using Claude Code ────────────────────────────────

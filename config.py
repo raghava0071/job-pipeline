@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.10.0"
+PIPELINE_VERSION = "2.10.4"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -30,6 +30,24 @@ INDEED_ENABLED     = True
 LINKEDIN_ENABLED   = True
 WORKDAY_ENABLED    = True
 GREENHOUSE_ENABLED = True   # guest-apply only — see greenhouse_apply_now.py
+
+# Added 2026-08-31 at Raghav's request: Greenhouse still isn't part of the
+# default LinkedIn+Indeed run_all.py run (it's had 1 successful application
+# out of 73 logged attempts, all-time — still being debugged) and Raghav
+# doesn't want to manually run `--greenhouse-only --dry-run` himself. This
+# flag folds a Greenhouse pass into the SAME automatic run your launchd
+# scheduler already fires unattended at 8 AM / 12 PM / 6 PM — but ONLY ever
+# as a dry-run, regardless of whether the rest of that run is live or not
+# (see run_all.py main() — the Greenhouse subprocess is started with
+# dry_run forced to True, never read from args.dry_run). This can NEVER
+# cause a real Greenhouse application to submit by itself; it only exists
+# to generate fresh, real diagnostic evidence (data/greenhouse_applied_log.json,
+# stuck_questions.json) each scheduled run without Raghav typing anything.
+# Set False to remove Greenhouse from the automatic run entirely (back to
+# --greenhouse-only being the only way to run it). To actually let
+# Greenhouse submit live applications, that is STILL only ever
+# `--greenhouse-only --live`, run explicitly — this flag never enables that.
+GREENHOUSE_AUTO_DRY_RUN = True
 
 # Indeed hand-off mode: Indeed's Cloudflare wall blocks any automated browser
 # (confirmed for weeks — real Chrome works, the pipeline's does not). When True,

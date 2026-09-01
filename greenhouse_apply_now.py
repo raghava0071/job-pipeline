@@ -690,6 +690,12 @@ _EEO_SIGNALS = (
     "gender", "ethnicity", "race", "hispanic", "latino", "latina",
     "veteran", "disability", "disabilit", "sexual orientation",
     "self-identif", "self identif", "protected class",
+    # Added 2026-08-31 — "I identify as a first-generation professional"
+    # (seen live on a real Gusto posting) matched none of the signals
+    # above, so it was never even classified as "eeo" — it fell through to
+    # whatever the generic short_text/dropdown path decided, with no real
+    # answer available there, and the job got skipped as incomplete.
+    "first-generation", "first generation",
 )
 
 _ESSAY_SIGNALS = (
@@ -801,7 +807,7 @@ def _find_decline_option(options: list) -> str | None:
 # options — never typed in blind, never assumed present.
 
 def _eeo_subcategory(label: str) -> str | None:
-    """Which specific EEO question is this — one of the six Raghav has
+    """Which specific EEO question is this — one of the seven Raghav has
     given a real answer for, or None (sexual orientation, or anything else
     not covered — falls through to the existing decline/route behavior
     unchanged). Order matters: 'transgender' and 'sexual orientation' are
@@ -811,6 +817,8 @@ def _eeo_subcategory(label: str) -> str | None:
     l = label.lower()
     if "sexual orientation" in l:
         return None
+    if "first-generation" in l or "first generation" in l:
+        return "first_generation"
     if "transgender" in l:
         return "transgender"
     if "veteran" in l:
@@ -1051,6 +1059,21 @@ def _classify_field(f: dict) -> str:
     if options and len(options) <= 3 and all(o in _YES_NO_OPTION_WORDS for o in options):
         return "yes_no"
 
+    # SAME bug class as the sponsorship fix above, found live 2026-08-31:
+    # DoorDash's "We would like to contact you via SMS or WhatsApp to
+    # provide updates on your progress. Mark yes if you agree..." is a real
+    # Yes/No question (Raghav has a real answer on file —
+    # raghav_profile.PROFILE["sms_whatsapp_optin"]) but has no "?" and is
+    # well over 90 characters, so it was falling into the essay bucket
+    # below and getting skipped as an unanswerable required field on every
+    # DoorDash posting that used this exact phrasing (a shorter phrasing —
+    # "Would you like to receive communications via SMS and/or WhatsApp...?"
+    # — already worked, because it has a "?" and starts with "Would"; this
+    # one doesn't). "sms" + "whatsapp" together is specific enough to never
+    # false-positive on an unrelated question.
+    if "sms" in label and "whatsapp" in label:
+        return "yes_no"
+
     if ftype in ("text", "number", "radio", "checkbox", "select") and "?" in label and re.match(
         r'^(are|do|does|is|have|has|will|can|would|did)\b', label
     ) and not any(s in label for s in _ESSAY_SIGNALS):
@@ -1101,6 +1124,15 @@ def _known_factual_yes_no(label: str, company: str) -> str | None:
 
     if any(p in l for p in ("authorized to work", "legally authorized", "eligible to work in")):
         return "Yes" if getattr(cfg, "AUTHORIZED_TO_WORK_NOW", True) else "No"
+
+    # Added 2026-08-31, paired with the "sms"+"whatsapp" classification fix
+    # above — self-contained to Greenhouse (reads raghav_profile.PROFILE
+    # directly), never touches qa_answers.py, per Raghav's explicit "only
+    # Greenhouse for now" scope. qa_answers.py's own SMS/WhatsApp keys are
+    # still separately used by Indeed/LinkedIn and are untouched.
+    if "sms" in l and "whatsapp" in l:
+        optin = bool(rp.PROFILE.get("sms_whatsapp_optin", False)) if rp else False
+        return "Yes" if optin else "No"
 
     if any(p in l for p in ("require sponsorship", "need sponsorship", "visa sponsorship",
                               "sponsorship now or in the future", "require visa",
@@ -1364,6 +1396,27 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         lbl_l = lbl.lower().strip().rstrip(" *:?")
         category = _classify_field(f)
 
+        # ── Diagnostic only — added 2026-08-31 ────────────────────────────────
+        # A real dry-run against DoorDash (Raghav, 2026-08-31) showed
+        # "Applicant Privacy Acknowledgement *" landing in the generic
+        # uncached/stuck bucket on every single posting, despite
+        # `_is_pure_ack_consent()` correctly returning True for that exact
+        # label text when tested directly — confirmed by running it here,
+        # not assumed. That means the Python decision logic is fine and the
+        # real cause is upstream: whatever this field's `type` actually is
+        # in the live DOM scrape, it isn't the literal string "checkbox" by
+        # the time it reaches `_classify_field()` here — something this
+        # sandbox has no way to see without a live browser. Rather than
+        # guess at DOM structure blind, this logs the field's ACTUAL raw
+        # type/options the next time this exact mismatch happens, so the
+        # real fix can be made from real evidence instead of a guess.
+        if category != "ack_consent" and _is_pure_ack_consent(lbl):
+            print(f"             🔍 DIAG     '{lbl}' looks like a pure ack/consent "
+                  f"checkbox by its label but classified as '{category}', not "
+                  f"'ack_consent' — raw type={f.get('type')!r} options={f.get('options')!r} "
+                  f"required={f.get('required')!r}. Needs a look before this can be fixed "
+                  f"for real; falling through to the normal unresolved-field handling below.")
+
         # ── Pure acknowledgment/consent checkbox — safe to auto-tick ─────────
         # See _is_pure_ack_consent()'s block comment for the exact rule. This
         # is deliberately the ONLY checkbox category ever auto-checked here —
@@ -1404,14 +1457,29 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
                     options = live_opts
                     f["options"] = live_opts   # so it shows up correctly in the audit record too
             subcat = _eeo_subcategory(lbl)
-            real_opt = None
-            if subcat and rp:
-                wanted = rp.EEO_ANSWERS.get(subcat)
-                if wanted:
-                    real_opt = _find_eeo_answer_option(options, wanted)
+            wanted = rp.EEO_ANSWERS.get(subcat) if (subcat and rp) else None
+            real_opt = _find_eeo_answer_option(options, wanted) if wanted else None
             chosen, chosen_kind, click_failed = None, None, False
             if real_opt:
                 chosen, chosen_kind = real_opt, "real"
+            elif (
+                # Free-text fallback — added 2026-08-31, per Raghav's explicit
+                # ask that self-ID questions be answered whether the form is a
+                # selectable widget (dropdown/radio/combobox — the "real"
+                # branch above) OR a genuine fill-in-the-blank field. Only
+                # taken when there is truly nothing to select from: no
+                # options in the static scrape AND opening a live combobox
+                # found no trigger to open at all (so this isn't a
+                # react-select widget just hiding its options — see
+                # _open_eeo_combobox()'s block comment for that pattern) AND
+                # the DOM element itself really is a text/textarea input, not
+                # a radio/checkbox group. In that case there is no "form's
+                # actual option" to match against — the field IS the answer,
+                # typed directly, same as it types into any other text field.
+                wanted and not options and not live_trigger
+                and f.get("type") in ("text", "textarea")
+            ):
+                chosen, chosen_kind = wanted, "real_text"
             else:
                 decline_opt = _find_decline_option(options)
                 if decline_opt:
@@ -1446,6 +1514,11 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
             if chosen and chosen_kind == "real":
                 print(f"             ✔ EEO      '{lbl}' → '{chosen}' "
                       f"(Raghav's own real answer, matched to this form's actual option)")
+                continue
+            if chosen and chosen_kind == "real_text":
+                print(f"             ✔ EEO      '{lbl}' → '{chosen}' "
+                      f"(Raghav's own real answer, typed directly — this field is free text, "
+                      f"not a selectable option)")
                 continue
             if chosen and chosen_kind == "decline":
                 print(f"             ⏭  EEO      '{lbl}' → '{chosen}' "
