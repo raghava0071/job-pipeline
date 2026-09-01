@@ -1249,14 +1249,33 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
             const results = [];
             const seen = {};
             for (const inp of document.querySelectorAll(
-                'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=file])' +
-                ':not([type=radio]):not([type=checkbox]), select, textarea'
+                'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=file]), select, textarea'
             )) {
+                // Use the LIVE `.type` DOM property, not `getAttribute('type')`
+                // — added 2026-09-01, evidence: DoorDash's "Applicant Privacy
+                // Acknowledgement" checkbox was showing up here as
+                // type='text', options=[] (see the DIAG log added 2026-08-31
+                // right where this field's answer gets filled below) instead
+                // of reaching the checkbox-specific loop a few lines down,
+                // which already has the real ack-consent handling AND the
+                // 2026-08-30 offsetParent visibility fix for this exact
+                // field. A checkbox whose "checkbox-ness" is set as a DOM
+                // property (common for React/custom-widget forms) rather
+                // than a literal `type="checkbox"` HTML attribute still
+                // reports correctly via the live `.type` property (the
+                // browser always normalizes it) but is invisible to both
+                // `getAttribute('type')` and the old CSS attribute selector
+                // that excluded checkboxes/radios from this loop — so it
+                // fell through to here and got misclassified as plain text.
+                // Skip it here (by live type, not attribute) so the
+                // checkbox-specific loop below picks it up instead.
+                const liveType = inp.tagName === 'SELECT' ? 'select'
+                    : inp.tagName === 'TEXTAREA' ? 'textarea'
+                    : (inp.type || inp.getAttribute('type') || 'text').toLowerCase();
+                if (liveType === 'checkbox' || liveType === 'radio') continue;
                 if (!inp.offsetParent) continue;
                 if (KNOWN.has(inp.id) || KNOWN.has(inp.name)) continue;
-                const type = inp.tagName === 'SELECT' ? 'select'
-                    : inp.tagName === 'TEXTAREA' ? 'textarea'
-                    : (inp.getAttribute('type') || 'text').toLowerCase();
+                const type = liveType;
                 if (type === 'select') {
                     const opt = inp.options[inp.selectedIndex];
                     if (inp.value && opt && opt.text.trim() && !/^(select|choose|--)/i.test(opt.text.trim())) continue;
@@ -1275,7 +1294,13 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
             }
             const groups = {};
             const skippedGroups = new Set();
-            for (const inp of document.querySelectorAll('input[type=radio],input[type=checkbox]')) {
+            for (const inp of document.querySelectorAll('input')) {
+                // Same live-`.type`-vs-attribute fix as the loop above:
+                // query ALL inputs and filter by the live property here,
+                // rather than `input[type=radio],input[type=checkbox]`
+                // (an attribute selector — misses a checkbox whose type is
+                // set as a DOM property instead of a literal HTML attribute).
+                if (inp.type !== 'radio' && inp.type !== 'checkbox') continue;
                 // Visibility: check the input's own box first, then fall back
                 // to its associated <label> via the native .labels API (this
                 // covers BOTH label[for=id] AND the input being a CHILD of
@@ -1964,11 +1989,37 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
     }
 
     print(f"          🌐 {job_url[:70]}")
-    try:
-        page.goto(job_url, wait_until="domcontentloaded", timeout=25000)
-        time.sleep(2)
-    except Exception as e:
-        record["reason"] = f"navigation failed: {e}"
+    # Retry on transient network-class errors only (ERR_NETWORK_CHANGED,
+    # ERR_CONNECTION_RESET, ERR_INTERNET_DISCONNECTED, ERR_NAME_NOT_RESOLVED,
+    # ERR_TIMED_OUT, ...) — added 2026-09-01, evidence: two DoorDash jobs in
+    # one run (2026-09-01, ~13:28) both failed with the SAME
+    # "net::ERR_NETWORK_CHANGED" on page.goto and were skipped outright with
+    # no retry, even though this class of error is normally a brief,
+    # one-off blip (wifi handoff, VPN reconnect) that a plain reload clears.
+    # A non-network exception (timeout waiting on a selector, a real 404,
+    # etc.) is NOT retried — those aren't transient and retrying them would
+    # just burn 2x the time for the same outcome.
+    _NETWORK_ERR_SIGNALS = (
+        "err_network_changed", "err_internet_disconnected", "err_connection_reset",
+        "err_connection_closed", "err_connection_refused", "err_name_not_resolved",
+        "err_timed_out", "err_connection_timed_out", "err_socket_not_connected",
+    )
+    last_exc = None
+    for attempt in range(3):
+        try:
+            if attempt > 0:
+                print(f"          🔁 navigation retry {attempt}/2 after network error...")
+                time.sleep(4)
+            page.goto(job_url, wait_until="domcontentloaded", timeout=25000)
+            time.sleep(2)
+            last_exc = None
+            break
+        except Exception as e:
+            last_exc = e
+            if not any(sig in str(e).lower() for sig in _NETWORK_ERR_SIGNALS):
+                break   # not a transient network error — don't retry, fail now
+    if last_exc is not None:
+        record["reason"] = f"navigation failed: {last_exc}"
         return False, record["reason"], record
 
     _dismiss_cookie_banner(page)
