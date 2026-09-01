@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.10.4"
+PIPELINE_VERSION = "2.11.0"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -26,9 +26,9 @@ CAPTCHA_MIN_SOLVE_FLOOR_SEC = 3
 # ── Platform switches — turn a platform off without touching its code ──────────
 # Set to False to skip that platform entirely for the current run.
 # Useful when testing a fix on one platform while keeping others live.
-INDEED_ENABLED     = True
-LINKEDIN_ENABLED   = True
-WORKDAY_ENABLED    = True
+INDEED_ENABLED     = False  # Raghav's request 2026-09-01: stop the scheduled 8AM/12PM/6PM
+LINKEDIN_ENABLED   = False  # runs from applying via Indeed/LinkedIn/Workday — Greenhouse's
+WORKDAY_ENABLED    = False  # automatic dry-run pass (GREENHOUSE_AUTO_DRY_RUN below) stays on.
 GREENHOUSE_ENABLED = True   # guest-apply only — see greenhouse_apply_now.py
 
 # Added 2026-08-31 at Raghav's request: Greenhouse still isn't part of the

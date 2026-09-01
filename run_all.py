@@ -448,16 +448,24 @@ def main():
     # ── Run all three in parallel ──────────────────────────────────────────────
     procs = []
 
-    li_proc = mp.Process(
-        target=run_linkedin,
-        args=(args.li_limit, args.dry_run, result_queue),
-        name="LinkedIn"
-    )
-    in_proc = mp.Process(
-        target=run_indeed,
-        args=(args.in_limit, args.dry_run, result_queue),
-        name="Indeed"
-    )
+    # Raghav's request 2026-09-01: config.LINKEDIN_ENABLED / config.INDEED_ENABLED
+    # now actually gate the default scheduled run (previously these two flags
+    # existed in config.py but were never read here — LinkedIn/Indeed always
+    # started regardless of their value). Same on/off pattern as gh_proc below.
+    li_proc = None
+    if getattr(config, "LINKEDIN_ENABLED", True):
+        li_proc = mp.Process(
+            target=run_linkedin,
+            args=(args.li_limit, args.dry_run, result_queue),
+            name="LinkedIn"
+        )
+    in_proc = None
+    if getattr(config, "INDEED_ENABLED", True):
+        in_proc = mp.Process(
+            target=run_indeed,
+            args=(args.in_limit, args.dry_run, result_queue),
+            name="Indeed"
+        )
 
     # ── Workday PAUSED ────────────────────────────────────────────────────────
     # Workday has 0 successful applications out of 116 attempts (all-time).
@@ -483,8 +491,13 @@ def main():
             name="Greenhouse"
         )
 
-    platforms = "LinkedIn + Indeed"
-    print(f"  Starting {platforms} simultaneously...")
+    active = [n for n, p in (("LinkedIn", li_proc), ("Indeed", in_proc)) if p is not None]
+    platforms = " + ".join(active) if active else "nothing (LinkedIn + Indeed both disabled in config.py)"
+    print(f"  Starting {platforms}...")
+    if li_proc is None:
+        print(f"  (LinkedIn disabled — config.LINKEDIN_ENABLED = False)")
+    if in_proc is None:
+        print(f"  (Indeed disabled — config.INDEED_ENABLED = False)")
     print(f"  (Workday PAUSED — 0/116 success rate, email verification loops)")
     if _run_greenhouse_auto:
         print(f"  (Greenhouse: automatic DRY-RUN pass — diagnostic only, never submits live; "
@@ -496,17 +509,14 @@ def main():
 
     start = time.time()
 
-    li_proc.start()
-    procs.append(li_proc)
-
-    time.sleep(4)   # stagger so browsers don't fight for login at once
-    in_proc.start()
-    procs.append(in_proc)
-
-    if gh_proc is not None:
-        time.sleep(4)   # same stagger — don't fight LinkedIn/Indeed for startup resources
-        gh_proc.start()
-        procs.append(gh_proc)
+    # stagger each enabled process's start by 4s so browsers don't fight for
+    # login/startup resources at once — same stagger as before, just skipped
+    # for whichever of LinkedIn/Indeed/Greenhouse is disabled this run.
+    for i, p in enumerate(proc for proc in (li_proc, in_proc, gh_proc) if proc is not None):
+        if i > 0:
+            time.sleep(4)
+        p.start()
+        procs.append(p)
 
     for p in procs:
         p.join()
@@ -523,8 +533,8 @@ def main():
 
     print(f"\n{'='*65}")
     print(f"  ✅ All pipelines finished in {mins}m {secs}s")
-    print(f"  LinkedIn:   {results.get('linkedin', 'unknown')}")
-    print(f"  Indeed:     {results.get('indeed',   'unknown')}")
+    print(f"  LinkedIn:   {results.get('linkedin', 'unknown') if li_proc is not None else 'disabled (config.LINKEDIN_ENABLED = False)'}")
+    print(f"  Indeed:     {results.get('indeed',   'unknown') if in_proc is not None else 'disabled (config.INDEED_ENABLED = False)'}")
     print(f"  Workday:    PAUSED (re-enable with --workday-only)")
     if _run_greenhouse_auto:
         print(f"  Greenhouse: {results.get('greenhouse', 'unknown')} (automatic DRY-RUN — "
