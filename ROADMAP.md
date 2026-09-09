@@ -32,9 +32,19 @@ unexecuted, in case this gets revisited later; nothing in it has been acted on. 
 now — no ongoing work here.
 
 ## 7. Workday — re-approach as canary rollout
-Currently `WORKDAY_ENABLED = False` (binary off since the auto-apply issues). Instead of flipping
-it back to a binary on/off switch, roll it out to a small % of matches first and expand based on
-observed success/error rates.
+Currently `WORKDAY_ENABLED = False`. Real status (from `workday_pipeline_diagnostic_report.md`,
+2026-09-09 review): 0 successful applications out of 133+ logged attempts, ever. Root blocker —
+Create Account's button click registers (real, uncovered, enabled button, no exception) but the
+page doesn't progress; a fix (widen post-click wait to 10s, v1.8.3) was written but never confirmed
+live because Workday got paused first. Email/OTP verification code is real and not a stub (Gmail
+IMAP polling, 3 call sites) but has never been exercised end-to-end either, since account creation
+fails before most companies would even send a verification email.
+
+Concrete next step, before writing any new code: get ONE fresh, logged, live data point —
+`python3 run_all.py --workday-only --wd-limit 1 --dry-run` — and read `data/crash_logs/submit_debug_*.json`
++ the new screenshot. That single data point (does v1.8.3's fix actually work now?) is worth more
+than any further guessing, and is what "canary" should mean here in practice: one company, one
+attempt, read the evidence, THEN decide whether to expand.
 
 ---
 See `CLAUDE.md` for standing project rules (safe_update workflow, config-only tunables, etc.).

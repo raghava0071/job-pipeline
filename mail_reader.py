@@ -163,11 +163,28 @@ def extract_verify_link(body: str) -> str:
 
 # ── Main polling function ─────────────────────────────────────────────────────
 
-# Senders that Workday verification emails come from
-WORKDAY_SENDERS = [
-    "workday", "myworkday", "no-reply@myworkday", "noreply@workday",
-    "no-reply@wd", "recruiting@", "talent@", "careers@",
-    "hr@", "jobs@", "donotreply@workday",
+# Sender signals, split by how much they're actually worth trusting.
+#
+# STRICT senders are real Workday-owned domains/addresses — safe to trust
+# on their own even without a verification-looking subject, because
+# nothing but Workday's own automated mail comes from them.
+WORKDAY_STRICT_SENDERS = [
+    "myworkday.com", "workday.com", "no-reply@myworkday", "noreply@workday",
+    "no-reply@wd", "donotreply@workday",
+]
+
+# WEAK senders (2026-09-09, demoted after a live test surfaced a real false
+# positive): generic role-prefixes like "jobs@"/"hr@"/"careers@" are common
+# on ANY company's ordinary job-alert/marketing mail, not just genuine
+# account-verification email. Live evidence: a routine theladders.com
+# job-digest newsletter, sent from "jobs@my.theladders.com", matched
+# "jobs@" here and got treated as a real verification-email candidate —
+# then an unrelated number in its body got misread as an OTP (see
+# extract_otp_from_body()). Kept for backward compatibility, but per the
+# gating logic below, a WEAK sender is never trusted alone anymore — it
+# must be paired with a subject that actually looks like verification.
+WORKDAY_WEAK_SENDERS = [
+    "recruiting@", "talent@", "careers@", "hr@", "jobs@",
 ]
 
 VERIFICATION_SUBJECTS = [
@@ -230,17 +247,23 @@ def wait_for_otp(
                     subject = _decode_subject(msg).lower()
                     body    = _get_email_body(msg)
 
-                    # Filter: must look like a Workday/verification email
-                    is_workday_sender = any(s in sender for s in WORKDAY_SENDERS)
-                    is_verification   = any(kw in subject for kw in VERIFICATION_SUBJECTS)
+                    # Filter: must look like a real Workday/verification email.
+                    # A STRICT sender (a real Workday domain) is trusted alone.
+                    # A WEAK sender (generic "jobs@"/"hr@"/... prefix) or a
+                    # company-name-in-sender match is only ever SUPPORTING
+                    # evidence — see WORKDAY_WEAK_SENDERS's comment for the
+                    # live false positive (a theladders.com newsletter) that
+                    # is exactly why sender-alone trust was removed.
+                    is_strict_sender = any(s in sender for s in WORKDAY_STRICT_SENDERS)
+                    is_weak_sender   = any(s in sender for s in WORKDAY_WEAK_SENDERS)
+                    is_verification  = any(kw in subject for kw in VERIFICATION_SUBJECTS)
 
-                    # Also accept if company name is in sender or subject
                     if company:
                         co_lower = company.lower()
-                        is_workday_sender = is_workday_sender or co_lower in sender
-                        is_verification   = is_verification   or co_lower in subject
+                        is_weak_sender  = is_weak_sender or co_lower in sender
+                        is_verification = is_verification or co_lower in subject
 
-                    if not (is_workday_sender or is_verification):
+                    if not (is_strict_sender or is_verification):
                         continue
 
                     print(f"          📨 Email found: From={sender[:40]}  Subject={subject[:50]}")
