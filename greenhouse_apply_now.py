@@ -2,13 +2,34 @@
 # =============================================================================
 # GREENHOUSE_APPLY_NOW.PY — Automated Greenhouse job application engine
 #
-# SCOPE (v1 — guest apply only):
-#   Greenhouse postings (boards.greenhouse.io/... and job-boards.greenhouse.io/...)
-#   can be applied to WITHOUT creating an account — one long single-page form:
-#   name/email/phone, resume upload, custom questions, optional EEO section,
-#   then Submit. This engine only does that guest-apply flow. Account-creation
-#   (some companies force a Greenhouse-hosted account) is NOT handled — those
-#   jobs will fail cleanly with a reason and get logged, not silently skipped.
+# SCOPE:
+#   Most Greenhouse postings (boards.greenhouse.io/... and
+#   job-boards.greenhouse.io/...) can be applied to WITHOUT creating an
+#   account — one long single-page form: name/email/phone, resume upload,
+#   custom questions, optional EEO section, then Submit. That's the primary
+#   path this engine runs.
+#
+#   ACCOUNT CREATION (2026-09-09): some companies force a Greenhouse-hosted
+#   candidate account before the application form is even reachable. When
+#   that's detected (handle_greenhouse_account_if_required(), below), the
+#   pipeline creates (or signs back into) a real account for Raghav using
+#   his own email + a password from .env (GREENHOUSE_PASSWORD, falls back to
+#   WORKDAY_PASSWORD — same convention as Workday's account handling), and
+#   completes any email verification step the same way workday_apply_now.py
+#   already does: mail_reader.wait_for_otp() reads Raghav's own Gmail (IMAP
+#   app-password, already wired up for Workday) for the OTP code or
+#   verify-link the site just sent, and either types the code in or
+#   navigates to the link. Credentials are stored encrypted via
+#   secure_store.py (same module Workday uses), keyed "greenhouse_<company>"
+#   so a Workday account for the same company never collides with this one.
+#   In --dry-run (the default), account creation is never actually performed
+#   — same "stop before anything real happens" rule as the final Submit
+#   click — the job is reported as "would need to create an account" and
+#   skipped, not silently created for real just to preview the rest of the
+#   form.
+#   No password is ever fabricated: if the posting requires an account and
+#   neither GREENHOUSE_PASSWORD nor WORKDAY_PASSWORD is set in .env, the job
+#   fails cleanly with that reason instead of guessing a value.
 #
 # FORM-FILL SELECTORS STILL NOT VERIFIED AGAINST A LIVE POSTING — build
 # environment has no network path to greenhouse.io to inspect real DOM (same
@@ -68,6 +89,9 @@ sys.path.insert(0, str(PIPELINE_DIR))
 import config as cfg
 import answer_cache as _cache
 import notifier
+import mail_reader
+import secure_store
+import receipts
 
 try:
     from salary_helper import pick_salary as _pick_salary
@@ -127,6 +151,21 @@ GH = {
     "cover_file":    "#cover_letter",
     "submit_btn":    "#submit_app",
     "apply_link":    'a#apply_button, a[href="#app_body"], a:has-text("Apply for this job"), a:has-text("Apply Now")',
+    # ── Candidate-account form (2026-09-09) — Greenhouse's hosted account
+    # portal is Devise-flavored (job-boards.greenhouse.io/.../users/sign_up
+    # and /users/sign_in): standard `type="password"` / `type="email"`
+    # inputs, no long-stable IDs documented anywhere the way the guest-apply
+    # form's #first_name/#email are, so these are generic type/name-based
+    # selectors, same "exact selector first, generic fallback covers the
+    # rest" idiom the guest-apply fields already use.
+    "acct_email":       'input[type="email"], input[name*="email" i]',
+    "acct_password":    'input[type="password"][name*="confirmation" i], ' +
+                          'input[type="password"][id*="confirmation" i]',
+    "acct_password_main": 'input[type="password"]:not([name*="confirmation" i]):not([id*="confirmation" i])',
+    "acct_create_btn":  'button:has-text("Create account"), button:has-text("Sign up"), ' +
+                          'input[type="submit"][value*="Create" i], input[type="submit"][value*="Sign up" i]',
+    "acct_signin_btn":  'button:has-text("Sign in"), button:has-text("Log in"), ' +
+                          'input[type="submit"][value*="Sign in" i], input[type="submit"][value*="Log in" i]',
 }
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -344,6 +383,157 @@ def _remember_skip(url: str, company: str, title: str, reason: str) -> None:
         "timestamp": datetime.now().isoformat(),
     }
     _save_skip_cache(cache)
+
+# ── Account creation (2026-09-09) ───────────────────────────────────────────
+# Some Greenhouse-hosted job boards force applicants through a real
+# candidate-account signup/sign-in gate before the guest-apply form is even
+# reachable. Mirrors workday_apply_now.py's own pattern instead of inventing
+# a second one: secure_store.py for encrypted credentials, mail_reader.py
+# for Gmail-based OTP/verify-link completion. See the module docstring above
+# for the full behavior, especially the dry-run guarantee below.
+
+def _greenhouse_account_password() -> str:
+    """Password used for every Greenhouse-hosted account this pipeline
+    creates — one password reused across companies, same convention as
+    Workday's WORKDAY_PASSWORD (see .env.example). Falls back to
+    WORKDAY_PASSWORD if GREENHOUSE_PASSWORD isn't set, so nothing breaks for
+    anyone who already had Workday's password configured; set
+    GREENHOUSE_PASSWORD explicitly to use a different one. Returns '' (never
+    a fabricated guess) if neither is set."""
+    for key in ("GREENHOUSE_PASSWORD", "WORKDAY_PASSWORD"):
+        val = os.environ.get(key, "")
+        if not val:
+            env_file = cfg.BASE_DIR / ".env"
+            if env_file.exists():
+                for line in env_file.read_text().splitlines():
+                    if line.startswith(f"{key}="):
+                        val = line.split("=", 1)[1].strip().strip('"').strip("'")
+        if val:
+            return val
+    return ""
+
+def _greenhouse_company_key(company: str) -> str:
+    """secure_store.py key for this company's Greenhouse account — prefixed
+    so it can never collide with a Workday account saved under the same
+    company name (workday_apply_now.py's _get_company_key() writes bare,
+    unprefixed keys)."""
+    slug = re.sub(r'[^a-z0-9]+', '_', (company or "unknown").lower()).strip('_')
+    return f"greenhouse_{slug}"
+
+def _requires_account_creation(page) -> bool:
+    """True if the CURRENT page is Greenhouse's account create/sign-in gate
+    — i.e. there's a real password field on the page. The normal guest-apply
+    form never has one, so this can't false-positive against it."""
+    return _exists(page, 'input[type="password"]', timeout=1500)
+
+def _greenhouse_needs_email_verification(page) -> bool:
+    body = (_safe_eval(page, "() => document.body.innerText.toLowerCase()", "") or "")
+    return any(s in body for s in [
+        "verify your email", "check your email", "confirm your email",
+        "we sent you a code", "we've sent", "enter the code", "verification code",
+        "check your inbox",
+    ])
+
+def _type_into(page, sel, value, timeout=4000) -> bool:
+    """Minimal fill for the account form's own well-typed inputs
+    (type=email/password) — selected by input type, doesn't need
+    _fill_basic_field()'s heavier label-matching machinery."""
+    try:
+        loc = page.locator(sel).first
+        loc.wait_for(state="visible", timeout=timeout)
+        loc.fill(value)
+        return True
+    except Exception:
+        return False
+
+def _complete_greenhouse_email_verification(page, company: str) -> bool:
+    """Reads Raghav's own Gmail (mail_reader.py — same IMAP app-password
+    already wired up for Workday) for the verification email this signup
+    just triggered, and either types the OTP into a code field on the page
+    or navigates to the verify link. Returns False (honestly) on timeout —
+    never guesses a code."""
+    result = mail_reader.wait_for_otp(company=company, timeout_secs=180, since_minutes=5)
+    if result.get("type") == "otp":
+        code = result["code"]
+        code_sel = ('input[name*="code" i], input[id*="code" i], '
+                    'input[name*="otp" i], input[id*="otp" i], '
+                    'input[autocomplete="one-time-code"]')
+        if _type_into(page, code_sel, code):
+            _click(page, 'button:has-text("Verify"), button:has-text("Confirm"), button[type="submit"]')
+            time.sleep(2)
+            return True
+        print(f"          ⚠  Got OTP {code} but no code field found on the page to type it into")
+        return False
+    if result.get("type") == "verify_link":
+        try:
+            page.goto(result["link"], wait_until="domcontentloaded", timeout=20000)
+            time.sleep(2)
+            return True
+        except Exception as e:
+            print(f"          ⚠  Verify link found but navigation failed: {e}")
+            return False
+    return False
+
+def handle_greenhouse_account_if_required(page, company: str, dry_run: bool) -> tuple:
+    """Call right after the application form/account gate loads. Returns
+    (ok: bool, reason: str) — reason is '' when ok and there was nothing to
+    do. Never fabricates a password or a verification code; every failure
+    path returns an honest reason instead of guessing."""
+    if not _requires_account_creation(page):
+        return True, ""
+
+    if dry_run:
+        # Same "stop before anything real happens" guarantee as the final
+        # Submit click — an account is a real, persistent side effect on the
+        # company's site, not something a preview run should ever create.
+        return False, ("DRY RUN — this posting requires creating a Greenhouse "
+                        "account; skipping (would create/sign in with --live)")
+
+    password = _greenhouse_account_password()
+    if not password:
+        return False, ("account required but no GREENHOUSE_PASSWORD or "
+                        "WORKDAY_PASSWORD set in .env — set one and retry, "
+                        "never fabricating a password to force this through")
+
+    company_key = _greenhouse_company_key(company)
+    email = cfg.CANDIDATE_EMAIL
+    existing = secure_store.get_account(company_key)
+
+    if existing.get("email"):
+        print(f"          🔑 Signing in to existing Greenhouse account for {company}...")
+        _type_into(page, GH["acct_email"], existing["email"])
+        _type_into(page, GH["acct_password_main"], existing.get("password", password))
+        _click(page, GH["acct_signin_btn"])
+        time.sleep(2)
+        if not _exists(page, 'input[type="password"]', timeout=2000):
+            secure_store.mark_logged_in(company_key)
+            return True, ""
+        print(f"          ⚠  Sign-in with saved credentials didn't clear the password "
+              f"gate — falling through to create-account instead")
+
+    print(f"          🆕 Creating Greenhouse account for {company} ({email})...")
+    filled_email = _type_into(page, GH["acct_email"], email)
+    filled_pw    = _type_into(page, GH["acct_password_main"], password)
+    _type_into(page, GH["acct_password"], password)   # confirmation field, if present — harmless no-op if not
+    if not (filled_email and filled_pw):
+        return False, "account form present but email/password fields could not be filled"
+    _click(page, GH["acct_create_btn"])
+    time.sleep(2)
+
+    if _greenhouse_needs_email_verification(page):
+        print(f"          📬 Email verification required — reading Gmail for the code/link...")
+        if not _complete_greenhouse_email_verification(page, company):
+            return False, ("account created but email verification could not be completed "
+                            "(no OTP/verify-link email arrived within 3 minutes) — check "
+                            "Gmail manually, the account may still need activating")
+
+    if _exists(page, 'input[type="password"]', timeout=2000):
+        return False, "account creation did not clear the password gate — outcome unclear, check manually"
+
+    secure_store.save_account(company_key, email, password, {"platform": "greenhouse", "company": company})
+    secure_store.mark_logged_in(company_key)
+    print(f"          ✅ Greenhouse account ready for {company}")
+    return True, ""
 
 # ── Job page extraction ────────────────────────────────────────────────────────
 
@@ -2045,6 +2235,33 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
     time.sleep(1)
     _wait_for_dom_stable(page)
 
+    # ── Account gate (2026-09-09) — see handle_greenhouse_account_if_required()
+    # and the module docstring for the full story. Wrapped locally for the
+    # same reason submit_greenhouse_application() is (see that function's
+    # comment): an exception here happens right after a real create-account/
+    # sign-in click, so it must never turn into a lost record.
+    try:
+        acct_ok, acct_reason = handle_greenhouse_account_if_required(page, company, dry_run)
+    except Exception as e:
+        _failure_shot(page, "account_exception")
+        record["submitted"] = not dry_run
+        record["success"] = False
+        record["unverified"] = True
+        record["reason"] = (f"UNVERIFIED — exception during account creation/sign-in: {e}. "
+                              f"An account may have been created for real — check Gmail/the "
+                              f"company's site manually before retrying.")
+        return False, record["reason"], record
+    if not acct_ok:
+        record["reason"] = acct_reason
+        record["account_required"] = True
+        if dry_run:
+            record["skipped_incomplete"] = True
+        else:
+            _failure_shot(page, f"account_required_{company}")
+        return False, acct_reason, record
+    time.sleep(1)
+    _wait_for_dom_stable(page)
+
     filled_first = _fill_basic_field(page, GH["first_name"], ["first name"], "Raghavendra")
     filled_last  = _fill_basic_field(page, GH["last_name"],  ["last name"],  "Karanam")
     filled_email = _fill_basic_field(page, GH["email"],      ["email"],      cfg.CANDIDATE_EMAIL)
@@ -2434,10 +2651,22 @@ def main():
 
             print(f"  🚀 Running apply_to_greenhouse_job() "
                   f"({'DRY RUN — will stop before Submit' if args.dry_run else '⚠️  LIVE — will submit for real'})...")
+            _t0 = time.time()
             try:
                 success, reason, record = apply_to_greenhouse_job(page, job, resume_path, cover_path, dry_run=args.dry_run)
             except Exception as e:
-                success, reason, record = False, str(e), None
+                # Hardening carryover (2026-09-09): never let record become
+                # None on an exception — a receipt still needs to exist for
+                # this attempt (see receipts.py), even one with almost
+                # nothing in it, rather than this attempt vanishing entirely.
+                success, reason = False, str(e)
+                record = {
+                    "timestamp": datetime.now().isoformat(), "title": job.get("title", ""),
+                    "company": job.get("company", ""), "url": job.get("url", ""),
+                    "dry_run": args.dry_run, "fields": {}, "unresolved_required": [],
+                    "reason": reason, "exception_before_record": True,
+                }
+            _elapsed = time.time() - _t0
 
             if record and record.get("unverified"):
                 status = "Unverified"
@@ -2456,6 +2685,10 @@ def main():
                     )
                 except Exception:
                     pass
+
+            receipts.write_receipt("Greenhouse", record, success, args.dry_run,
+                                    resume_path=resume_path, cover_letter_path=cover_path,
+                                    seconds_to_complete=_elapsed)
 
             if record and not args.dry_run:
                 _log_submitted_application(record)
@@ -2570,12 +2803,22 @@ def main():
                 pass
 
             print(f"  🚀 Applying to {company}...")
+            _t0 = time.time()
             try:
                 success, reason, record = apply_to_greenhouse_job(
                     page, job, resume_path, cover_path, dry_run=args.dry_run
                 )
             except Exception as e:
-                success, reason, record = False, str(e), None
+                # Hardening carryover (2026-09-09): same reasoning as the
+                # --url path above — never let record become None here.
+                success, reason = False, str(e)
+                record = {
+                    "timestamp": datetime.now().isoformat(), "title": title,
+                    "company": company, "url": url, "dry_run": args.dry_run,
+                    "fields": {}, "unresolved_required": [], "reason": reason,
+                    "exception_before_record": True,
+                }
+            _elapsed = time.time() - _t0
 
             if record and record.get("unverified"):
                 status = "Unverified"
@@ -2605,6 +2848,10 @@ def main():
             # should benefit from the fast-skip too, not just --live.
             if record and record.get("unresolved_reason_type") == "no_truthful_answer":
                 _remember_skip(url, company, title, reason)
+
+            receipts.write_receipt("Greenhouse", record, success, args.dry_run,
+                                    resume_path=resume_path, cover_letter_path=cover_path,
+                                    seconds_to_complete=_elapsed)
 
             if record and not args.dry_run:
                 _log_submitted_application(record)

@@ -14,9 +14,9 @@ requires explicit `--greenhouse-only --live`) is the working core. Before adding
 find and fix its reliability gaps — this is the pattern every other handler will copy.
 
 ## 3. Receipts log — before adding more ATS handlers
-Per-attempted-application log: fields filled, resume version, timestamp, success/fail. This is
-what tells us *why* something broke instead of guessing from screenshots/error logs after the
-fact. Build this before Lever/Ashby so those handlers get receipts from day one.
+DONE 2026-09-09. `receipts.py` — shared, platform-agnostic, one `data/receipts.json` for every
+handler. Greenhouse writes one on every attempt (dry-run included, exceptions included — never
+silently skipped). Lever/Ashby call the same `receipts.write_receipt()`, no new log format to invent.
 
 ## 4. Add Lever
 Sourced from Raghav's own Gmail applications this week. Mirrors the Greenhouse handler pattern.
@@ -26,8 +26,10 @@ Same — sourced from Gmail, mirrors the Greenhouse pattern. Together, Greenhous
 + Workday cover most of what's actually being applied to.
 
 ## 6. Move the automation runtime off the coding sandbox onto real hosting
-Currently local Mac + launchd. Needs a hosting decision (VPS vs. cloud vs. hardened local) before
-migration work starts.
+DECIDED 2026-09-09 (reversed same day): staying on the Mac. Raghav is fine carrying the laptop and
+keeping it awake for launchd's scheduled runs — no VPS. `VPS_MIGRATION_PLAN.md` is kept on disk,
+unexecuted, in case this gets revisited later; nothing in it has been acted on. This item is closed for
+now — no ongoing work here.
 
 ## 7. Workday — re-approach as canary rollout
 Currently `WORKDAY_ENABLED = False` (binary off since the auto-apply issues). Instead of flipping

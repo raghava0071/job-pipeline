@@ -2,7 +2,13 @@
 # =============================================================================
 # MAIL_READER.PY — Gmail IMAP reader for automatic OTP / verification fetching
 #
-# Used by workday_apply_now.py to fully automate Workday account verification.
+# Shared utility — used by workday_apply_now.py (originally) and, as of
+# 2026-09-09, greenhouse_apply_now.py too, to fully automate account
+# verification wherever a platform's account-creation/sign-in flow requires
+# it. Intentionally platform-agnostic: wait_for_otp() is driven by generic
+# verification-subject keywords + the calling handler's own `company` name,
+# not anything Workday-specific, so any future ATS handler (Lever, Ashby,
+# ...) can call it the same way once it needs the same thing.
 #
 # HOW IT WORKS:
 #   1. Connects to Gmail via IMAP (SSL, port 993)
@@ -133,12 +139,20 @@ def extract_otp_from_body(body: str) -> str:
 # ── Verification link extraction ──────────────────────────────────────────────
 
 def extract_verify_link(body: str) -> str:
-    """Extract email verification URL from email body."""
-    # Look for Workday verification links
+    """Extract email verification URL from email body. Workday-specific
+    patterns are tried first (kept exactly as before — this is what
+    workday_apply_now.py already relies on, unchanged), then a generic
+    verify/confirm/activate-link fallback added 2026-09-09 for
+    greenhouse_apply_now.py and any future handler whose account emails
+    aren't on a *workday* domain at all."""
     patterns = [
         r'https?://[^\s<>"]+workday[^\s<>"]+(?:verify|confirm|activate)[^\s<>"]*',
         r'https?://[^\s<>"]+(?:verify|confirm|activate)[^\s<>"]+workday[^\s<>"]*',
         r'https?://wd\d+\.myworkdayjobs\.com[^\s<>"]+',
+        # Generic fallback — any domain, as long as the link itself clearly
+        # says verify/confirm/activate. Deliberately last/lowest-priority so
+        # a Workday-specific match above always wins when both could apply.
+        r'https?://[^\s<>"]+(?:verify|confirm|activate)[^\s<>"]*',
     ]
     for pat in patterns:
         m = re.search(pat, body, re.IGNORECASE)

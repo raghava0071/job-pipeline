@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 # =============================================================================
-# SECURE_STORE.PY — Encrypted credential storage for Workday accounts
+# SECURE_STORE.PY — Encrypted credential storage for per-platform accounts
 #
-# Stores per-company Workday account details (email, password, account created,
-# security question answers) in an encrypted file so plaintext passwords are
-# never written to disk unprotected.
+# Originally Workday-only; as of 2026-09-09 also used by
+# greenhouse_apply_now.py (and available to any future ATS handler — Lever,
+# Ashby, ...) since it was already generic: every entry is keyed by an
+# arbitrary `company_key` string, not anything Workday-specific. Handlers
+# for different platforms namespace their own keys (Workday uses the bare
+# company slug from the job URL; Greenhouse prefixes with "greenhouse_") so
+# an account for the same company on two different platforms never collides.
+# Stores per-account details (email, password, account created, security
+# question answers) in an encrypted file so plaintext passwords are never
+# written to disk unprotected.
 #
 # ENCRYPTION:
 #   - Uses AES-256-GCM via the `cryptography` package (Fernet)
