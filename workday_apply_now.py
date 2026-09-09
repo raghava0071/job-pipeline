@@ -3427,6 +3427,16 @@ def main():
             if sk in seen: return
             seen.add(sk)
             if title and (not is_good_level(title) or not is_relevant_domain(title)):
+                # Diagnostic print added 2026-09-09 — this gate was silent
+                # (skipped += 1 with no explanation), which is exactly why
+                # the 2026-09-09 --wd-limit 1 --dry-run test showed "Scored:
+                # 0, Skipped: 1" with zero visible reason: this is the only
+                # skip path in _process_job that didn't print anything.
+                # Print the real title so a noisy/mismatched Google-search
+                # title (as opposed to a genuinely irrelevant job) is
+                # distinguishable on sight instead of guessed at.
+                print(f"  🚫 Title/domain filter — skipping: \"{title}\" @ {company} "
+                      f"(good_level={is_good_level(title)}, relevant_domain={is_relevant_domain(title)})")
                 skipped += 1; return
             # Blocked companies — skip entirely
             blocked = getattr(cfg, "BLOCKED_COMPANIES", set())
