@@ -3248,6 +3248,74 @@ def _search_workday_on_google(page, query: str) -> list:
     print(f"  🔍 Google→Workday: {len(links)} jobs for '{query}'")
     return links
 
+# ── Direct-visit discovery (2026-09-09) — no Google ─────────────────────────
+def _fetch_workday_jobs_direct(page, company_name: str, careers_url: str,
+                                queries: list, per_query_limit: int = 5) -> list:
+    """Replaces _search_workday_on_google() as the default discovery path.
+    Google started hard-blocking every site:myworkdayjobs.com query as bot
+    traffic (confirmed live 2026-09-01/09-09 — see main()'s comment) —
+    same wall greenhouse_apply_now.py already hit and solved by dropping
+    Google entirely. Workday has no equivalent public job-board API, so
+    this visits each company's OWN Workday-hosted careers page directly —
+    nothing sent to Google, nothing for it to flag as a bot.
+
+    Types each of `queries` into Workday's own keyword search box
+    (data-automation-id="keywordSearchInput" — the same real, stable
+    Workday naming convention already confirmed live elsewhere in this
+    file: jobPostingHeader/jobPostingDescription/jobPostingApplyButton)
+    and scrapes real rendered results (data-automation-id="jobTitle", with
+    a generic a[href*="/job/"] fallback for any tenant whose markup
+    differs). If no search box is found at all, falls back to ONE
+    unfiltered scrape of whatever the listing shows by default, instead of
+    repeating an identical unfiltered scrape once per query term.
+
+    UNVERIFIED against a live page — this environment has no network path
+    to myworkdayjobs.com to test it directly (same standing limitation
+    noted in every Workday/Greenhouse changelog entry). First page of
+    results only, no pagination yet — an honest limitation, not a silent
+    undercount."""
+    jobs, seen_urls = [], set()
+    try:
+        page.goto(careers_url, wait_until="domcontentloaded", timeout=20000)
+        time.sleep(1.5)
+        has_search_box = _exists(page, 'input[data-automation-id="keywordSearchInput"]', timeout=3000)
+    except Exception as e:
+        print(f"  ⚠  Could not load {company_name}'s Workday careers page ({careers_url}): {e}")
+        return []
+
+    query_list = queries if has_search_box else [None]  # one unfiltered pass if there's nothing to search
+    for q in query_list:
+        try:
+            if q:
+                page.fill('input[data-automation-id="keywordSearchInput"]', q)
+                page.keyboard.press("Enter")
+                time.sleep(2)
+            rows = page.locator('a[data-automation-id="jobTitle"]').all()
+            if not rows:
+                rows = page.locator('a[href*="/job/"]').all()
+            for r in rows[:per_query_limit]:
+                try:
+                    title = (r.inner_text(timeout=2000) or "").strip()
+                    href  = r.get_attribute("href") or ""
+                    if not href:
+                        continue
+                    if href.startswith("/"):
+                        origin_m = re.match(r'(https?://[^/]+)', careers_url)
+                        href = (origin_m.group(1) if origin_m else "") + href
+                    if href in seen_urls:
+                        continue
+                    seen_urls.add(href)
+                    jobs.append({"title": title or (q or ""), "company": company_name,
+                                 "url": href, "description": ""})
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"  ⚠  {company_name}: search for '{q}' failed: {e}")
+            continue
+
+    print(f"  🔍 {company_name}: {len(jobs)} job(s) found (direct visit, no Google)")
+    return jobs
+
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -3549,13 +3617,26 @@ def main():
             job["status"] = "processed"
             save_wd_queue(queue)
 
-        # ── Source 2: Google search for Workday jobs ──────────────────────────
+        # ── Source 2: direct company-page visits — replaces Google search
+        # (2026-09-09). Google was hard-blocking every single
+        # site:myworkdayjobs.com query as bot traffic — confirmed live: a
+        # --wd-limit 1 --dry-run run on this exact date came back "Google
+        # blocked" for all 9 queries, 0 scored, 0 applied. Same wall
+        # greenhouse_apply_now.py already hit and solved by dropping Google
+        # entirely for a direct-access discovery path — this does the
+        # Workday equivalent. _search_workday_on_google() (above) is left
+        # in place, unused by default, in case this needs to be compared
+        # against later — not deleted, just no longer the default path.
         if not args.queue_only and applied < args.limit:
-            print(f"\n  🔍 Searching Google for Workday jobs (site:myworkdayjobs.com)...")
+            companies = getattr(cfg, "WORKDAY_COMPANIES", [])
             queries = getattr(cfg, "WORKDAY_QUERIES", cfg.TARGET_ROLES)
-            for query in queries:
+            print(f"\n  🔍 Visiting {len(companies)} compan{'y' if len(companies) == 1 else 'ies'}' own "
+                  f"Workday career pages directly (no Google)...")
+            if not companies:
+                print("  ⚠  config.WORKDAY_COMPANIES is empty — nothing to check.")
+            for co in companies:
                 if applied >= args.limit: break
-                jobs = _search_workday_on_google(page, query)
+                jobs = _fetch_workday_jobs_direct(page, co["name"], co["careers_url"], queries)
                 for job in jobs:
                     if applied >= args.limit: break
                     try:

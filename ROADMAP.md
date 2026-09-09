@@ -36,15 +36,24 @@ no-right-answer custom dropdowns like "How did you hear about us?", it just pick
 option rather than carefully scraping/matching real options — worth adopting for that narrow
 question class once real DOM evidence is back.
 
-First live test run 2026-09-09: `python3 run_all.py --workday-only --wd-limit 1 --dry-run` found 1
-job (across 9 Google search queries) and skipped it — but printed zero reason why, because the
-title/domain filter gate was silent (fixed in 2.13.2 — now prints title/company/filter booleans).
-Never even reached account creation, so still no fresh evidence on the actual button-click bug.
+Live test #1 (2026-09-09): found 1 job across 9 Google queries, skipped it silently (fixed in
+2.13.2 — diagnostic print added).
 
-Concrete next step: re-run the exact same command now that the diagnostic print is in place, see
-whether it was a real mismatch or a noisy Google-search title tripping the filter on a good job. If
-it clears that gate, it'll finally reach account creation and give the first real signal on v1.8.3's
-fix in 2+ months.
+Live test #2 (2026-09-09, same day): ALL 9 Google queries came back "Google blocked" — confirmed
+Google is hard-blocking this search pattern as bot traffic. Per the same "don't fight bot detection
+with stealth" rule already applied to Indeed/Greenhouse, replaced Google-search discovery entirely
+(2.14.0) — `WORKDAY_COMPANIES` (42 companies, URLs reconstructed from real history in
+`data/workday_applied_log.json`) + `_fetch_workday_jobs_direct()` visit each company's own Workday
+page directly, no Google involved at all.
+
+Also noted from watching Tsenta handle Workday (Raghav's own observation): low-stakes dropdowns
+like "How did you hear about us?" don't need careful real-options matching — any available option
+is fine, since there's no wrong answer for that question class. Worth adopting once there's a live
+DOM to confirm Workday's actual rendered options — not yet implemented.
+
+Concrete next step: `python3 run_all.py --workday-only --wd-limit 1 --dry-run` again — first test of
+the new direct-visit discovery. If it finds jobs, THIS is what finally gets far enough to test the
+account-creation button-click fix (v1.8.3) that's been sitting unconfirmed since July.
 
 ## 5. Add Lever
 Sourced from Raghav's own Gmail applications. Mirrors the Greenhouse handler pattern. Picked up

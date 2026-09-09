@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.13.2"
+PIPELINE_VERSION = "2.14.0"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -878,7 +878,8 @@ YEARS_EXP_TOTAL     = "3+"
 SALARY_EXPECTED     = "70000"
 
 # ── Skill experience years — used in form filling ──────────────────────────────
-# ── Workday search queries (used by workday_apply_now.py Google search) ───────
+# ── Workday search queries (typed into each company's own keyword search box
+# by _fetch_workday_jobs_direct() — see WORKDAY_COMPANIES below) ───────────────
 WORKDAY_QUERIES = [
     "Data Engineer entry level",
     "Data Analyst entry level",
@@ -889,6 +890,67 @@ WORKDAY_QUERIES = [
     "ETL Developer",
     "Machine Learning Engineer",
     "AI Engineer",
+]
+
+# ── Workday companies — direct-visit discovery (2026-09-09) ───────────────────
+# Replaces Google search entirely. Google started hard-blocking every single
+# site:myworkdayjobs.com query as bot traffic (confirmed live 2026-09-01/09-09
+# — every query in a --wd-limit 1 --dry-run run came back "Google blocked") —
+# the exact same wall greenhouse_apply_now.py already hit and solved by
+# switching to a direct, no-Google discovery path. Workday has no equivalent
+# public job-board API the way Greenhouse does, so this instead visits each
+# company's OWN Workday-hosted careers page directly with a real browser —
+# nothing sent to Google, nothing for it to flag.
+#
+# Every `careers_url` below is reconstructed from data/workday_applied_log.json
+# — i.e. a URL this exact pipeline already successfully loaded at some point
+# in its 162 historical attempts, truncated to the listing page (everything
+# before "/job/"). Not guessed. Add a new company the same way: find one of
+# its real job URLs (from a search, a referral, anywhere) and truncate before
+# "/job/" to get its careers_url.
+WORKDAY_COMPANIES = [
+    {"name": "Adobe",               "careers_url": "https://adobe.wd5.myworkdayjobs.com/en-US/external_experienced"},
+    {"name": "Ag",                  "careers_url": "https://ag.wd3.myworkdayjobs.com/en-US/Airbus"},
+    {"name": "Aia",                 "careers_url": "https://aia.wd3.myworkdayjobs.com/en-US/External"},
+    {"name": "Amesconstruction",    "careers_url": "https://amesconstruction.wd12.myworkdayjobs.com/en-US/Ames"},
+    {"name": "Amgen",               "careers_url": "https://amgen.wd1.myworkdayjobs.com/en-US/Careers"},
+    {"name": "Baird",               "careers_url": "https://baird.wd1.myworkdayjobs.com/en-US/Careers"},
+    {"name": "Barclays",            "careers_url": "https://barclays.wd3.myworkdayjobs.com/en-US/External_Career_Site_Barclays"},
+    {"name": "Bdx",                 "careers_url": "https://bdx.wd1.myworkdayjobs.com/en-US/EXTERNAL_CAREER_SITE_USA"},
+    {"name": "Boeing",              "careers_url": "https://boeing.wd1.myworkdayjobs.com/en-US/EXTERNAL_CAREERS"},
+    {"name": "Boeing (Engineering)","careers_url": "https://boeing.wd1.myworkdayjobs.com/en-US/ENG"},
+    {"name": "Brownadvisory",       "careers_url": "https://brownadvisory.wd1.myworkdayjobs.com/en-US/Brown"},
+    {"name": "Cadence",             "careers_url": "https://cadence.wd1.myworkdayjobs.com/en-US/External_Careers"},
+    {"name": "Cmu",                 "careers_url": "https://cmu.wd5.myworkdayjobs.com/en-US/SEI"},
+    {"name": "Cni",                 "careers_url": "https://cni.wd503.myworkdayjobs.com/en-US/CNI"},
+    {"name": "Flextronics",         "careers_url": "https://flextronics.wd1.myworkdayjobs.com/en-US/careers"},
+    {"name": "Fortune",             "careers_url": "https://fortune.wd108.myworkdayjobs.com/en-US/Fortune"},
+    {"name": "Generalmotors",       "careers_url": "https://generalmotors.wd5.myworkdayjobs.com/fr-CA/Careers_GM"},
+    {"name": "Hcsc",                "careers_url": "https://hcsc.wd1.myworkdayjobs.com/en-US/HCSC_External"},
+    {"name": "Iqvia",               "careers_url": "https://iqvia.wd1.myworkdayjobs.com/en-US/IQVIA"},
+    {"name": "Lseg",                "careers_url": "https://lseg.wd3.myworkdayjobs.com/en-US/Careers"},
+    {"name": "Maersk",              "careers_url": "https://maersk.wd3.myworkdayjobs.com/en-US/Maersk_Careers"},
+    {"name": "Nadara",              "careers_url": "https://nadara.wd3.myworkdayjobs.com/en-US/External"},
+    {"name": "Nba",                 "careers_url": "https://nba.wd108.myworkdayjobs.com/en-US/nbacareers"},
+    {"name": "Nc",                  "careers_url": "https://nc.wd108.myworkdayjobs.com/en-US/NC_Careers"},
+    {"name": "Northeastern",        "careers_url": "https://northeastern.wd1.myworkdayjobs.com/en-US/careers"},
+    {"name": "Nttlimited",          "careers_url": "https://nttlimited.wd3.myworkdayjobs.com/en-US/NTT_Careers"},
+    {"name": "Onemagnify",          "careers_url": "https://onemagnify.wd5.myworkdayjobs.com/en-US/OneMagnify_Careers"},
+    {"name": "Philips",             "careers_url": "https://philips.wd3.myworkdayjobs.com/en-US/jobs-and-careers"},
+    {"name": "Pluralsight",         "careers_url": "https://pluralsight.wd1.myworkdayjobs.com/en-US/Careers"},
+    {"name": "Relx",                "careers_url": "https://relx.wd3.myworkdayjobs.com/en-US/relx"},
+    {"name": "Roche",               "careers_url": "https://roche.wd3.myworkdayjobs.com/en-US/roche-ext"},
+    {"name": "Rsm",                 "careers_url": "https://rsm.wd1.myworkdayjobs.com/en-US/RSMCareers"},
+    {"name": "Spgi",                "careers_url": "https://spgi.wd5.myworkdayjobs.com/en-US/SPGI_Careers"},
+    {"name": "Tel",                 "careers_url": "https://tel.wd3.myworkdayjobs.com/en-US/TEL-Careers"},
+    {"name": "Transunion",          "careers_url": "https://transunion.wd5.myworkdayjobs.com/en-US/TransUnion"},
+    {"name": "Tsys",                "careers_url": "https://tsys.wd1.myworkdayjobs.com/en-US/TSYS"},
+    {"name": "Vanguard",            "careers_url": "https://vanguard.wd5.myworkdayjobs.com/en-US/vanguard_external"},
+    {"name": "Visa",                "careers_url": "https://visa.wd5.myworkdayjobs.com/en-US/Visa"},
+    {"name": "Vizient",             "careers_url": "https://vizient.wd1.myworkdayjobs.com/en-US/Vizient_Careers"},
+    {"name": "Westernalliancebank", "careers_url": "https://westernalliancebank.wd5.myworkdayjobs.com/en-US/AMH"},
+    {"name": "Wvumedicine",         "careers_url": "https://wvumedicine.wd1.myworkdayjobs.com/en-US/WVUH"},
+    {"name": "Zillow",              "careers_url": "https://zillow.wd5.myworkdayjobs.com/en-US/Zillow_Group_External"},
 ]
 
 # ── Greenhouse company board tokens (used by greenhouse_apply_now.py's API
