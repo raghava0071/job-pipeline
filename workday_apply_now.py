@@ -538,8 +538,23 @@ def _read_workday_errors(page) -> list:
         """) or []
     except Exception:
         return []
+    # 2026-09-09: filter out benign SPA route-change announcements that also
+    # use role="alert" for screen readers. Confirmed live on Tsys AND
+    # Vizient — after account creation, the unknown-step retry loop printed
+    # "Workday errors: ['AI Engineer page is loaded']" /
+    # "['Data Engineer page is loaded']" — that's Workday announcing a page
+    # transition to assistive tech, not a validation error; "<job title>
+    # page is loaded" is not a shape any real field-validation message
+    # takes. Doesn't change the actual pass/fail decision here (that's
+    # based purely on whether the page's own marker changes, never on this
+    # list's contents) — this only stops a real bug (misdetected here, not
+    # yet fixed) from being misdiagnosed as "Workday rejected the form"
+    # when it wasn't.
+    _PAGE_LOAD_ANNOUNCEMENT = re.compile(r'\bpage (is |has )?loaded\b', re.IGNORECASE)
     seen, out = set(), []
     for e in errors:
+        if _PAGE_LOAD_ANNOUNCEMENT.search(e):
+            continue
         if e not in seen:
             seen.add(e)
             out.append(e)
@@ -3323,6 +3338,14 @@ def main():
     parser.add_argument("--limit",      type=int, default=5)
     parser.add_argument("--dry-run",    action="store_true")
     parser.add_argument("--queue-only", action="store_true")
+    parser.add_argument("--companies",  type=str, default=None,
+                         help="Comma-separated company names (matching WORKDAY_COMPANIES' "
+                              "'name' field, e.g. --companies Tsys,Vizient) — restricts "
+                              "discovery to just these instead of sweeping all 42. Added "
+                              "2026-09-09 for debugging a known stuck point (Tsys/Vizient's "
+                              "post-account-creation stall) fast, without waiting through "
+                              "every other company first. Remove the flag to go back to the "
+                              "full sweep once whatever's being debugged is fixed.")
     args = parser.parse_args()
 
     print(f"\n{'='*60}")
@@ -3629,11 +3652,16 @@ def main():
         # against later — not deleted, just no longer the default path.
         if not args.queue_only and applied < args.limit:
             companies = getattr(cfg, "WORKDAY_COMPANIES", [])
+            if args.companies:
+                wanted = {c.strip().lower() for c in args.companies.split(",") if c.strip()}
+                companies = [co for co in companies if co["name"].lower() in wanted]
+                print(f"\n  🎯 --companies filter: restricting to {[co['name'] for co in companies]}")
             queries = getattr(cfg, "WORKDAY_QUERIES", cfg.TARGET_ROLES)
             print(f"\n  🔍 Visiting {len(companies)} compan{'y' if len(companies) == 1 else 'ies'}' own "
                   f"Workday career pages directly (no Google)...")
             if not companies:
-                print("  ⚠  config.WORKDAY_COMPANIES is empty — nothing to check.")
+                print("  ⚠  No companies to check — config.WORKDAY_COMPANIES is empty, or "
+                      "--companies didn't match anything in it.")
             for co in companies:
                 if applied >= args.limit: break
                 jobs = _fetch_workday_jobs_direct(page, co["name"], co["careers_url"], queries)
