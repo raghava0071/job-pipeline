@@ -276,7 +276,13 @@ def _log_submitted_application(record: dict) -> None:
 def already_applied(url: str, log: list, title="", company="") -> bool:
     key = re.sub(r'\?.*', '', url).rstrip("/")
     for e in log:
-        if e.get("status") not in ("Applied", "Already Applied"):
+        # "Unverified" (2026-09-09 hardening) means a prior run's Submit
+        # click may have actually gone through before an exception hid the
+        # outcome — block auto-retry here too, same as a confirmed "Applied",
+        # so the pipeline never fires a second real submission at the same
+        # posting on a guess. Requires a human to check and re-run --url
+        # deliberately once they know what really happened.
+        if e.get("status") not in ("Applied", "Already Applied", "Unverified"):
             continue
         if re.sub(r'\?.*', '', e.get("url", "")).rstrip("/") == key:
             return True
@@ -2119,7 +2125,26 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
         record["unresolved_reason_type"] = "no_truthful_answer"
         return False, reason, record
 
-    ok = submit_greenhouse_application(page, dry_run=dry_run)
+    try:
+        ok = submit_greenhouse_application(page, dry_run=dry_run)
+    except Exception as e:
+        # Hardening (2026-09-09): an exception here — e.g. the browser/page
+        # crashing mid-poll right after the REAL Submit click fired — must
+        # never turn into a lost record. Without this, the caller's generic
+        # `except Exception: record = None` would silently drop an
+        # application that may have gone through for real; already_applied()
+        # would then never see it and the exact same job could get submitted
+        # TWICE on the next run. Tagged "unverified" (not "failed") so the
+        # caller logs it distinctly and already_applied() blocks a silent
+        # auto-retry until a human checks what actually happened.
+        _failure_shot(page, "submit_exception")
+        record["submitted"] = not dry_run
+        record["success"] = False
+        record["unverified"] = True
+        record["reason"] = (f"UNVERIFIED — exception during/after the Submit click: {e}. "
+                              f"Outcome unknown (may have actually submitted) — check "
+                              f"screenshots/browser state manually before retrying.")
+        return False, record["reason"], record
     record["submitted"] = not dry_run
     record["success"] = ok
     if ok:
@@ -2414,13 +2439,23 @@ def main():
             except Exception as e:
                 success, reason, record = False, str(e), None
 
-            if record and record.get("skipped_incomplete"):
+            if record and record.get("unverified"):
+                status = "Unverified"
+            elif record and record.get("skipped_incomplete"):
                 status = "Skipped-Incomplete"
             elif args.dry_run:
                 status = "Dry-Run"
             else:
                 status = "Applied" if success else "Failed"
-            print(f"\n  {'✅' if success else '❌'} {status}: {reason}")
+            print(f"\n  {'🚨' if status == 'Unverified' else '✅' if success else '❌'} {status}: {reason}")
+            if status == "Unverified":
+                try:
+                    notifier.send_alert(
+                        subject=f"🚨 Greenhouse — unverified submit: {job['company']}",
+                        body=f"{job['title']} @ {job['company']}\n{args.url}\n\n{reason}",
+                    )
+                except Exception:
+                    pass
 
             if record and not args.dry_run:
                 _log_submitted_application(record)
@@ -2542,14 +2577,24 @@ def main():
             except Exception as e:
                 success, reason, record = False, str(e), None
 
-            if record and record.get("skipped_incomplete"):
+            if record and record.get("unverified"):
+                status = "Unverified"
+            elif record and record.get("skipped_incomplete"):
                 status = "Skipped-Incomplete"
             elif args.dry_run:
                 status = "Dry-Run"
             else:
                 status = "Applied" if success else "Failed"
-            print(f"  {'✅ SUBMITTED' if (success and not args.dry_run) else '🧪 would submit' if (success and args.dry_run) else '⏭  SKIPPED' if status == 'Skipped-Incomplete' else '❌ FAILED'} "
+            print(f"  {'🚨 UNVERIFIED' if status == 'Unverified' else '✅ SUBMITTED' if (success and not args.dry_run) else '🧪 would submit' if (success and args.dry_run) else '⏭  SKIPPED' if status == 'Skipped-Incomplete' else '❌ FAILED'} "
                   f"— {company} — {title}: {reason}")
+            if status == "Unverified":
+                try:
+                    notifier.send_alert(
+                        subject=f"🚨 Greenhouse — unverified submit: {company}",
+                        body=f"{title} @ {company}\n{url}\n\n{reason}",
+                    )
+                except Exception:
+                    pass
 
             # Remember a genuinely-structural skip (never a transient
             # UI-automation gap — see apply_to_greenhouse_job()'s comments)
