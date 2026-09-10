@@ -51,9 +51,21 @@ like "How did you hear about us?" don't need careful real-options matching — a
 is fine, since there's no wrong answer for that question class. Worth adopting once there's a live
 DOM to confirm Workday's actual rendered options — not yet implemented.
 
-Concrete next step: `python3 run_all.py --workday-only --wd-limit 1 --dry-run` again — first test of
-the new direct-visit discovery. If it finds jobs, THIS is what finally gets far enough to test the
-account-creation button-click fix (v1.8.3) that's been sitting unconfirmed since July.
+Live test #3 (2026-09-09/10): confirmed root cause of the post-account-creation "Unknown step"
+stall by opening the actual screenshots directly (`step_before_unknown-step-1_170621.png` /
+`step_stuck_unknown-step-1_170635.png`, Tsys run) instead of guessing. The "Start Your Application"
+modal (Autofill with Resume / Apply Manually / Use My Last Application / Apply With LinkedIn)
+reopens after auth when Apply is clicked a second time, but only the pre-auth click had a check for
+it — the step-walk loop had no case for this modal at all, so it fell into the generic "unknown
+step" fallback (fill fields, click Next) which does nothing on this modal, and `_get_page_marker()`
+never changes because it reads the underlying page's own `h1`/pathname, not the modal. Fixed in
+2.14.3: added an explicit `WD["apply_manually"]` check both right after the post-auth re-click and
+as a first-class recognized state inside the step-walk loop.
+
+Concrete next step: `python3 workday_apply_now.py --companies Tsys,Vizient --dry-run --limit 2` to
+confirm the modal is actually clicked through now and the walk reaches a real form step (contact
+info / experience / etc). If it does, run the same command with `--limit` raised, then drop
+`--companies` and go back to the full 42-company sweep per Raghav's own stated plan.
 
 ## 5. Add Lever
 Sourced from Raghav's own Gmail applications. Mirrors the Greenhouse handler pattern. Picked up

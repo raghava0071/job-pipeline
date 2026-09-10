@@ -2986,6 +2986,20 @@ def apply_to_workday_job(page, job: dict, resume_path: str, cover_letter_path: s
             except:
                 pass
         time.sleep(3)
+        # 2026-09-10: CONFIRMED live on Tsys/Vizient (step_stuck_unknown-step-*
+        # screenshots) — clicking Apply again after auth reopens the same
+        # "Start Your Application" modal (Autofill with Resume / Apply
+        # Manually / Use My Last Application / Apply With LinkedIn) that was
+        # already handled once pre-auth at line ~2962. Nothing re-checked for
+        # it here, so it fell into the step-walk loop's generic "unknown step"
+        # fallback, which has no fields to fill and no real Next button to
+        # click — _get_page_marker() never changes because it reads the
+        # page's own h1 (job title), not the modal, so _advance_page reported
+        # "stuck" every time and the run gave up after 3 identical attempts.
+        if _exists(page, WD["apply_manually"], timeout=3000):
+            print(f"          🔄 'Start Your Application' modal reopened — clicking Apply Manually...")
+            _click(page, WD["apply_manually"])
+            time.sleep(2)
 
     # Read cover letter text
     cl_text = ""
@@ -3061,6 +3075,7 @@ def apply_to_workday_job(page, job: dict, resume_path: str, cover_letter_path: s
             is_review = any(s in body for s in ["review and submit", "submit your application"])
 
         print(f"          Step detect: contact={is_contact} exp={is_experience} q={is_questions} vol={is_voluntary} self={is_self_id} review={is_review}")
+        # (apply-modal check happens below, right before the step dispatch)
 
         # Detect if still on auth page — re-run auth instead of filling fields
         still_on_auth = (
@@ -3085,7 +3100,20 @@ def apply_to_workday_job(page, job: dict, resume_path: str, cover_letter_path: s
             time.sleep(3)
             continue
 
-        if is_contact:
+        # 2026-09-10: the "Start Your Application" modal (Autofill with Resume /
+        # Apply Manually / Use My Last Application / Apply With LinkedIn) can
+        # reopen mid-walk on some portals — handle it directly instead of
+        # letting it fall into the generic "unknown step" fallback below,
+        # which has no button-click logic for it (confirmed root cause of
+        # the Tsys/Vizient "stuck on same step" failures).
+        is_apply_modal = _exists(page, WD["apply_manually"], timeout=1000)
+
+        if is_apply_modal:
+            print(f"          🔄 'Start Your Application' modal — clicking Apply Manually...")
+            _click(page, WD["apply_manually"])
+            time.sleep(2)
+
+        elif is_contact:
             step_contact_information(page)
 
         elif is_experience:
@@ -3292,11 +3320,32 @@ def _fetch_workday_jobs_direct(page, company_name: str, careers_url: str,
     jobs, seen_urls = [], set()
     try:
         page.goto(careers_url, wait_until="domcontentloaded", timeout=20000)
-        time.sleep(1.5)
-        has_search_box = _exists(page, 'input[data-automation-id="keywordSearchInput"]', timeout=3000)
+        time.sleep(2)
+        # 2026-09-10: checked tsys.wd1.myworkdayjobs.com live — it now shows a
+        # Global-Payments-branded cookie consent banner ("Accept Cookies")
+        # immediately on load that didn't exist under Tsys's old branding.
+        # _dismiss_cookie_banner() already handles this exact button text
+        # elsewhere (Apply-click retries) but was never called on this
+        # discovery page — dismiss it here too before checking for the
+        # search box, in case it's slowing hydration or intercepting clicks.
+        _dismiss_cookie_banner(page)
+        has_search_box = _exists(page, 'input[data-automation-id="keywordSearchInput"]', timeout=6000)
     except Exception as e:
         print(f"  ⚠  Could not load {company_name}'s Workday careers page ({careers_url}): {e}")
         return []
+
+    # 2026-09-10: Tsys/Vizient just went from finding 18/25 jobs (2026-09-09)
+    # to 0 with no error printed — silent, not a crash. Always capture a
+    # screenshot of what actually loaded so the next failure is diagnosable
+    # from the image instead of guessed at again.
+    print(f"  🔎 {company_name}: search box found = {has_search_box} (url={page.url[:70]})")
+    try:
+        safe = re.sub(r'[^a-zA-Z0-9_-]+', '_', company_name)[:40]
+        shot = SCREENSHOTS / f"discovery_{safe}_{datetime.now().strftime('%H%M%S')}.png"
+        page.screenshot(path=str(shot))
+        print(f"          📸 Discovery screenshot: screenshots/{shot.name}")
+    except Exception:
+        pass
 
     query_list = queries if has_search_box else [None]  # one unfiltered pass if there's nothing to search
     for q in query_list:
