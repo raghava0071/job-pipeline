@@ -62,10 +62,18 @@ never changes because it reads the underlying page's own `h1`/pathname, not the 
 2.14.3: added an explicit `WD["apply_manually"]` check both right after the post-auth re-click and
 as a first-class recognized state inside the step-walk loop.
 
-Concrete next step: `python3 workday_apply_now.py --companies Tsys,Vizient --dry-run --limit 2` to
-confirm the modal is actually clicked through now and the walk reaches a real form step (contact
-info / experience / etc). If it does, run the same command with `--limit` raised, then drop
-`--companies` and go back to the full 42-company sweep per Raghav's own stated plan.
+Live test #4 (2026-09-10): discovery fix (2.14.5) confirmed working — Tsys found 18 jobs, Vizient
+25, both scored/resume-built fine. New blocker one step further in: account creation succeeds every
+time now, but sign-in right after always failed (needs email verification), and the auth code had
+two real bugs — it never called the Gmail auto-verify flow that already exists elsewhere
+(`handle_intervention`), and worse, it created a brand-new duplicate account instead of reusing one
+already pending verification from earlier in the same run. Both fixed in 2.14.6.
+
+Concrete next step: `python3 workday_apply_now.py --companies Tsys,Vizient --dry-run --limit 2`
+again. This time watch for "🤖 Checking Gmail for a ... verification link" — if a real Workday
+verification email lands within 5 minutes, auth should complete and the run should finally reach
+the actual application form (contact info / experience / etc). If it does, raise `--limit`, then
+drop `--companies` and go back to the full 42-company sweep per Raghav's own stated plan.
 
 ## 5. Add Lever
 Sourced from Raghav's own Gmail applications. Mirrors the Greenhouse handler pattern. Picked up

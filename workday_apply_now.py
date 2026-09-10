@@ -1883,6 +1883,32 @@ def workday_create_account(page, email: str, password: str, company_key: str) ->
         _failure_shot(page, f"createacct_err_{company_key}")
         return False
 
+def _try_gmail_verify_and_signin(page, company_key: str, email: str, password: str, job_url: str) -> bool:
+    """2026-09-10: confirmed live on Tsys/Vizient — account creation now
+    succeeds but every portal comes back needing email verification before
+    sign-in works. The OTP/verify-link automation already exists and works
+    (handle_intervention()'s "email_verify" branch, used mid-application) but
+    ensure_workday_auth() was never wired to it — it just printed instructions
+    telling Raghav to check Gmail by hand. Reuses the same mail_reader call
+    the working path already uses, no new plumbing."""
+    print(f"          🤖 Checking Gmail for a {company_key} verification link...")
+    result = mail_reader.wait_for_otp(company=company_key, timeout_secs=300, since_minutes=10)
+    if result.get("type") == "verify_link":
+        print(f"          ✅ Found verification link — opening it")
+        try:
+            page.goto(result["link"], wait_until="domcontentloaded", timeout=15000)
+            time.sleep(3)
+        except Exception as e:
+            print(f"          ⚠  Could not open verification link: {e}")
+            return False
+        if workday_sign_in(page, email, password):
+            secure_store.mark_logged_in(company_key, job_url)
+            time.sleep(2)
+            return True
+        return False
+    print(f"          📧 No verification email found within the wait window")
+    return False
+
 def ensure_workday_auth(page, job_url: str) -> bool:
     """
     Ensure authentication on this Workday portal before starting the form.
@@ -1930,6 +1956,22 @@ def ensure_workday_auth(page, job_url: str) -> bool:
                                           extra={"portal_url": job_url})
             secure_store.mark_logged_in(company_key, job_url)
             time.sleep(3)
+        elif existing:
+            # 2026-09-10: CONFIRMED live on Vizient — sign-in for an account
+            # created earlier in THIS SAME run failed (expected: it's still
+            # pending email verification), but the old code jumped straight
+            # to creating ANOTHER brand-new account here, throwing away the
+            # one already pending and guaranteeing auth can never catch up.
+            # We already have an account for this company — try to finish
+            # its verification via Gmail instead of creating a duplicate.
+            print(f"          🔁 Sign-in failed for existing {company_key} account — "
+                  f"likely still pending email verification, not creating a duplicate")
+            if _try_gmail_verify_and_signin(page, company_key, email, password, job_url):
+                pass  # fell through to "return True" further below via mark_logged_in
+            else:
+                print(f"          ⏭  Still can't sign in for {company_key} — skipping job "
+                      f"(will retry automatically once verification completes)")
+                return False
         else:
             # 2. Sign-in rejected / no account → create a new account.
             print(f"          🔁 Sign-in rejected — creating a new account for {company_key}")
@@ -1947,10 +1989,14 @@ def ensure_workday_auth(page, job_url: str) -> bool:
                     time.sleep(2)
                     return True
                 else:
-                    print(f"          📧 Sign-in failed — portal needs email verification")
-                    print(f"          👉 Open Gmail → find verification email from Workday/{company_key}")
-                    print(f"          👉 Click the verification link → then re-run the script")
-                    print(f"          ⏭  Skipping now — will work on re-run after verification\n")
+                    # 2026-09-10: this is where every Tsys/Vizient attempt
+                    # died today — the working Gmail-verify-link automation
+                    # (handle_intervention's "email_verify" branch) existed
+                    # but was never called from here. Try it before giving up.
+                    if _try_gmail_verify_and_signin(page, company_key, email, password, job_url):
+                        return True
+                    print(f"          📧 Still needs email verification — Gmail check found nothing yet")
+                    print(f"          ⏭  Skipping now — will work on re-run after verification arrives\n")
                     return False
 
             if created == "exists":
