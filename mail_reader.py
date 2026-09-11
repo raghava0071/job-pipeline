@@ -224,14 +224,32 @@ def wait_for_otp(
             mail = _connect_imap()
             mail.select("INBOX")
 
-            # Search for recent unseen emails (last `since_minutes` minutes)
+            # Search for recent emails (last `since_minutes` minutes, filtered
+            # further below by strict/weak sender + subject matching).
             # IMAP date format: "01-Jan-2024"
             from datetime import timedelta
             since_dt = datetime.now(timezone.utc) - timedelta(minutes=since_minutes)
             imap_date = since_dt.strftime("%d-%b-%Y")
 
-            # Search for unseen emails since today
-            typ, data = mail.search(None, f'(UNSEEN SINCE "{imap_date}")')
+            # Bug found 2026-09-10, live evidence: Tsys/Vizient kept failing
+            # "auth failed" on every retry even after 2.14.6 correctly wired
+            # this function into the account-creation path. Root cause:
+            # `mail.fetch(msg_id, "(RFC822)")` below fetches the FULL message
+            # body, which per IMAP protocol semantics marks it \Seen as a
+            # side effect (unlike BODY.PEEK[], which reads without marking).
+            # Combined with the `UNSEEN` search filter that used to be here,
+            # this meant a verification email could only ever be found ONCE,
+            # ever, across every future poll AND every future run — including
+            # the "found email but couldn't extract code/link" case a few
+            # lines down, which marks it seen too even when nothing usable
+            # was extracted. Any retry (a second run, or even a second poll
+            # inside the same 300s wait window) after the first sighting
+            # would never see that same email again, no matter how valid its
+            # link still was. Dropped `UNSEEN` — matches are still narrowed
+            # by the strict/weak-sender + subject checks right below, same
+            # as before; this only changes which ALREADY-READ emails remain
+            # eligible to be found again on a retry.
+            typ, data = mail.search(None, f'(SINCE "{imap_date}")')
 
             if typ == "OK" and data and data[0]:
                 msg_ids = data[0].split()

@@ -464,7 +464,22 @@ _MOTIVATION_AUTOFILL_EXCLUDE_RE = re.compile(
     r"\bgpa\b|degree (in|from)|"
     r"true and accurate|true and correct|to the best of my knowledge|"
     r"confirm that you|under penalty of perjury|"
-    r"how many years|how much experience",
+    r"how many years|how much experience|"
+    # Added 2026-09-11, alongside opening auto-drafting up to non-motivation
+    # opinion essays (draft_open_ended_essay): caught live, by testing this
+    # exact regex against "Describe your experience with risk modeling" —
+    # the ORIGINAL patterns above only matched "years of experience"/"how
+    # much experience" phrasing and missed this shape entirely, which would
+    # have let a fabricated skills/experience claim get auto-drafted and
+    # typed into a real application. Any question asking the candidate to
+    # describe/rate their own experience, skills, background, or
+    # proficiency with something is a qualification claim — never
+    # auto-answered by this module, motivation or opinion path alike.
+    r"your (experience|background|skills?|expertise|proficiency)|"
+    r"describe your (experience|background|skills?|expertise|proficiency)|"
+    r"(experience|skills?|expertise|proficiency|familiarity) (with|in|using)|"
+    r"have you (used|worked with|built|managed|led|implemented)|"
+    r"rate your\b",
     re.IGNORECASE,
 )
 
@@ -567,6 +582,130 @@ Write the draft answer now — first person, as the candidate.
 """
     try:
         draft = claude_engine._ask(prompt, system=_ESSAY_SYSTEM_PROMPT, max_tokens=500, fast=False)
+    except Exception:
+        return None
+    draft = (draft or "").strip()
+    return draft if draft else None
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Grounded drafting for open-ended OPINION/ENGAGEMENT essay questions
+#  (e.g. "How much did content from our blog influence you to apply?")
+#
+# Added 2026-09-11 per Raghav's explicit instruction: for essay questions
+# that are NOT a factual/qualification claim (no years-of-experience,
+# certification, sponsorship, salary, citizenship, or degree question —
+# see _MOTIVATION_AUTOFILL_EXCLUDE_RE, reused here as the exact same safety
+# boundary), the API should generate a grounded answer from available data
+# instead of leaving the field blank. This is a deliberate widening of the
+# 2026-08-30 motivation-essay auto-fill policy: that one only covered "why
+# this role/company" questions; this one covers open-ended opinion/
+# engagement questions more broadly (what draws you to something, how did
+# X influence you, describe how you approach Y, etc.).
+#
+# THE SAME HARD RULE STILL APPLIES: never invent specific content this
+# module wasn't given. For a question like the blog one, that means never
+# claiming to have read a specific blog post that wasn't provided — the
+# system prompt below explicitly forbids inventing specifics about content,
+# products, or company history not present in the JD text, and instructs an
+# honest, general answer grounded in what's actually known (the JD, the
+# real profile facts) rather than a fabricated anecdote.
+# ══════════════════════════════════════════════════════════════════
+
+_OPINION_ESSAY_SYSTEM_PROMPT = """You are drafting a short first-person answer to a
+real job application's open-ended question, on behalf of a real candidate. This
+draft will be shown to the candidate for their own review before anything is
+submitted — it is a starting point in their voice, not a final answer, and it
+will never be submitted automatically.
+
+Ground the answer ONLY in:
+  1. The actual job description text provided below.
+  2. The candidate facts provided below.
+
+Never invent:
+  - Specific content the candidate supposedly read, watched, or engaged
+    with (a specific blog post, article, video, tweet, etc.) that isn't
+    described in the JD text given to you. If the question assumes the
+    candidate engaged with something specific (e.g. "how much did our blog
+    influence you?") and no detail about that content is provided, answer
+    honestly and generally — e.g. genuine interest in the role/company/
+    mission as described in the JD — WITHOUT claiming to have read a
+    specific piece of content you were not given.
+  - Facts about the company (history, values, culture, funding, awards)
+    not stated in the JD text given to you.
+  - Personal history, projects, employers, or achievements not listed in
+    the candidate facts given to you.
+  - Any qualification, credential, years of experience, or factual claim
+    not explicitly present in the candidate facts.
+
+Write 1-3 short paragraphs (roughly 60-180 words total, matching what the
+question actually calls for — a short question gets a short answer), first
+person, professional but not stiff, honest in tone rather than falsely
+enthusiastic about specifics you don't have.
+"""
+
+
+def is_factual_or_qualification_claim(label: str) -> bool:
+    """True if `label` asks for a factual/qualification/legal claim this
+    module must never auto-answer (years of experience, certifications,
+    sponsorship, salary, citizenship, degrees, attestations, etc.). Reuses
+    the exact same boundary _MOTIVATION_AUTOFILL_EXCLUDE_RE already
+    enforces for motivation essays — this is the one safety gate shared by
+    every auto-drafted essay type in this module, deliberately not
+    duplicated with different wording per caller."""
+    return bool(_MOTIVATION_AUTOFILL_EXCLUDE_RE.search(label or ""))
+
+
+def draft_open_ended_essay(
+    label: str,
+    jd_text: str,
+    job_title: str = "",
+    company: str = "",
+) -> Optional[str]:
+    """
+    Draft a grounded answer for an open-ended OPINION/ENGAGEMENT essay
+    question that is NOT a "why this role/company" motivation question
+    (those go through draft_motivation_essay() instead) and NOT a factual/
+    qualification claim (callers must check is_factual_or_qualification_claim()
+    before auto-filling this draft — drafting still happens either way,
+    since generating the draft is harmless; only auto-filling is gated).
+    Returns None if the Claude API is unavailable or the call fails —
+    callers must treat None exactly like "no draft, route to
+    stuck_questions.json as-is."
+    """
+    if not label:
+        return None
+
+    try:
+        import claude_engine
+    except Exception:
+        return None
+
+    edu = rp.EDUCATION[0] if getattr(rp, "EDUCATION", None) else {}
+    exp = rp.EXPERIENCE[0] if getattr(rp, "EXPERIENCE", None) else {}
+    bullets = "\n".join(f"    - {b}" for b in exp.get("bullets", [])[:4])
+    jd_excerpt = (jd_text or "").strip()[:4000]
+
+    prompt = _profile_facts_block()
+    prompt += f"""
+CANDIDATE EDUCATION: {edu.get('degree', '')}, {edu.get('school', '')} ({edu.get('graduated', '')})
+CANDIDATE CURRENT ROLE: {exp.get('title', '')} at {exp.get('company', '')} ({exp.get('duration', '')})
+  {exp.get('summary', '')}
+  Real recent work on this role includes:
+{bullets}
+
+TARGET JOB TITLE: {job_title}
+TARGET COMPANY: {company}
+JOB DESCRIPTION (real, as posted — this is your only source for anything
+about the company or the role itself):
+{jd_excerpt}
+
+QUESTION TO ANSWER: {label}
+
+Write the draft answer now — first person, as the candidate.
+"""
+    try:
+        draft = claude_engine._ask(prompt, system=_OPINION_ESSAY_SYSTEM_PROMPT, max_tokens=350, fast=False)
     except Exception:
         return None
     draft = (draft or "").strip()

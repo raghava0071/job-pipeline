@@ -474,20 +474,27 @@ def main():
     # --no-workday is now the default unless explicitly overridden.
     _run_workday = args.workday_only  # only if explicitly requested
 
-    # ── Greenhouse — automatic DRY-RUN only, added 2026-08-31 ──────────────────
-    # See config.GREENHOUSE_AUTO_DRY_RUN's comment for why this exists. dry_run
-    # is hardcoded True here — NEVER args.dry_run — so this can't turn into a
-    # live Greenhouse submission just because someone runs `run_all.py --dry-run`
-    # (which would otherwise flip it False) or a bare `run_all.py` (which
-    # defaults args.dry_run to False, i.e. live, for LinkedIn/Indeed). Live
-    # Greenhouse submission stays exactly what it always was: only
-    # `--greenhouse-only --live`, run explicitly, never from this path.
+    # ── Greenhouse — automatic LIVE submission on the schedule, changed
+    # 2026-09-10 ─────────────────────────────────────────────────────────────
+    # Raghav's explicit request in chat: no more dry-runs, the 8am/12pm/6pm
+    # scheduled runs should actually submit for real going forward, not just
+    # preview. dry_run is now hardcoded False here — NEVER args.dry_run — for
+    # the same reason it was hardcoded True before: this can't accidentally
+    # flip based on how run_all.py itself was invoked (`--dry-run` or a bare
+    # call). The required-field completeness gate (v2.6.0) is UNCHANGED and
+    # still blocks any job missing a truthful required answer — this only
+    # removes the extra "stop before Submit no matter what" layer that sat
+    # on top of that gate. Concrete track record at the time of this change:
+    # 45 real --live attempts (2026-08-26 to 2026-08-30) were run manually
+    # before this, and ZERO submitted — every one was blocked by the same
+    # required-field gate. That gate, not this flag, is what has actually
+    # been preventing submissions.
     _run_greenhouse_auto = getattr(config, "GREENHOUSE_AUTO_DRY_RUN", False)
     gh_proc = None
     if _run_greenhouse_auto:
         gh_proc = mp.Process(
             target=run_greenhouse,
-            args=(args.gh_limit, True, result_queue),
+            args=(args.gh_limit, False, result_queue),
             name="Greenhouse"
         )
 
@@ -500,8 +507,8 @@ def main():
         print(f"  (Indeed disabled — config.INDEED_ENABLED = False)")
     print(f"  (Workday PAUSED — 0/116 success rate, email verification loops)")
     if _run_greenhouse_auto:
-        print(f"  (Greenhouse: automatic DRY-RUN pass — diagnostic only, never submits live; "
-              f"run --greenhouse-only --live yourself to actually apply)")
+        print(f"  (Greenhouse: LIVE — will submit for real on jobs that pass the "
+              f"required-field completeness gate; changed 2026-09-10 per Raghav's request)")
     else:
         print(f"  (Greenhouse not in the default run — unverified against a live posting; "
               f"run --greenhouse-only --dry-run first)")

@@ -78,7 +78,7 @@
 #   python greenhouse_apply_now.py --live --dry-run        # --dry-run wins: still just a dry-run
 # =============================================================================
 
-import os, sys, time, json, argparse, re, html
+import os, sys, time, json, argparse, re, html, atexit
 from pathlib import Path
 from datetime import datetime
 import requests
@@ -630,6 +630,136 @@ def _fill_basic_field(page, css_sel: str, label_words: list, value: str) -> bool
         except Exception:
             return False
     return False
+
+# ── Location (City) field ──────────────────────────────────────────────────
+#
+# ROOT CAUSE of the very first 5 real Submit attempts this pipeline ever
+# made (2026-09-10, 19:50-19:55, all logged "failed: submit not confirmed",
+# screenshots/gh_fail_submit_not_confirmed_2026091*.png): "Location (City)*"
+# is a react-select combobox, same family as EEO/Country, and the generic
+# blast-fill's blind `el.value = ans` never reaches it — LIVE-VERIFIED
+# 2026-09-10 by opening a real Gusto Greenhouse posting
+# (job-boards.greenhouse.io/gusto/jobs/8119978) and testing directly:
+#   - Setting .value via the native setter + a dispatched 'input' event
+#     (exactly what the generic blast-fill does) produces ZERO network
+#     calls and never opens the suggestion menu — react-select's own
+#     input-change handling never sees it.
+#   - Real per-character keystrokes (page.keyboard.type) DO open the menu
+#     and DO populate real suggestions (confirmed: typing "City, ST"
+#     rendered "City, State, United States" as
+#     div#react-select-candidate-location-option-0 inside
+#     div#react-select-candidate-location-listbox — NOT <li> elements,
+#     NOT role="option" attributes, NOT a Google "pac-item" — this is
+#     react-select's own emotion-styled markup, `div.select__option`).
+#   - Typed text alone is NOT enough: if the field loses focus (blur)
+#     without a suggestion having been clicked, react-select DISCARDS the
+#     typed text back to "" — confirmed live (typed "City, ST",
+#     blurred without clicking a suggestion, value reverted to empty).
+#     This is almost certainly what the three "Please enter your location"
+#     failure screenshots actually show: the field WAS typed into during
+#     the run, but Submit's own click sequence blurred it before/without
+#     a suggestion ever getting clicked, silently wiping it.
+#   - A properly targeted click on the real option element (not a guessed
+#     coordinate) DOES commit correctly — confirmed live: after the click,
+#     `.select__single-value` reads "City, State, United States"
+#     and the hidden native `<input required>` shadow-validation node
+#     (present while the field is empty) disappears entirely once a real
+#     selection is made.
+#   - CRITICAL: once a selection is committed, the VISIBLE text `<input>`
+#     goes back to value="" ON PURPOSE — react-select shows the chosen
+#     value via a separate `.select__single-value` div, not in the raw
+#     input. Checking `input.input_value()` for the fill's success (what
+#     this function did in its first version, right after being written)
+#     would misreport every real success as a failure. Verification here
+#     checks `.select__single-value` instead.
+def _fill_location_field(page, value: str) -> bool:
+    """Real per-character Playwright keystroke typing (a blind .value set
+    never opens the menu — confirmed live, see block comment above) to
+    trigger the real suggestion dropdown, then a genuine Playwright click
+    (not a guessed coordinate — a miss silently blurs and wipes the typed
+    text) on the option whose text actually matches the target city.
+    Verified via the committed `.select__single-value` text, never via the
+    raw input's value (which is intentionally emptied on a real selection)."""
+    found = _safe_eval(page, r"""
+        () => {
+            const lbl = Array.from(document.querySelectorAll('label')).find(
+                l => /location\s*\(city\)/i.test(l.innerText.trim()) || /^location\b/i.test(l.innerText.trim())
+            );
+            if (!lbl) return null;
+            let inp = lbl.htmlFor ? document.getElementById(lbl.htmlFor) : null;
+            if (!inp) inp = lbl.querySelector('input');
+            if (!inp) {
+                const container = lbl.closest('div');
+                inp = container ? container.querySelector('input') : null;
+            }
+            if (!inp) return null;
+            if (!inp.id) inp.setAttribute('data-gh-tmp-id', 'gh_loc_' + Math.random().toString(36).slice(2));
+            const sel = inp.id ? ('#' + CSS.escape(inp.id)) : ('[data-gh-tmp-id="' + inp.getAttribute('data-gh-tmp-id') + '"]');
+            const container = inp.closest('.select__container') || inp.closest('div');
+            return {sel, inputId: inp.id || null};
+        }
+    """)
+    if not found or not found.get("sel"):
+        return False
+    sel = found["sel"]
+    input_id = found.get("inputId")
+    try:
+        loc = page.locator(sel).first
+        if not loc.is_visible(timeout=1500):
+            return False
+        loc.click(timeout=2000)
+        loc.fill("")
+        page.keyboard.type(value, delay=60)
+
+        # Poll for real rendered suggestions (react-select's own menu,
+        # confirmed live to take ~2s, longer than a fixed 1s sleep covers).
+        city_token = value.split(",")[0].strip().lower()
+        option_sel = (f'[id^="react-select-{input_id}-option-"]' if input_id
+                      else '.select__menu .select__option')
+        chosen = None
+        for _ in range(10):
+            box = page.locator(option_sel)
+            n = box.count()
+            if n > 0:
+                for i in range(min(n, 10)):
+                    opt = box.nth(i)
+                    try:
+                        txt = (opt.inner_text() or "").lower()
+                    except Exception:
+                        continue
+                    if city_token in txt:
+                        chosen = opt
+                        break
+                if chosen is None:
+                    chosen = box.first
+                break
+            time.sleep(0.3)
+
+        if chosen is None:
+            return False
+        try:
+            chosen.click(timeout=2000)
+        except Exception:
+            return False
+        time.sleep(0.3)
+
+        # Success = a real committed selection, NOT a non-empty raw input
+        # (the raw input is emptied on purpose after a real selection —
+        # see block comment above).
+        single_value = _safe_eval(page, r"""
+            () => {
+                const lbl = Array.from(document.querySelectorAll('label')).find(
+                    l => /location\s*\(city\)/i.test(l.innerText.trim()) || /^location\b/i.test(l.innerText.trim())
+                );
+                const container = lbl ? (lbl.closest('.select__container') || lbl.closest('div')) : null;
+                const sv = container ? container.querySelector('.select__single-value') : null;
+                return sv ? sv.innerText : null;
+            }
+        """, None)
+        return bool(single_value and single_value.strip())
+    except Exception:
+        return False
+
 
 # ── Country field ─────────────────────────────────────────────────────────────
 #
@@ -1221,6 +1351,83 @@ def _click_open_combobox_option(page, trigger_sel: str, option_text: str) -> boo
         return False
 
 
+# ── Ack/consent fields that are really a Yes/No react-select ────────────────
+#
+# CORRECTED 2026-09-11 per Raghav's explicit instruction ("I want the system
+# to [check] the Acknowledgement box... this is the most important question,
+# applicant-tracking systems can filter the application out on it"). Prior
+# to today this field (2.14.12) was handled by queuing its own label text as
+# a blast-fill .value= — an honest, documented guess, since the DOM-shape
+# uncertainty from 2026-08-30/08-31/09-01 was never actually resolved.
+#
+# LIVE-VERIFIED today against a real posting
+# (job-boards.greenhouse.io/doordashusa/jobs/7967918): "Applicant Privacy
+# Acknowledgement" is NOT a checkbox and not free text — it is a
+# react-select combobox, same widget family as EEO/Country/Location, with
+# exactly two real options. Confirmed by walking the input element's React
+# fiber and reading the component's own `options` prop directly (ground
+# truth, not inferred from visible markup):
+#   [{"value": 1, "label": "Yes"}, {"value": 0, "label": "No"}]
+# So the old blast-fill guess (typing the label text into whatever element
+# the scraper's selector pointed to) was never going to land on a real
+# selection — same root-cause SHAPE as the Location/Country bugs fixed
+# earlier today, on a field previously undiagnosable without a live DOM.
+#
+# Fix reuses the SAME proven trigger-discovery + scoped-listbox-click
+# helpers already built and live-tested for EEO
+# (_eeo_trigger_candidates / _read_scoped_listbox_options /
+# _click_open_combobox_option) instead of writing a fourth near-duplicate
+# combobox interaction — this widget family is now handled by one shared
+# set of helpers used from three call sites (EEO, Country's combobox
+# fallback, and this).
+def _fill_ack_consent_field(page, label: str) -> bool:
+    """Selects "Yes" on an ack/consent question. Tries a real checkbox/radio
+    first (never assumes every company's Greenhouse config renders this
+    identically — if a future posting genuinely has one, this is still the
+    more direct, correct action). Falls back to the react-select
+    open-and-click-Yes interaction proven live today. Returns True only
+    after a real "Yes" selection is confirmed — never claims success blind."""
+    target_norm = label.rstrip(" *:").strip().lower()
+    real_type = _safe_eval(page, f"""
+        () => {{
+            const target = {json.dumps(target_norm)};
+            const lbl = Array.from(document.querySelectorAll('label')).find(
+                l => l.innerText.trim().toLowerCase().replace(/\\*\\s*$/, '').trim() === target
+            );
+            if (!lbl) return null;
+            const inp = lbl.htmlFor ? document.getElementById(lbl.htmlFor) : lbl.querySelector('input');
+            return inp ? inp.type : null;
+        }}
+    """, None)
+    if real_type in ("checkbox", "radio"):
+        try:
+            loc = page.get_by_label(label.rstrip(" *:"), exact=False).first
+            if loc.count() > 0:
+                loc.check(timeout=2000)
+                if loc.is_checked(timeout=1000):
+                    return True
+        except Exception:
+            pass
+
+    for trig_sel in _eeo_trigger_candidates(label):
+        try:
+            trig = page.locator(trig_sel).first
+            if trig.count() == 0 or not trig.is_visible(timeout=500):
+                continue
+            trig.click(timeout=2500)
+            time.sleep(0.25)
+            opts = _read_scoped_listbox_options(page, trig)
+            yes_opt = next((o for o in opts if o.strip().lower() == "yes"), None)
+            if not yes_opt:
+                page.keyboard.press("Escape")
+                continue
+            if _click_open_combobox_option(page, trig_sel, yes_opt):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _classify_field(f: dict) -> str:
     """Returns one of: "ack_consent", "eeo", "essay", "yes_no", "dropdown",
     "short_text". This decision is made from the field's real DOM type +
@@ -1230,7 +1437,21 @@ def _classify_field(f: dict) -> str:
     ftype = f.get("type", "")
     options = [str(o).strip().lower() for o in f.get("options", [])]
 
-    if ftype == "checkbox" and _is_pure_ack_consent(label):
+    # Changed 2026-09-10 at Raghav's EXPLICIT instruction in chat: previously
+    # gated behind `ftype == "checkbox"` — safe in principle (never
+    # auto-tick something whose real control we hadn't confirmed), but in
+    # practice this exact gate is what's been silently blocking DoorDash's
+    # "Applicant Privacy Acknowledgement" on every single posting all day
+    # (it scrapes as type='text', not 'checkbox' — three earlier live-DOM
+    # fixes for known checkbox-detection edge cases still don't catch it,
+    # meaning it's very likely not a real <input> at all on this rendering).
+    # Raghav's direct instruction: stop blocking on detection uncertainty —
+    # if the label reads as a pure ack/consent statement, answer it as
+    # acknowledged regardless of what raw type the scraper found. Dropped
+    # the ftype gate entirely; `_is_pure_ack_consent()`'s own label-based
+    # safety rule (never a factual/demographic claim, see its block comment)
+    # is what's actually doing the safety work here now, not the DOM type.
+    if _is_pure_ack_consent(label):
         return "ack_consent"
 
     if any(s in label for s in _EEO_SIGNALS):
@@ -1273,6 +1494,19 @@ def _classify_field(f: dict) -> str:
     if ftype in ("text", "number", "radio", "checkbox", "select") and "?" in label and re.match(
         r'^(are|do|does|is|have|has|will|can|would|did)\b', label
     ) and not any(s in label for s in _ESSAY_SIGNALS):
+        return "yes_no"
+
+    # SAME bug class as the sponsorship/SMS fixes above, found live
+    # 2026-09-10: Gusto's "This is a hybrid role based in San Francisco...
+    # Please confirm your current long-term location and ability to work in
+    # this hybrid schedule (yes/no)*" is explicitly self-labeled a yes/no
+    # question (literally says "(yes/no)") but starts with "This is" (not
+    # are/do/does/...) and has no "?", so it fell into the essay bucket
+    # below and got skipped as unanswerable on every posting using this
+    # phrasing. An explicit "(yes/no)" in the label is an unambiguous signal
+    # regardless of sentence shape — never a false positive on an unrelated
+    # essay prompt.
+    if "(yes/no)" in label or "(yes or no)" in label:
         return "yes_no"
 
     if ftype == "textarea" or any(s in label for s in _ESSAY_SIGNALS) or len(label) > 90:
@@ -1338,6 +1572,33 @@ def _known_factual_yes_no(label: str, company: str) -> str | None:
     if "relocat" in l:
         relocate = bool(rp.PROFILE.get("relocate", False)) if rp else False
         return "Yes" if relocate else "No"
+
+    # Current-residency / location-eligibility questions — changed 2026-09-10
+    # at Raghav's EXPLICIT instruction in chat, overriding the original
+    # 2026-09-10 version of this branch (which truthfully answered "No"
+    # against his real on-file address). His own words: he's told Claude
+    # directly to answer "Yes" to this whole class of question — "Do you
+    # currently reside in one of the following locations", "Are you
+    # currently based in San Francisco", and any similar location question —
+    # his stated reasoning being that he's willing to manage/relocate if he
+    # actually gets a call, so a "Yes" now isn't a claim he considers false
+    # in the way a fabricated work-authorization or degree claim would be.
+    # This is a deliberate policy decision by Raghav about his own
+    # applications, not a "truthful fact lookup" the way every other branch
+    # in this function is — flagged here in case this file is ever revisited
+    # and someone assumes every branch here is a strict honesty check.
+    # Covers both phrasings seen live: "reside/based/live/located in
+    # <city-list>" AND Gusto's "...confirm your current long-term location
+    # and ability to work in this hybrid schedule (yes/no)" pattern (now
+    # reachable here at all because of the paired `_classify_field()` fix
+    # for the literal "(yes/no)" signal, added the same session).
+    if (re.search(r'\b(currently\s+)?(reside|residing|resides|based|live|living|located)\s+in\b', l)
+        and any(t in l for t in ("one of the following", "metro area", "san francisco",
+                                   "new york", "denver", "seattle", "toronto", "austin",
+                                   "chicago", "boston", "los angeles"))) \
+       or ("location" in l and ("hybrid" in l or "schedule" in l)
+           and ("yes/no" in l or "yes or no" in l)):
+        return "Yes"
 
     if "applied" in l and any(p in l for p in ("before", "previously", "prior", "months", "past")):
         return "Yes" if _previously_applied_to_company(company) else "No"
@@ -1607,10 +1868,25 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
     }
 
     answers, uncached, essays, eeo_skipped = {}, [], [], []
+    eeo_click_failed = []  # separate from eeo_skipped — added 2026-09-10: a
+                            # real option WAS found here, only the widget
+                            # click missed (even after one retry); logging
+                            # these under the same generic "no decline
+                            # option found" status as genuinely-unresolvable
+                            # EEO fields was misleading for later debugging —
+                            # this is a live-click reliability issue, not a
+                            # missing/mismatched answer.
     essay_drafts = {}   # {label: grounded draft text} — for review only, never auto-filled
     eeo_live_filled = set()   # labels resolved via _open_eeo_combobox() + a direct
                                # Playwright click — must be excluded from the generic
                                # blast-fill pass below (see its itemsJson comment)
+    ack_click_failed = []     # added 2026-09-11: a real "Yes" option WAS found on the
+                               # ack/consent react-select, only the widget interaction
+                               # failed — separate from "no such field" for accurate logging,
+                               # same distinction eeo_click_failed already makes for EEO
+    ack_live_filled = set()   # labels resolved via _fill_ack_consent_field() + a direct
+                               # Playwright click — must be excluded from the generic
+                               # blast-fill pass below, same reason as eeo_live_filled
 
     for f in fields:
         lbl = f.get("label", "")
@@ -1635,8 +1911,42 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
             print(f"             🔍 DIAG     '{lbl}' looks like a pure ack/consent "
                   f"checkbox by its label but classified as '{category}', not "
                   f"'ack_consent' — raw type={f.get('type')!r} options={f.get('options')!r} "
-                  f"required={f.get('required')!r}. Needs a look before this can be fixed "
-                  f"for real; falling through to the normal unresolved-field handling below.")
+                  f"required={f.get('required')!r} sel={f.get('sel', f.get('gname'))!r}. "
+                  f"Needs a look before this can be fixed for real; falling through to the "
+                  f"normal unresolved-field handling below.")
+            # Added 2026-09-10: three prior fixes (2026-08-30, 08-31, 09-01) all
+            # correctly targeted checkbox-detection edge cases (offsetParent
+            # visibility, live .type vs attribute, nameless checkboxes) and
+            # this field STILL reaches here as type='text' — meaning it's
+            # very likely not a real <input> at all on this specific
+            # rendering (a custom widget, or genuinely a different control
+            # entirely). Rather than guess a 4th time with no live DOM to
+            # check against, capture the actual element + its parent's real
+            # markup right now so the NEXT live run (this pipeline is live
+            # as of today) gives real evidence instead of another blind
+            # attempt. Best-effort only — never let this diagnostic probe
+            # itself break the real fill pass.
+            try:
+                _sel = f.get("sel") or f.get("gname")
+                if _sel:
+                    _probe = page.evaluate(
+                        """(sel) => {
+                            const el = document.querySelector(sel);
+                            if (!el) return {found: false};
+                            const p = el.parentElement;
+                            return {
+                                found: true,
+                                tag: el.tagName,
+                                outerHTML: (el.outerHTML || '').slice(0, 300),
+                                parentTag: p ? p.tagName : null,
+                                parentOuterHTML: p ? (p.outerHTML || '').slice(0, 300) : null,
+                            };
+                        }""",
+                        _sel,
+                    )
+                    print(f"             🔍 DIAG-DOM {_probe}")
+            except Exception as _diag_e:
+                print(f"             🔍 DIAG-DOM probe failed (non-fatal): {_diag_e}")
 
         # ── Pure acknowledgment/consent checkbox — safe to auto-tick ─────────
         # See _is_pure_ack_consent()'s block comment for the exact rule. This
@@ -1648,10 +1958,25 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         # used for "i consent" / "save my answers for pre-filling" in
         # qa_answers.py), not an invented generic "checked" token.
         if category == "ack_consent":
-            answers[lbl] = lbl.rstrip(" *:")
-            print(f"             ✔ ACK      '{lbl}' → auto-checked "
-                  f"(privacy/consent acknowledgment — reading/agreeing to a "
-                  f"policy document, not a claim about Raghav)")
+            # CORRECTED 2026-09-11 — see _fill_ack_consent_field()'s block
+            # comment: live-verified this is a react-select Yes/No combobox
+            # on a real posting, not a checkbox and not free text. The old
+            # behavior here (queuing the label text as a blast-fill .value=)
+            # never actually committed a real selection to the widget —
+            # replaced with the same live, verified-before-claiming-success
+            # interaction Location/Country/EEO already use.
+            if _fill_ack_consent_field(page, lbl):
+                answers[lbl] = "Yes"
+                ack_live_filled.add(lbl)
+                print(f"             ✔ ACK      '{lbl}' → selected 'Yes' "
+                      f"(real widget selection, verified committed — "
+                      f"privacy/consent acknowledgment, not a claim about Raghav)")
+            else:
+                ack_click_failed.append(f)
+                print(f"             ⚠  ACK      '{lbl}' — could not confirm a real "
+                      f"'Yes' selection stuck (checkbox/radio not found, and no "
+                      f"react-select widget with a 'Yes' option could be opened/clicked); "
+                      f"left blank rather than claim success it can't verify")
             continue
 
         # ── EEO / self-identification ─────────────────────────────────────────
@@ -1718,11 +2043,35 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
                     answers[lbl] = chosen
                     eeo_live_filled.add(lbl)
                 else:
-                    click_failed = True
-                    print(f"             ⚠  EEO      '{lbl}' — found the real "
-                          f"'{chosen}' ({chosen_kind}) option in the opened widget but the "
-                          f"click didn't land; leaving unresolved rather than claiming success.")
-                    chosen = None
+                    # Retry once — added 2026-09-10, real live evidence: this
+                    # exact field (Gusto "I have a disability", WFM Capacity
+                    # posting) correctly found the real 'No' option every
+                    # time tonight except once, where only the click missed —
+                    # a one-off react-select portal timing miss, not a
+                    # missing/mismatched option (the whole rest of this run
+                    # proves the option and the matching logic are both
+                    # fine). A single retry with a freshly-reopened combobox
+                    # costs one extra click and only fires on an already-
+                    # failed attempt, so it can't make a genuine
+                    # missing-option case worse.
+                    retry_trigger, retry_opts = _open_eeo_combobox(page, lbl)
+                    retry_chosen = _find_eeo_answer_option(retry_opts, wanted) if (retry_opts and wanted) else None
+                    if retry_chosen and retry_trigger and _click_open_combobox_option(page, retry_trigger, retry_chosen):
+                        # Landed on retry — fall through to the SAME shared
+                        # "✔ EEO ... matched to this form's actual option"
+                        # print used by every other real-answer resolution
+                        # below (chosen_kind == "real"), rather than a
+                        # second, separate print here.
+                        answers[lbl] = retry_chosen
+                        eeo_live_filled.add(lbl)
+                        chosen, chosen_kind = retry_chosen, "real"
+                    else:
+                        click_failed = True
+                        print(f"             ⚠  EEO      '{lbl}' — found the real "
+                              f"'{chosen}' ({chosen_kind}) option in the opened widget but the "
+                              f"click didn't land, even after one retry; leaving unresolved "
+                              f"rather than claiming success.")
+                        chosen = None
 
             if chosen and lbl not in answers:
                 # Not filled via the live-click path above — either the
@@ -1751,11 +2100,12 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
                     page.keyboard.press("Escape")
                 except Exception:
                     pass
-            eeo_skipped.append(f)
             if click_failed:
+                eeo_click_failed.append(f)
                 print(f"             ⏭  EEO      '{lbl}' — left blank; a real option was found "
                       f"but the widget click failed (see the ⚠ line above), not a missing-option case.")
             else:
+                eeo_skipped.append(f)
                 print(f"             ⏭  EEO      '{lbl}' — left blank (self-identification, "
                       f"no decline option found on this form). Real options seen: "
                       f"{options if options else '(none captured)'}")
@@ -1777,16 +2127,42 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         # for review if one was generated.
         if category == "essay":
             draft = None
+            draft_kind = None
             try:
                 import profile_answers as _pa
                 draft = _pa.draft_motivation_essay(lbl, jd_text, job_title, company)
+                if draft:
+                    draft_kind = "motivation"
+                elif not _pa.is_factual_or_qualification_claim(lbl):
+                    # Added 2026-09-11 per Raghav's explicit instruction: a
+                    # non-motivation, non-factual open-ended question (e.g.
+                    # "how much did content from our blog influence you?")
+                    # now also gets a grounded API draft instead of being
+                    # left blank — see profile_answers.draft_open_ended_essay()
+                    # for the honesty rules (never invents specific content
+                    # it wasn't given). Factual/qualification claims (years
+                    # of experience, certifications, sponsorship, etc.) are
+                    # deliberately excluded — same boundary as motivation
+                    # essays, never auto-answered.
+                    draft = _pa.draft_open_ended_essay(lbl, jd_text, job_title, company)
+                    if draft:
+                        draft_kind = "opinion"
             except Exception as e:
                 print(f"             ⚠  Essay draft generation errored for '{lbl}': {e}")
 
-            if draft and _pa.is_pure_motivation_question(lbl):
+            if draft and draft_kind == "motivation" and _pa.is_pure_motivation_question(lbl):
                 answers[lbl] = draft
                 print(f"             ✔ ESSAY    '{lbl}' → auto-filled with a grounded "
                       f"motivation draft (real JD + real profile facts, not fabricated):")
+                for line in draft.splitlines():
+                    print(f"                          {line}")
+                continue
+
+            if draft and draft_kind == "opinion":
+                answers[lbl] = draft
+                print(f"             ✔ ESSAY    '{lbl}' → auto-filled with a grounded "
+                      f"opinion/engagement draft (real JD + real profile facts, honest "
+                      f"about not having read specific content it wasn't given):")
                 for line in draft.splitlines():
                     print(f"                          {line}")
                 continue
@@ -1824,10 +2200,20 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
                     answers[lbl] = source_val
                     print(f"             ✔ {source_name:<6}  '{lbl}' → '{str(source_val)[:60]}'")
                     found_valid = True
+                    break  # a source actually gave a usable answer — stop here
                 else:
                     print(f"             ⚠  {source_name} had '{str(source_val)[:40]}' for a yes/no "
                           f"question '{lbl}' — wrong shape, discarding instead of using it")
-                break  # only trust the first source that actually returned something
+                    # Bug fixed 2026-09-10 (found live: the same question hit
+                    # the Claude API twice in one run, for two different
+                    # DoorDash postings, because QA kept returning a stale
+                    # wrong-shaped match and this loop used to `break`
+                    # unconditionally right here — never reaching SAVED/CACHE
+                    # even though SAVED already had the correct answer from
+                    # moments earlier in the same run). Falling through
+                    # (no break) lets the next source in line — SAVED, then
+                    # CACHE — get a real chance instead of being skipped
+                    # just because QA happened to go first and got it wrong.
             if found_valid:
                 continue
 
@@ -1964,6 +2350,31 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         _log_stuck_fields(eeo_skipped, job_title, company,
                            status="EEO/self-identification — intentionally left blank, no "
                                   "decline-to-answer option was found on this form to select")
+    if eeo_click_failed:
+        # Added 2026-09-10 — see eeo_click_failed's own comment above: this
+        # is a live-widget click that missed (even after one retry), not a
+        # missing/mismatched option. A real, matching answer WAS found —
+        # logging that clearly here so a future run isn't misread as a
+        # matching-logic bug (see tonight's Gusto "I have a disability" case,
+        # which looked like an inconsistency until the actual log line
+        # showed a real match with a failed click, not a missing option).
+        _log_stuck_fields(eeo_click_failed, job_title, company,
+                           status="EEO/self-identification — a real matching answer WAS found, "
+                                  "but the react-select widget click didn't land (even after one "
+                                  "retry); this is a live-interaction reliability issue, not a "
+                                  "missing or mismatched option")
+    if ack_click_failed:
+        # Added 2026-09-11 — same distinction eeo_click_failed makes: the
+        # answer ("Yes") is always known and correct for this field type
+        # (see _fill_ack_consent_field()'s block comment), so a field
+        # landing here is a live-interaction reliability issue (no
+        # checkbox/radio found AND no react-select widget with a "Yes"
+        # option could be opened/clicked), never a missing-answer case.
+        _log_stuck_fields(ack_click_failed, job_title, company,
+                           status="Privacy/consent acknowledgment — the answer is known ('Yes'), "
+                                  "but neither a real checkbox/radio nor a react-select widget "
+                                  "with a 'Yes' option could be found/clicked; this is a "
+                                  "live-interaction reliability issue, not a missing answer")
     if uncached:
         _log_stuck_fields(uncached, job_title, company)
 
@@ -2029,7 +2440,8 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         # from also touching them (a react-select widget doesn't respond to
         # a raw .value= assignment; see the Country block comment for why
         # that already failed once for a different field).
-        "answer": "" if f.get("label", "") in eeo_live_filled else str(answers.get(f.get("label", ""), ""))
+        "answer": "" if f.get("label", "") in eeo_live_filled or f.get("label", "") in ack_live_filled
+                     else str(answers.get(f.get("label", ""), ""))
     } for f in fields])) or 0
 
     # ── Required-field completeness check — for live-submit gating ───────────
@@ -2285,6 +2697,38 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
             country_missing_required = True
             _failure_shot(page, f"country_fill_failed_{company}")
 
+    # ── Location (City) — see the block comment above _fill_location_field()
+    # for the root cause this fixes: a live Google-Places-style autocomplete
+    # that a blind .value= set (the generic smart-fill path) cannot satisfy.
+    # Same reasoning as Country above: checked/filled BEFORE the generic
+    # scrape so that pass sees a real, site-accepted value.
+    location_missing_required = False
+    try:
+        import raghav_profile as rp
+        location_value = rp.PROFILE.get("location", "City, ST")
+    except Exception:
+        location_value = "City, ST"
+    location_present = _safe_eval(page, r"""
+        () => !!Array.from(document.querySelectorAll('label')).find(
+            l => /location\s*\(city\)/i.test(l.innerText.trim()) || /^location\b/i.test(l.innerText.trim())
+        )
+    """, False)
+    if location_present:
+        location_required = _safe_eval(page, r"""
+            () => {
+                const lbl = Array.from(document.querySelectorAll('label')).find(
+                    l => /location\s*\(city\)/i.test(l.innerText.trim()) || /^location\b/i.test(l.innerText.trim())
+                );
+                return !!(lbl && lbl.innerText.includes('*'));
+            }
+        """, False)
+        filled_location = _fill_location_field(page, location_value)
+        print(f"          {'✅' if filled_location else '⚠ '} Location: "
+              f"{location_value if filled_location else 'COULD NOT confirm the autocomplete widget accepted a suggestion'}")
+        if not filled_location and location_required:
+            location_missing_required = True
+            _failure_shot(page, f"location_fill_failed_{company}")
+
     uploaded = upload_greenhouse_resume(page, resume_path)
     print(f"          {'✅' if uploaded else '⚠ '} Resume upload: {'attached' if uploaded else 'no upload field found — will need manual attach'}")
     time.sleep(1)
@@ -2324,6 +2768,22 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
         # never be persisted to the skip-cache (see config.py's
         # GREENHOUSE_SKIP_RECHECK_DAYS comment for why).
         record["unresolved_reason_type"] = "country_automation_gap"
+        return False, reason, record
+
+    if location_missing_required:
+        reason = ("SKIPPED — Location (City) is required but the page would not accept "
+                   "a suggestion (typed the value into the live Google-Places-style "
+                   "autocomplete and tried to click a matching rendered suggestion, "
+                   "not verified — see the location_fill_failed screenshot). The answer "
+                   f"is known ({location_value}); this is a form-automation gap, not a "
+                   "missing-fact one — report this back rather than retrying, the same "
+                   "failure will repeat.")
+        print(f"          🚫 {reason}")
+        record["skipped_incomplete"] = True
+        record["reason"] = reason
+        # Same reasoning as country_automation_gap above — a transient UI gap,
+        # not a structural missing-answer one, so never skip-cache this.
+        record["unresolved_reason_type"] = "location_automation_gap"
         return False, reason, record
 
     if fill_result["unresolved_required"]:
@@ -2446,7 +2906,68 @@ def _fetch_greenhouse_jobs_for_company(company_token: str) -> list:
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
+# ── Full-run stdout/stderr capture ──────────────────────────────────────────
+#
+# Added 2026-09-11 per Raghav's explicit priority instruction: "this is the
+# important thing in the pipeline because by this data only we take all the
+# decisions we need to fix." Every print() in this file (browser-tier
+# fallback messages, per-field fill results, the "submit not confirmed"
+# reasons, everything) was only ever visible in whatever terminal happened
+# to be running it — nothing was captured to a file. That's the exact gap
+# that made the 2026-09-10 "--no-sandbox banner" question unanswerable:
+# there was no log from that specific run to check which Chrome tier fired.
+class _TeeOutput:
+    """Duplicates every write to the real stream AND a log file, so a run's
+    full console output survives after the terminal/scheduler closes."""
+    def __init__(self, real_stream, log_fh):
+        self._real = real_stream
+        self._log = log_fh
+    def write(self, data):
+        self._real.write(data)
+        try:
+            self._log.write(data)
+        except Exception:
+            pass
+    def flush(self):
+        self._real.flush()
+        try:
+            self._log.flush()
+        except Exception:
+            pass
+
+
+def _start_run_log():
+    """Tees stdout/stderr to data/debug_logs/run_<timestamp>_greenhouse.log
+    for the lifetime of the process. Registered via atexit rather than a
+    try/finally around all of main() (main() is long — this avoids
+    re-indenting the whole function for one addition, per CLAUDE.md's
+    'edit specific lines' rule). Safe under both invocation styles: the
+    scheduled path runs this in its own mp.Process (log + restore die with
+    that process automatically), and the direct-CLI/--greenhouse-only path
+    exits shortly after main() returns anyway."""
+    try:
+        log_dir = cfg.BASE_DIR / "data" / "debug_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_greenhouse.log"
+        log_fh = open(log_path, "a", buffering=1)
+        orig_stdout, orig_stderr = sys.stdout, sys.stderr
+        sys.stdout = _TeeOutput(orig_stdout, log_fh)
+        sys.stderr = _TeeOutput(orig_stderr, log_fh)
+
+        def _restore():
+            sys.stdout, sys.stderr = orig_stdout, orig_stderr
+            try:
+                log_fh.close()
+            except Exception:
+                pass
+        atexit.register(_restore)
+        print(f"  📝 Full run output also being written to: data/debug_logs/{log_path.name}")
+    except Exception as e:
+        print(f"  ⚠  Could not start run-log capture ({e}) — continuing without it.")
+
+
 def main():
+    _start_run_log()
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit",   type=int, default=5)
     parser.add_argument("--dry-run", action="store_true",
@@ -2500,6 +3021,15 @@ def main():
     scored  = 0
     skipped = 0
     seen    = set()
+
+    # Structured per-run log (see pipeline_logger.py) — same mechanism
+    # linkedin_apply_now.py/indeed_apply_now.py already use. Writes
+    # data/runs/run_<timestamp>_greenhouse.json so any run (scheduled OR
+    # a manual/ad-hoc invocation) leaves one unambiguous, platform-labeled
+    # record of exactly what happened — no more inferring which platform
+    # ran when from the shared scheduler_*.log files.
+    from pipeline_logger import RunLogger
+    _run_log = RunLogger("greenhouse")
 
     # ── Clear stale Chromium SingletonLock — see workday_apply_now.py main()
     # for why this exact check exists (leftover lock from a session that
@@ -2710,25 +3240,30 @@ def main():
                 return
             seen.add(sk)
             if title and (not is_good_level(title, jd) or not is_relevant_domain(title)):
+                _run_log.job_skip(title, company, "senior/lead or off-domain title", url=url)
                 skipped += 1; return
 
             location = job.get("location", "")
             if not cfg.is_us_location(location):
                 print(f"  🚫 Non-US location ({location or 'unknown'}) — skipping: {title} @ {company}")
+                _run_log.job_skip(title, company, f"non-US location ({location or 'unknown'})", url=url)
                 skipped += 1; return
 
             blocked = getattr(cfg, "BLOCKED_COMPANIES", set())
             if any(b in company.lower() or b in url.lower() for b in blocked):
                 print(f"  🚫 Blocked company — skipping: {company}")
+                _run_log.job_skip(title, company, "blocked company", url=url)
                 skipped += 1; return
 
             staffing, s_reason = is_staffing_or_consultancy(company, jd)
             if staffing:
                 print(f"  ⏭  SKIP staffing/consultancy ({s_reason}): {company}")
+                _run_log.job_skip(title, company, f"staffing/consultancy: {s_reason}", url=url)
                 skipped += 1; return
 
             if already_applied(url, log, title, company):
                 print(f"  ↩  Already applied: {company} — {title}")
+                _run_log.job_skip(title, company, "already applied", url=url)
                 skipped += 1; return
 
             # ── Skip-cache fast path — see config.GREENHOUSE_SKIP_RECHECK_DAYS
@@ -2747,6 +3282,7 @@ def main():
                 print(f"  ⏭  SKIP (previously unresolved, unchanged since v{cached_skip['pipeline_version']}, "
                       f"{(datetime.now() - datetime.fromisoformat(cached_skip['timestamp'])).days}d ago): "
                       f"{company} — {title}: {cached_skip['reason'][:110]}")
+                _run_log.job_skip(title, company, f"skip-cache: {cached_skip['reason'][:80]}", url=url)
                 skipped += 1; return
 
             if not jd:
@@ -2773,6 +3309,7 @@ def main():
                         else getattr(cfg, "ATS_FIT_THRESHOLD", 60)
             print(f"  🎯 Fit: {score}%  {'✅' if score >= threshold else '❌'}")
             if score < threshold:
+                _run_log.job_skip(title, company, f"below fit threshold {score:.0f}%", fit_score=score, url=url)
                 skipped += 1; return
 
             resume_path = ""
@@ -2790,7 +3327,9 @@ def main():
                 resume_path = res[0] if isinstance(res, tuple) else str(res)
                 print(f"  ✅ Resume: {Path(resume_path).name}")
             except Exception as e:
-                print(f"  ⚠  Resume failed: {e}"); skipped += 1; return
+                print(f"  ⚠  Resume failed: {e}")
+                _run_log.job_skip(title, company, f"resume build failed: {e}", fit_score=score, url=url)
+                skipped += 1; return
 
             cover_path = ""
             try:
@@ -2803,6 +3342,7 @@ def main():
                 pass
 
             print(f"  🚀 Applying to {company}...")
+            _run_log.job_start(title, company, url, fit_score=score)
             _t0 = time.time()
             try:
                 success, reason, record = apply_to_greenhouse_job(
@@ -2838,6 +3378,10 @@ def main():
                     )
                 except Exception:
                     pass
+
+            _run_log.job_result(status, reason=reason,
+                                 fields_filled=len((record or {}).get("fields", {})),
+                                 resume_file=Path(resume_path).name if resume_path else "")
 
             # Remember a genuinely-structural skip (never a transient
             # UI-automation gap — see apply_to_greenhouse_job()'s comments)
@@ -2900,6 +3444,11 @@ def main():
     print(f"{'='*60}\n")
 
     _cache.print_stats()
+    _cache_stats = _cache.stats()
+    _run_log.finish(cache_hits=_cache_stats.get("hits", 0),
+                     cache_misses=_cache_stats.get("misses", 0),
+                     cache_total=_cache_stats.get("total_questions_cached", 0),
+                     jobs_found=scored + skipped)
     notifier.notify_session_done(applied, scored, skipped)
 
 

@@ -3466,6 +3466,15 @@ def main():
     skipped  = 0
     seen     = set()
 
+    # Structured per-run log (see pipeline_logger.py, same mechanism
+    # greenhouse_apply_now.py/linkedin_apply_now.py/indeed_apply_now.py use)
+    # — writes data/runs/run_<timestamp>_workday.json so a manual/ad-hoc
+    # invocation (e.g. --companies Tsys,Vizient) leaves the same clear,
+    # platform-labeled, timestamped record a scheduled run does, instead of
+    # only touching data/workday_applied_log.json with no run-level context.
+    from pipeline_logger import RunLogger
+    _run_log = RunLogger("workday")
+
     # Seed cache with Workday-specific field labels
     SEED = {
         "First Name":         "Raghavendra",
@@ -3623,14 +3632,17 @@ def main():
                 # distinguishable on sight instead of guessed at.
                 print(f"  🚫 Title/domain filter — skipping: \"{title}\" @ {company} "
                       f"(good_level={is_good_level(title)}, relevant_domain={is_relevant_domain(title)})")
+                _run_log.job_skip(title, company, "senior/lead or off-domain title", url=url)
                 skipped += 1; return
             # Blocked companies — skip entirely
             blocked = getattr(cfg, "BLOCKED_COMPANIES", set())
             if any(b in company.lower() or b in url.lower() for b in blocked):
                 print(f"  🚫 Blocked company — skipping: {company}")
+                _run_log.job_skip(title, company, "blocked company", url=url)
                 skipped += 1; return
             if already_applied(url, log, title, company):
                 print(f"  ↩  Already applied: {company} — {title}")
+                _run_log.job_skip(title, company, "already applied", url=url)
                 skipped += 1; return
 
             # Load job page to get description if missing
@@ -3663,6 +3675,7 @@ def main():
                          else getattr(cfg, "ATS_FIT_THRESHOLD", 60)
             print(f"  🎯 Fit: {score}%  {'✅' if score >= _threshold else '❌'}")
             if score < _threshold:
+                _run_log.job_skip(title, company, f"below fit threshold {score:.0f}%", fit_score=score, url=url)
                 skipped += 1; return
 
             # Build resume
@@ -3681,7 +3694,9 @@ def main():
                 resume_path = res[0] if isinstance(res, tuple) else str(res)
                 print(f"  ✅ Resume: {Path(resume_path).name}")
             except Exception as e:
-                print(f"  ⚠  Resume failed: {e}"); skipped += 1; return
+                print(f"  ⚠  Resume failed: {e}")
+                _run_log.job_skip(title, company, f"resume build failed: {e}", fit_score=score, url=url)
+                skipped += 1; return
 
             # Build cover letter
             cover_path = ""
@@ -3695,6 +3710,7 @@ def main():
 
             # Apply
             print(f"  🚀 Applying to {company}...")
+            _run_log.job_start(title, company, url, fit_score=score)
             try:
                 success, reason = apply_to_workday_job(
                     page, job, resume_path, cover_path,
@@ -3705,6 +3721,8 @@ def main():
 
             status = "Applied" if (success and not args.dry_run) else ("Dry-Run" if args.dry_run else "Failed")
             print(f"  {'✅' if success else '❌'} {status}: {reason}")
+            _run_log.job_result(status, reason=reason,
+                                 resume_file=Path(resume_path).name if resume_path else "")
 
             if success and not args.dry_run:
                 notifier.notify_applied(
@@ -3777,6 +3795,11 @@ def main():
     print(f"{'='*60}\n")
 
     _cache.print_stats()
+    _cache_stats = _cache.stats()
+    _run_log.finish(cache_hits=_cache_stats.get("hits", 0),
+                     cache_misses=_cache_stats.get("misses", 0),
+                     cache_total=_cache_stats.get("total_questions_cached", 0),
+                     jobs_found=scored + skipped)
     notifier.notify_session_done(applied, scored, skipped)
 
 

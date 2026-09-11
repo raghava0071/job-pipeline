@@ -1,4 +1,4 @@
-# Roadmap (updated 2026-09-09)
+# Roadmap (updated 2026-09-11)
 
 Strategic pivot, in priority order. Supersedes any earlier "add more platforms" framing.
 
@@ -13,6 +13,47 @@ DONE 2026-09-09. `greenhouse_apply_now.py` (guest-apply, honesty-gated: auto dry
 submission requires explicit `--greenhouse-only --live`) hardened (2.11.3 — never lose a record on
 a submit-exception, tag `Unverified`, block auto-retry) and extended with real account creation +
 Gmail OTP/verify-link completion (2.12.0).
+
+### Live-fire session, 2026-09-10/11 (v2.14.7 → v2.14.17)
+First real `--live` attempts ever made against Greenhouse. Root-caused and fixed, in order: a
+cache-chain bug that broke early instead of trying the next answer source; EEO combobox clicks
+that missed without retry; `mail_reader.py`'s IMAP search excluding already-seen mail (plausible
+Workday OTP-loop cause, unconfirmed); RunLogger wired into Greenhouse/Workday so run data can be
+trusted; two explicit policy changes at Raghav's instruction (residency/location questions answer
+"Yes"; Acknowledgement-type questions get answered, not skipped on detection uncertainty); the
+"Location (City)" field's real bug — it's a react-select combobox requiring a real typed-then-
+clicked suggestion, not a `.value=` set — found by live-testing the actual DOM, first attempt
+(2.14.13) shipped with two of its own bugs (wrong option selector, wrong success check) caught and
+fixed same night (2.14.14) by testing again rather than trusting the first fix; full run-output
+logging to `data/debug_logs/` so browser-tier/behavior questions never again require guessing;
+opinion/engagement essay questions (not factual claims) now get an API-drafted, auto-filled answer;
+and the "Applicant Privacy Acknowledgement" field's real shape was finally found (also a
+react-select, with real options `Yes`/`No`, read directly off the page's own React state) and fixed
+properly, replacing the 2.14.12 guess. Full detail in `CHANGELOG.md`.
+
+Recurring lesson this session: every fix uncovered the next problem once actually tested against a
+live page. Don't treat any "fixed" claim as final until a real `--live` run confirms it.
+
+### Next-phase plan of action (adopted 2026-09-11, informed by comparing against similar open-source
+projects — `claude-apply`/`career-ops` on GitHub)
+- **Phase 0 (immediate)**: clear the `.git` lock, commit the v2.14.17 baseline, then run
+  `python3 greenhouse_apply_now.py --live --limit 3` and read that run's actual log/receipts/
+  screenshots — the only way to know if tonight's fixes hold under real automation.
+- **Phase 1 (right after, only once Phase 0 shows real results)**: fix whatever Phase 0 actually
+  reveals, nothing preemptive. Add a Playwright "liveness check" pass on discovered postings before
+  they enter the pipeline (drop expired/stale listings) — borrowed from `claude-apply`'s `--verify`
+  flag.
+- **Phase 2 (bigger effort, once Phase 0/1 are stable)**: switch Greenhouse job discovery from
+  Google-search queries to Greenhouse's own public per-company job-board API
+  (`boards-api.greenhouse.io/v1/boards/<company>/jobs`) — more complete, not Google-rate-limited,
+  same approach every comparable project uses. Also investigate CDP-attach to a real (but
+  dedicated, not daily-driver) Chrome profile instead of launching a separate automated browser —
+  addresses the unresolved "--no-sandbox banner" question and the Tier1/2/3 launch complexity at
+  the root, the way `claude-apply` does ("no stealth, runs in your own Chrome, as you").
+- **Phase 3 (optional, lower priority)**: ghost-job/reposted-listing detection (`career-ops` has
+  this); a human-review checkpoint between scoring and auto-apply (both comparable projects have
+  one, ours deliberately doesn't — full autonomy is the stated goal here, so this is noted, not
+  recommended).
 
 ## 3. Receipts log — before adding more ATS handlers
 DONE 2026-09-09. `receipts.py` — shared, platform-agnostic, one `data/receipts.json` for every
