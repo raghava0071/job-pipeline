@@ -69,8 +69,22 @@ fi
 if [ "$PUSH" = true ]; then
   echo ""
   echo "Pushing to GitHub..."
-  git push origin main 2>/dev/null || git push origin master 2>/dev/null
-  echo "✅ Also pushed to GitHub: $(git remote get-url origin)"
+  # BUG FIX 2026-09-11 (found live, same session as the exit-0 fix above):
+  # both push attempts redirected stderr to /dev/null, so a REAL failure
+  # (auth, no upstream, network, diverged history — anything) printed
+  # nothing at all. Combined with `set -e` at the top of this script, a
+  # failure here didn't just hide the error — it killed the script
+  # mid-block, before the unconditional "✅ Also pushed" line even ran, so
+  # Raghav saw "Pushing to GitHub..." and then nothing, no error, no
+  # success message, just the prompt back. Now: real stderr shown, and the
+  # success message only prints if a push actually succeeded — a failure
+  # says so explicitly instead of leaving it ambiguous.
+  if git push origin main || git push origin master; then
+    echo "✅ Also pushed to GitHub: $(git remote get-url origin)"
+  else
+    echo "❌ Push FAILED — see the git error above for the real reason (auth, network, no upstream, etc)."
+    echo "   Nothing was lost — your commit is still safe locally. It's just not backed up to GitHub yet."
+  fi
 fi
 
 echo ""
