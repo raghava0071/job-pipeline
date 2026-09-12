@@ -45,20 +45,27 @@ git add \
 STAGED=$(git diff --cached --name-only 2>/dev/null)
 if [ -z "$STAGED" ]; then
   echo "ℹ️  Nothing new to save — already up to date."
+else
+  echo "Files being saved:"
+  echo "$STAGED" | sed 's/^/  ✅ /'
   echo ""
-  exit 0
+
+  # Commit locally
+  git commit -m "$MSG"
+  echo "✅ Snapshot saved locally."
+  echo "   Commit: $(git log -1 --oneline)"
 fi
 
-echo "Files being saved:"
-echo "$STAGED" | sed 's/^/  ✅ /'
-echo ""
-
-# Commit locally
-git commit -m "$MSG"
-echo "✅ Snapshot saved locally."
-echo "   Commit: $(git log -1 --oneline)"
-
-# Push to GitHub only if --push was passed
+# BUG FIX 2026-09-11 (found live by Raghav): --push used to be INSIDE the
+# "nothing new to save" early-exit above, via a bare `exit 0` before this
+# block ever ran. Committing (new changes) and pushing (existing commits to
+# GitHub) are two separate concerns — running `snapshot.sh --push` right
+# after `snapshot.sh "msg"` (a very natural two-step habit) had nothing NEW
+# to stage on the second call, so it exited before ever reaching the push
+# step. Real consequence: 137 local commits sat completely unpushed,
+# un-backed-up, with the tool reporting success both times. Push now always
+# runs when --push is passed, regardless of whether this call had anything
+# new to commit.
 if [ "$PUSH" = true ]; then
   echo ""
   echo "Pushing to GitHub..."
