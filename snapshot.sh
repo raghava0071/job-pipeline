@@ -79,7 +79,13 @@ if [ "$PUSH" = true ]; then
   # success message, just the prompt back. Now: real stderr shown, and the
   # success message only prints if a push actually succeeded — a failure
   # says so explicitly instead of leaving it ambiguous.
-  if git push origin main || git push origin master; then
+  # Fixed 2026-09-11: was hardcoded to try "main" then always fall back to
+  # "master" even on a repo (this one) that only has "main" — that fallback
+  # always fails with "src refspec master does not match any", printing a
+  # second, confusing error underneath the real one. Push whatever branch
+  # is actually checked out instead of guessing between two fixed names.
+  BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo main)
+  if git push origin "$BRANCH"; then
     echo "✅ Also pushed to GitHub: $(git remote get-url origin)"
   else
     echo "❌ Push FAILED — see the git error above for the real reason (auth, network, no upstream, etc)."
