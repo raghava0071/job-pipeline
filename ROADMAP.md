@@ -14,7 +14,28 @@ submission requires explicit `--greenhouse-only --live`) hardened (2.11.3 — ne
 a submit-exception, tag `Unverified`, block auto-retry) and extended with real account creation +
 Gmail OTP/verify-link completion (2.12.0).
 
-### Live-fire session, 2026-09-10/11 (v2.14.7 → v2.14.17)
+### STANDING FACT, confirmed by Raghav 2026-09-11: Greenhouse CAN require Gmail OTP entry
+Correction to this file's own long-standing assumption ("Greenhouse guest-apply — no account
+creation, no login, no OTP" — stated as fact since the 2026-08-24 original build and repeated
+throughout this session). Raghav directly observed a real Greenhouse application prompt for an OTP
+sent to the Gmail address given in the application, near the END of the flow — the pipeline had no
+handling for this at all and the application failed. This is NOT the same as Workday's account-
+creation flow; it appears to be a lighter verification step Greenhouse itself can add on some
+postings. No log/screenshot evidence of this exact case captured yet (it happened before
+`greenhouse_apply_now.py` had run-output logging, and/or on a run not yet cross-checked against
+`data/debug_logs/`). Next occurrence: capture the URL/company and a screenshot before attempting any
+fix — same rule as everything else this session, evidence before code.
+
+UPDATE 2026-09-11 (v2.14.19): fix shipped, but NOT yet live-verified. Code investigation found the
+pipeline already had a full Gmail-OTP mechanism (`mail_reader.wait_for_otp()` +
+`_complete_greenhouse_email_verification()`) — it was just gated to check ONLY once, right after
+page load, so an OTP appearing after Submit (Raghav's exact case) was invisible to it.
+`submit_greenhouse_application()` now also checks for the verification prompt after a failed submit
+click and re-uses the same Gmail-read/code-entry path. Still no real screenshot/DOM evidence of the
+actual post-submit prompt's markup — watch the next live run closely; the phrase-list/selector may
+need a same-night follow-up fix once real evidence exists, same pattern as Location/Ack.
+
+### Live-fire session, 2026-09-10/11 (v2.14.7 → v2.14.18)
 First real `--live` attempts ever made against Greenhouse. Root-caused and fixed, in order: a
 cache-chain bug that broke early instead of trying the next answer source; EEO combobox clicks
 that missed without retry; `mail_reader.py`'s IMAP search excluding already-seen mail (plausible

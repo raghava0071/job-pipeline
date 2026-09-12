@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.14.17"
+PIPELINE_VERSION = "2.14.22"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -872,6 +872,9 @@ CANDIDATE_NAME      = _env("CANDIDATE_NAME", "Your Name")
 CANDIDATE_LOCATION  = _env("HOME_CITY_STATE", "City, ST")
 CANDIDATE_EMAIL     = _env("CANDIDATE_EMAIL", "your.email@gmail.com")
 CANDIDATE_PHONE     = _env("HOME_PHONE", "")
+CANDIDATE_ZIP       = _env("HOME_ZIP", "")   # added 2026-09-11 — wires up "Zip Code/Postal
+                                              # Code" form fields (Raghav's real ZIP was
+                                              # already sitting in .env, unused until now)
 WORK_AUTH           = "F-1 OPT/STEM OPT — authorized, no sponsorship needed"
 DEGREE              = "M.S. Data Science & Analytics, Florida Atlantic University (2025)"
 YEARS_EXP_TOTAL     = "3+"

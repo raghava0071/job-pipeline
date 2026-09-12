@@ -1034,6 +1034,27 @@ _ESSAY_SIGNALS = (
 
 _YES_NO_OPTION_WORDS = {"yes", "no", "true", "false"}
 
+# ── Low-stakes "how did you hear about us" style questions ──────────────────
+# Added 2026-09-11, Raghav's explicit instruction: "it's not an important
+# question, it can answer like LinkedIn, job posting, Google, events — the
+# pipeline can answer any one of this." Unlike every other question class in
+# this file, there is deliberately NO single truthful answer required here —
+# any real option on the form is fine, since nothing about Raghav himself is
+# being asserted (contrast with a skills/experience checkbox group, which
+# WOULD be a fabrication risk and must never be auto-answered this way).
+# Kept as its own narrow signal list, not a broadening of the general
+# dropdown/checkbox classification, so this permissive rule can never
+# accidentally apply to a different multi-select question.
+_LOW_STAKES_SOURCE_SIGNALS = (
+    "how did you hear about", "how did you find out about",
+    "how did you learn about", "how did you hear about us",
+    "referral source", "source of your application", "how did you find us",
+)
+
+def _is_low_stakes_source_question(label: str) -> bool:
+    l = label.lower()
+    return any(s in l for s in _LOW_STAKES_SOURCE_SIGNALS)
+
 # ── Pure acknowledgment/consent checkboxes ────────────────────────────────
 #
 # Added 2026-08-29. THE RULE (per Raghav's explicit spec): a checkbox is
@@ -1044,10 +1065,12 @@ _YES_NO_OPTION_WORDS = {"yes", "no", "true", "false"}
 # least 18", "I am eligible to work"), it stops being pure boilerplate and
 # becomes a truthfulness claim — those must go through the normal
 # fact-checked yes/no path (or stay stuck if unknown), never a blanket
-# auto-tick. _ACK_EXCLUDE_SIGNALS is checked FIRST and wins over
-# _ACK_CONSENT_SIGNALS if both match, so a checkbox can never be
-# miscategorized as pure boilerplate just because it also contains a
-# policy-sounding word.
+# auto-tick. _ACK_QUALIFICATION_EXCLUDE_SIGNALS and
+# _ACK_DEMOGRAPHIC_EXCLUDE_SIGNALS are checked FIRST and win over
+# _ACK_CONSENT_SIGNALS if both match (except the narrow process-consent
+# carve-out on the demographic list — see _ACK_PROCESS_CONSENT_SIGNALS),
+# so a checkbox can never be miscategorized as pure boilerplate just
+# because it also contains a policy-sounding word.
 #
 # This also intentionally excludes demographic/EEO-linked consent (e.g. a
 # GDPR "I consent to my demographic data being processed" checkbox) — that
@@ -1065,10 +1088,16 @@ _ACK_CONSENT_SIGNALS = (
     "terms of service", "terms and conditions",
 )
 
-_ACK_EXCLUDE_SIGNALS = (
-    # demographic/EEO-linked consent — handled by the EEO bucket instead
+_ACK_DEMOGRAPHIC_EXCLUDE_SIGNALS = (
+    # demographic/EEO-linked consent — handled by the EEO bucket instead,
+    # UNLESS the label is a meta-consent to the PROCESS of collecting/
+    # storing already-given answers (see _ACK_PROCESS_CONSENT_SIGNALS carve-
+    # out below) rather than itself asking to reveal a demographic fact.
     "demographic", "race", "ethnicity", "gender", "disability", "veteran",
     "sexual orientation", "self-identif", "self identif",
+)
+
+_ACK_QUALIFICATION_EXCLUDE_SIGNALS = (
     # factual/qualification assertions about Raghav himself — not a mere
     # "I read this document" acknowledgment, so this must go through the
     # normal truthfulness-checked path instead of a blanket auto-tick
@@ -1078,13 +1107,34 @@ _ACK_EXCLUDE_SIGNALS = (
     "true and correct", "to the best of my knowledge",
 )
 
+# Added 2026-09-11 — found live on Chime's posting: "By checking this box, I
+# consent to Chime Financial, Inc collecting, storing, and processing my
+# responses to the demographic data surveys above." matches "i consent to"
+# (a real ack signal) but also "demographic" (an EXCLUDE signal meant for
+# actual EEO questions), so it fell through every bucket — not ack_consent,
+# not EEO (no EEO question wording of its own), landing in essay/uncached
+# and getting logged as "no truthful answer" even though the truthful answer
+# (consent to the process, given the demographic answers were already
+# provided above) is obvious and known. This is a META-consent to data
+# HANDLING, not a request to reveal a demographic fact — the carve-out below
+# distinguishes the two.
+_ACK_PROCESS_CONSENT_SIGNALS = (
+    "collecting", "storing", "processing", "collect and process",
+    "store and process", "collection and processing",
+)
+
 def _is_pure_ack_consent(label: str) -> bool:
     """See the block comment above — the ONLY things this may return True
     for are checkboxes that do nothing but acknowledge/consent to reading a
-    policy document. Never a fact or qualification claim about Raghav."""
+    policy document (or consenting to data handling of answers already
+    given elsewhere). Never a fact or qualification claim about Raghav,
+    and never an actual EEO question asking him to reveal a demographic."""
     l = label.lower()
-    if any(s in l for s in _ACK_EXCLUDE_SIGNALS):
+    if any(s in l for s in _ACK_QUALIFICATION_EXCLUDE_SIGNALS):
         return False
+    if any(s in l for s in _ACK_DEMOGRAPHIC_EXCLUDE_SIGNALS):
+        if not any(s in l for s in _ACK_PROCESS_CONSENT_SIGNALS):
+            return False
     return any(s in l for s in _ACK_CONSENT_SIGNALS)
 
 _DECLINE_PHRASES = (
@@ -1380,13 +1430,20 @@ def _click_open_combobox_option(page, trigger_sel: str, option_text: str) -> boo
 # combobox interaction — this widget family is now handled by one shared
 # set of helpers used from three call sites (EEO, Country's combobox
 # fallback, and this).
-def _fill_ack_consent_field(page, label: str) -> bool:
-    """Selects "Yes" on an ack/consent question. Tries a real checkbox/radio
-    first (never assumes every company's Greenhouse config renders this
-    identically — if a future posting genuinely has one, this is still the
-    more direct, correct action). Falls back to the react-select
-    open-and-click-Yes interaction proven live today. Returns True only
-    after a real "Yes" selection is confirmed — never claims success blind."""
+def _fill_yes_no_combobox(page, label: str, desired: str) -> bool:
+    """Generic live-fill for a Yes/No question rendered as a react-select
+    combobox — same widget family as EEO/Country/Location/Acknowledgement,
+    which a blind blast-fill `.value=` set cannot commit to (proven live
+    three separate times tonight). Added 2026-09-11 after the Gusto
+    residency question ("Do you currently reside in one of the following
+    locations?") showed the same empty/red-error symptom in a real
+    screenshot even though the policy answer ("Yes") was already resolved
+    correctly — the answer was right, only the widget interaction was
+    missing. Tries a real checkbox/radio first, then the open-and-click-
+    option interaction already proven for Acknowledgement. Returns True
+    only after the REAL `desired` option is confirmed selected — never
+    claims success blind. `desired` must be exactly "Yes" or "No"."""
+    desired_norm = desired.strip().lower()
     target_norm = label.rstrip(" *:").strip().lower()
     real_type = _safe_eval(page, f"""
         () => {{
@@ -1399,7 +1456,7 @@ def _fill_ack_consent_field(page, label: str) -> bool:
             return inp ? inp.type : null;
         }}
     """, None)
-    if real_type in ("checkbox", "radio"):
+    if real_type in ("checkbox", "radio") and desired_norm == "yes":
         try:
             loc = page.get_by_label(label.rstrip(" *:"), exact=False).first
             if loc.count() > 0:
@@ -1417,11 +1474,52 @@ def _fill_ack_consent_field(page, label: str) -> bool:
             trig.click(timeout=2500)
             time.sleep(0.25)
             opts = _read_scoped_listbox_options(page, trig)
-            yes_opt = next((o for o in opts if o.strip().lower() == "yes"), None)
-            if not yes_opt:
+            match_opt = next((o for o in opts if o.strip().lower() == desired_norm), None)
+            if not match_opt:
                 page.keyboard.press("Escape")
                 continue
-            if _click_open_combobox_option(page, trig_sel, yes_opt):
+            if _click_open_combobox_option(page, trig_sel, match_opt):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _fill_ack_consent_field(page, label: str) -> bool:
+    """Selects "Yes" on an ack/consent question. Thin wrapper over
+    _fill_yes_no_combobox() — kept as its own name since ack/consent call
+    sites and log messages refer to it specifically."""
+    return _fill_yes_no_combobox(page, label, "Yes")
+
+
+def _fill_linkedin_field(page, label: str, value: str) -> bool:
+    """Verified fill for a LinkedIn Profile text field, added 2026-09-11.
+    A real run left "linked." (truncated) in this field with a required-
+    field error even though the stored value (qa_answers.py) is a correct,
+    full URL and the field itself is a plain <input>, not a react-select —
+    nothing found in this codebase explains that truncation, so rather
+    than guess at a cause, this uses Playwright's own `.fill()` (real
+    focus + input events, waits for the element to be actionable) instead
+    of the generic blast-fill's single JS `.value=` set, then reads the
+    value back and only returns True if it actually landed intact."""
+    candidates = []
+    try:
+        loc = page.get_by_label(re.compile(re.escape(label.rstrip(" *:")), re.I)).first
+        if loc.count() > 0:
+            candidates.append(loc)
+    except Exception:
+        pass
+    candidates += [
+        page.locator('input[name*="linkedin" i]').first,
+        page.locator('input[id*="linkedin" i]').first,
+        page.locator('input[aria-label*="linkedin" i]').first,
+    ]
+    for el in candidates:
+        try:
+            el.wait_for(state="visible", timeout=2000)
+            el.fill(value)
+            actual = el.input_value(timeout=1000)
+            if actual and actual.strip() == value.strip():
                 return True
         except Exception:
             continue
@@ -1430,9 +1528,9 @@ def _fill_ack_consent_field(page, label: str) -> bool:
 
 def _classify_field(f: dict) -> str:
     """Returns one of: "ack_consent", "eeo", "essay", "yes_no", "dropdown",
-    "short_text". This decision is made from the field's real DOM type +
-    its options + its label — never from what answer happens to be cached
-    for it."""
+    "source_question", "short_text". This decision is made from the field's
+    real DOM type + its options + its label — never from what answer
+    happens to be cached for it."""
     label = f.get("label", "").lower().strip()
     ftype = f.get("type", "")
     options = [str(o).strip().lower() for o in f.get("options", [])]
@@ -1511,6 +1609,15 @@ def _classify_field(f: dict) -> str:
 
     if ftype == "textarea" or any(s in label for s in _ESSAY_SIGNALS) or len(label) > 90:
         return "essay"
+
+    # Checked AFTER essay/length (a "how did you hear about us" question is
+    # never a real essay) but BEFORE the ftype=="select"-only dropdown check
+    # below — this class of question renders as a CHECKBOX GROUP on
+    # Greenhouse just as often as a real <select> (confirmed live: Gusto's
+    # "select all that apply" version), and the dropdown branch below would
+    # never catch it since it gates on ftype=="select" specifically.
+    if _is_low_stakes_source_question(label):
+        return "source_question"
 
     if ftype == "select" and options:
         return "dropdown"
@@ -1660,7 +1767,10 @@ def _known_factual_yes_no(label: str, company: str) -> str | None:
 
     return None
 
-def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: str) -> dict:
+def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: str,
+                                   country_already_filled: bool = False,
+                                   location_already_filled: bool = False,
+                                   location_value: str = "") -> dict:
     """Fills every remaining labeled field on the form: Greenhouse custom
     questions + the standard EEO/voluntary-disclosure block. Ported from
     workday_apply_now.py's _smart_fill_questions — that function is already
@@ -1832,7 +1942,7 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
     """, []) or []
 
     if not fields:
-        return {"filled": 0, "total_fields": 0, "answers": {}, "unresolved_required": []}
+        return {"filled": 0, "total_fields": 0, "answers": {}, "unresolved_required": [], "all_questions": []}
     print(f"          📋 {len(fields)} field(s) to fill (custom questions + EEO)")
 
     _smart_salary = _pick_salary(jd_text, job_title)
@@ -1860,8 +1970,10 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         "remote": "Yes",
         "years of experience": str(getattr(cfg, "YEARS_EXPERIENCE", 3)),
         "background check": "Yes", "drug test": "Yes", "18 or older": "Yes",
+        "zip code": getattr(cfg, "CANDIDATE_ZIP", ""),       # added 2026-09-11, real
+        "postal code": getattr(cfg, "CANDIDATE_ZIP", ""),    # value from .env HOME_ZIP
         "us citizen": "No", "green card": "No", "permanent resident": "No",
-        "linkedin": "https://www.linkedin.com/in/yourusername",
+        "linkedin": "https://www.linkedin.com/in/yourusername/",
         "github": "https://github.com/raghava0071",
         "how did you hear": "LinkedIn / Online Job Board",
         "pronoun": "He/Him",
@@ -1887,10 +1999,67 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
     ack_live_filled = set()   # labels resolved via _fill_ack_consent_field() + a direct
                                # Playwright click — must be excluded from the generic
                                # blast-fill pass below, same reason as eeo_live_filled
+    yesno_live_filled = set() # added 2026-09-11 — labels resolved via _fill_yes_no_combobox()
+                               # for a Yes/No question that turned out to be a react-select
+                               # (e.g. residency). Unlike ack_live_filled, a failed attempt
+                               # here is NOT treated as stuck — it just falls through to the
+                               # normal blast-fill below exactly as before this change, since
+                               # plenty of yes_no fields really are plain <select>/radio and
+                               # blast-fill already handles those fine.
+    pre_live_filled = set()   # added 2026-09-11 — see the block comment right below
 
     for f in fields:
         lbl = f.get("label", "")
         lbl_l = lbl.lower().strip().rstrip(" *:?")
+
+        # ── Country / Location already filled live, BEFORE this function ran ──
+        # Found live 2026-09-11: this function independently re-discovers and
+        # re-answers Country/Location via its own QA/SAVED/CACHE lookup (e.g.
+        # "✔ SAVED 'Location (City)*' → 'City'" in a real run's log),
+        # even though the CALLER already filled these fields live via
+        # _fill_country_field()/_fill_location_field() moments earlier. That
+        # duplicate answer then flowed into the blast-fill pass below, which
+        # sets it via a blind `.value=` — the exact mechanism already proven
+        # today not to work on these react-select widgets. On a run where the
+        # live fill actually succeeded, this blind re-write could silently
+        # reset/corrupt it before Submit; that's a real, live-suspected
+        # explanation for why Location's success was inconsistent job-to-job
+        # in the same run even after the dedicated fix landed. Skipping
+        # re-answering AND re-blast-filling these labels entirely once the
+        # caller confirms they're already handled.
+        if country_already_filled and re.match(r'^country\b', lbl_l):
+            answers[lbl] = "United States of America"
+            pre_live_filled.add(lbl)
+            print(f"             ⏭  '{lbl}' — already filled live via _fill_country_field(); "
+                  f"not re-answered or re-blast-filled")
+            continue
+        if location_already_filled and re.search(r'location\s*\(city\)|^location\b', lbl_l):
+            answers[lbl] = location_value or "City"
+            pre_live_filled.add(lbl)
+            print(f"             ⏭  '{lbl}' — already filled live via _fill_location_field(); "
+                  f"not re-answered or re-blast-filled")
+            continue
+
+        # ── LinkedIn Profile — verified live-fill instead of blast-fill ───────
+        # Added 2026-09-11: a real run left "linked." (truncated) in this
+        # field with a required-field error, even though the stored value
+        # (qa_answers.py) is a correct, full URL and the field is a plain
+        # <input>, not a react-select — nothing in this codebase explains a
+        # truncation, so rather than guess, this stops trusting the generic
+        # blast-fill's single JS `.value=` set for this one field and uses
+        # Playwright's own `.fill()` (real focus/input events, waits for
+        # actionability) with a read-back check instead. Falls through to
+        # the normal chain/blast-fill unchanged if no cached value exists
+        # yet, or if the live fill can't confirm the value landed — same
+        # safety-net pattern as the yes/no combobox fix above.
+        if "linkedin" in lbl_l:
+            li_value = _qa.get_answer(lbl) if (_qa and lbl) else None
+            if li_value and _fill_linkedin_field(page, lbl, str(li_value)):
+                answers[lbl] = li_value
+                pre_live_filled.add(lbl)
+                print(f"             ✔ LIVE    '{lbl}' → '{li_value}' (Playwright .fill(), verified)")
+                continue
+
         category = _classify_field(f)
 
         # ── Diagnostic only — added 2026-08-31 ────────────────────────────────
@@ -2125,6 +2294,32 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         # project you're proud of") is UNCHANGED: no auto-fill, routes to
         # stuck_questions.json exactly as before, with the draft attached
         # for review if one was generated.
+        # ── Low-stakes source question — any real option is fine ─────────────
+        # Added 2026-09-11, Raghav's explicit instruction (see
+        # _LOW_STAKES_SOURCE_SIGNALS above). Prefers a channel he actually
+        # uses (LinkedIn first, then other real job boards/referral/event
+        # wording) if the form's REAL options happen to include one: falls
+        # back to simply the first real option otherwise — never leaves this
+        # blocking a submission, since no answer here is false in the way a
+        # fabricated skills/experience claim would be.
+        if category == "source_question":
+            real_options = f.get("options", [])
+            chosen = None
+            for pref in ("linkedin", "indeed", "glassdoor", "job board", "google",
+                          "job posting", "referral", "event", "conference", "news"):
+                chosen = next((o for o in real_options if pref in str(o).lower()), None)
+                if chosen:
+                    break
+            if not chosen and real_options:
+                chosen = real_options[0]
+            if chosen:
+                answers[lbl] = chosen
+                print(f"             ✔ SOURCE  '{lbl}' → '{chosen}' (low-stakes, any real "
+                      f"option is fine — Raghav's explicit policy)")
+            else:
+                uncached.append(f)
+            continue
+
         if category == "essay":
             draft = None
             draft_kind = None
@@ -2186,6 +2381,9 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
             if fact is not None:
                 answers[lbl] = fact
                 print(f"             ✔ FACT    '{lbl}' → '{fact}' (config.py, not a guess)")
+                if fact in ("Yes", "No") and _fill_yes_no_combobox(page, lbl, fact):
+                    yesno_live_filled.add(lbl)
+                    print(f"             ✔ LIVE    '{lbl}' → widget confirmed (react-select combobox)")
                 continue
 
             found_valid = False
@@ -2199,6 +2397,9 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
                 if _looks_yes_no_shaped(source_val):
                     answers[lbl] = source_val
                     print(f"             ✔ {source_name:<6}  '{lbl}' → '{str(source_val)[:60]}'")
+                    if source_val in ("Yes", "No") and _fill_yes_no_combobox(page, lbl, source_val):
+                        yesno_live_filled.add(lbl)
+                        print(f"             ✔ LIVE    '{lbl}' → widget confirmed (react-select combobox)")
                     found_valid = True
                     break  # a source actually gave a usable answer — stop here
                 else:
@@ -2235,6 +2436,9 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
                 print(f"             ✔ CLAUDE  '{lbl}' → '{claude_fact}' (API, profile-grounded, not a guess)")
                 if _claude_ans:
                     _claude_ans.save(lbl, claude_fact)
+                if claude_fact in ("Yes", "No") and _fill_yes_no_combobox(page, lbl, claude_fact):
+                    yesno_live_filled.add(lbl)
+                    print(f"             ✔ LIVE    '{lbl}' → widget confirmed (react-select combobox)")
                 continue
 
             uncached.append(f)
@@ -2441,6 +2645,7 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         # a raw .value= assignment; see the Country block comment for why
         # that already failed once for a different field).
         "answer": "" if f.get("label", "") in eeo_live_filled or f.get("label", "") in ack_live_filled
+                     or f.get("label", "") in pre_live_filled or f.get("label", "") in yesno_live_filled
                      else str(answers.get(f.get("label", ""), ""))
     } for f in fields])) or 0
 
@@ -2456,11 +2661,31 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         if f.get("required") and f.get("label", "") not in answers
     ]
 
+    # Added 2026-09-11, Raghav's explicit request ("save all kinds of
+    # questions it sees in the application... from these we can improve").
+    # Until now, a receipt only ever recorded a question if it got a real
+    # answer (`answers`) or was a REQUIRED field that blocked submission
+    # (folded into the `reason` string) — a non-required question the
+    # pipeline skipped (an essay, a no-decline-option EEO field, an
+    # uncached short_text field) never landed in data/receipts.json at
+    # all, only in data/stuck_questions.json, so build_question_bank.py
+    # could miss it. This lists EVERY question the page actually had,
+    # answered or not, so nothing the pipeline saw can go unrecorded.
+    all_questions = [
+        {
+            "label": f.get("label", ""),
+            "required": bool(f.get("required")),
+            "answered": f.get("label", "") in answers,
+        }
+        for f in fields
+    ]
+
     return {
         "filled": filled,
         "total_fields": len(fields),
         "answers": dict(answers),
         "unresolved_required": unresolved_required,
+        "all_questions": all_questions,
     }
 
 # ── Submit ──────────────────────────────────────────────────────────────────
@@ -2519,7 +2744,7 @@ def _submit_progressed(page, before: dict, timeout_s: float = 6.0) -> bool:
         time.sleep(0.4)
     return False
 
-def submit_greenhouse_application(page, dry_run: bool = False) -> bool:
+def submit_greenhouse_application(page, dry_run: bool = False, company: str = "") -> bool:
     print(f"          📋 Review & Submit")
     if dry_run:
         print(f"          🏁 DRY RUN — stopping BEFORE the Submit click. Nothing below this "
@@ -2528,6 +2753,7 @@ def submit_greenhouse_application(page, dry_run: bool = False) -> bool:
 
     before = _page_signature(page)
     submit_sel = GH["submit_btn"] if _exists(page, GH["submit_btn"], timeout=2000) else None
+    otp_attempted = False
     for attempt in range(1, 4):
         print(f"          🚀 Submit attempt {attempt}/3...")
         clicked = _click(page, submit_sel) if submit_sel else False
@@ -2544,6 +2770,29 @@ def submit_greenhouse_application(page, dry_run: bool = False) -> bool:
                   f"that didn't error")
             return True
         print(f"          ⚠  Submit click fired but page state did not change — not counted as success")
+
+        # Raghav's own report, 2026-09-11: some Greenhouse postings ask for a
+        # Gmail OTP/verification code AFTER Submit is clicked, not as an
+        # upfront account gate — handle_greenhouse_account_if_required() only
+        # ever checks for that gate once, right after page load, so it can't
+        # see this. Reuse the same generic body-text detector + Gmail-IMAP
+        # read + code-entry already built for the upfront gate (no dedicated
+        # Greenhouse selector exists for this exact post-submit prompt yet —
+        # no screenshot/DOM evidence of it has been captured as of
+        # 2026-09-11, so this is the most defensible generic version until
+        # that evidence exists). Tried at most once per job so a page with a
+        # genuine validation error doesn't burn the full 3-minute Gmail-poll
+        # timeout on every retry.
+        if not otp_attempted and _greenhouse_needs_email_verification(page):
+            otp_attempted = True
+            print(f"          📬 Post-submit email verification detected — reading Gmail "
+                  f"for the code (waiting up to 3 min)...")
+            if _complete_greenhouse_email_verification(page, company):
+                print(f"          ✅ Verification code entered — retrying submit...")
+                before = _page_signature(page)
+                continue
+            print(f"          ⚠  No OTP/verify-link email arrived within 3 minutes — "
+                  f"falling through to normal retry/failure handling")
 
         body = _safe_eval(page, "() => document.body.innerText.toLowerCase()", "") or ""
         captcha = any("bframe" in (f.url or "") for f in list(page.frames)) or \
@@ -2593,7 +2842,7 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
         "title": title, "company": company, "url": job_url,
         "dry_run": dry_run,
         "submitted": False, "success": False, "skipped_incomplete": False,
-        "fields": {}, "unresolved_required": [], "reason": "",
+        "fields": {}, "unresolved_required": [], "all_questions_seen": [], "reason": "",
     }
 
     print(f"          🌐 {job_url[:70]}")
@@ -2688,6 +2937,7 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
     # that scrape sees a genuinely-selected value (or an honestly-still-empty
     # one) rather than a value it wrongly believes already stuck.
     country_missing_required = False
+    filled_country = False
     country_status = _has_country_field(page)
     if country_status.get("present"):
         filled_country = _fill_country_field(page, "United States of America")
@@ -2703,6 +2953,7 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
     # Same reasoning as Country above: checked/filled BEFORE the generic
     # scrape so that pass sees a real, site-accepted value.
     location_missing_required = False
+    filled_location = False
     try:
         import raghav_profile as rp
         location_value = rp.PROFILE.get("location", "City, ST")
@@ -2733,11 +2984,20 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
     print(f"          {'✅' if uploaded else '⚠ '} Resume upload: {'attached' if uploaded else 'no upload field found — will need manual attach'}")
     time.sleep(1)
 
-    fill_result = _smart_fill_greenhouse_fields(page, title, company, jd_text)
+    fill_result = _smart_fill_greenhouse_fields(
+        page, title, company, jd_text,
+        country_already_filled=filled_country,
+        location_already_filled=filled_location,
+        location_value=location_value if location_present else "",
+    )
     time.sleep(1)
 
     record["fields"] = fill_result["answers"]
     record["unresolved_required"] = fill_result["unresolved_required"]
+    record["all_questions_seen"] = fill_result["all_questions"]  # 2026-09-11 — every
+                                    # question the page had, answered or not (see
+                                    # _smart_fill_greenhouse_fields()'s comment above
+                                    # its return statement)
 
     # ── Required-field completeness gate — never submit an incomplete form,
     # never fabricate an answer to force one through. This check runs
@@ -2803,7 +3063,7 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
         return False, reason, record
 
     try:
-        ok = submit_greenhouse_application(page, dry_run=dry_run)
+        ok = submit_greenhouse_application(page, dry_run=dry_run, company=company)
     except Exception as e:
         # Hardening (2026-09-09): an exception here — e.g. the browser/page
         # crashing mid-poll right after the REAL Submit click fired — must

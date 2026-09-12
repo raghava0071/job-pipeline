@@ -580,10 +580,21 @@ QUESTION TO ANSWER: {label}
 
 Write the draft answer now — first person, as the candidate.
 """
+    # Same diagnostic added 2026-09-11 as draft_open_ended_essay() below —
+    # this function had the identical silent-failure shape and had never
+    # been confirmed actually producing a draft in a real live run.
+    if not getattr(claude_engine, "CLAUDE_AVAILABLE", False) or not getattr(claude_engine, "_client", None):
+        print(f"             ⚠  draft_motivation_essay: Claude API unavailable "
+              f"(CLAUDE_AVAILABLE={getattr(claude_engine, 'CLAUDE_AVAILABLE', None)}, "
+              f"_client set={bool(getattr(claude_engine, '_client', None))}) — no draft attempted for '{label}'")
+        return None
     try:
         draft = claude_engine._ask(prompt, system=_ESSAY_SYSTEM_PROMPT, max_tokens=500, fast=False)
-    except Exception:
+    except Exception as e:
+        print(f"             ⚠  draft_motivation_essay: _ask() raised for '{label}': {e}")
         return None
+    if not (draft or "").strip():
+        print(f"             ⚠  draft_motivation_essay: Claude returned an empty completion for '{label}'")
     draft = (draft or "").strip()
     return draft if draft else None
 
@@ -704,9 +715,24 @@ QUESTION TO ANSWER: {label}
 
 Write the draft answer now — first person, as the candidate.
 """
+    # Diagnostic added 2026-09-11: the first real live run of this feature
+    # produced zero drafts across three eligible questions, with no
+    # exception anywhere — meaning claude_engine._ask() returned "" cleanly
+    # (its silent path: CLAUDE_AVAILABLE False or _client None, checked
+    # BEFORE the API call, no print). That silence made the failure
+    # unfixable without a live log, exactly the gap Raghav flagged as the
+    # top priority tonight ("by this data only we take all the decisions").
+    if not getattr(claude_engine, "CLAUDE_AVAILABLE", False) or not getattr(claude_engine, "_client", None):
+        print(f"             ⚠  draft_open_ended_essay: Claude API unavailable "
+              f"(CLAUDE_AVAILABLE={getattr(claude_engine, 'CLAUDE_AVAILABLE', None)}, "
+              f"_client set={bool(getattr(claude_engine, '_client', None))}) — no draft attempted for '{label}'")
+        return None
     try:
         draft = claude_engine._ask(prompt, system=_OPINION_ESSAY_SYSTEM_PROMPT, max_tokens=350, fast=False)
-    except Exception:
+    except Exception as e:
+        print(f"             ⚠  draft_open_ended_essay: _ask() raised for '{label}': {e}")
         return None
+    if not (draft or "").strip():
+        print(f"             ⚠  draft_open_ended_essay: Claude returned an empty completion for '{label}'")
     draft = (draft or "").strip()
     return draft if draft else None
