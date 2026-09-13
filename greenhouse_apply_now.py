@@ -446,13 +446,37 @@ def _type_into(page, sel, value, timeout=4000) -> bool:
     except Exception:
         return False
 
-def _complete_greenhouse_email_verification(page, company: str) -> bool:
+def _complete_greenhouse_email_verification(page, company: str, total_wait_secs: int = 180) -> bool:
     """Reads Raghav's own Gmail (mail_reader.py — same IMAP app-password
     already wired up for Workday) for the verification email this signup
     just triggered, and either types the OTP into a code field on the page
     or navigates to the verify link. Returns False (honestly) on timeout —
-    never guesses a code."""
-    result = mail_reader.wait_for_otp(company=company, timeout_secs=180, since_minutes=5)
+    never guesses a code.
+
+    CHUNKED, not one blocking call — found live 2026-09-12: while this was
+    a single `mail_reader.wait_for_otp(timeout_secs=180)` call, Raghav
+    manually completed and submitted the application himself (the OTP
+    extraction was still failing — see extract_otp_from_body()'s open gap)
+    partway through, but the script had no way to notice: it just kept
+    polling Gmail for the FULL 3 minutes regardless of the page's real
+    state, adding a confusing, seemingly-stuck-forever wait on top of an
+    application that was already done. Now polls in short slices and
+    checks `_is_confirmed(page)` between each one — the moment the page
+    itself shows a real submission (however it got there), this stops
+    immediately instead of finishing out the clock."""
+    slice_secs = 15
+    elapsed = 0
+    result = {"type": "none"}
+    while elapsed < total_wait_secs:
+        if _is_confirmed(page):
+            print(f"          ✅ Page already shows a real submission — stopping the Gmail "
+                  f"check, nothing more to do here.")
+            return True
+        this_slice = min(slice_secs, total_wait_secs - elapsed)
+        result = mail_reader.wait_for_otp(company=company, timeout_secs=this_slice, since_minutes=5)
+        elapsed += this_slice
+        if result.get("type") != "none":
+            break
     if result.get("type") == "otp":
         code = result["code"]
         code_sel = ('input[name*="code" i], input[id*="code" i], '
@@ -1973,8 +1997,8 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         "zip code": getattr(cfg, "CANDIDATE_ZIP", ""),       # added 2026-09-11, real
         "postal code": getattr(cfg, "CANDIDATE_ZIP", ""),    # value from .env HOME_ZIP
         "us citizen": "No", "green card": "No", "permanent resident": "No",
-        "linkedin": "https://www.linkedin.com/in/yourusername/",
-        "github": "https://github.com/raghava0071",
+        "linkedin": (rp.PROFILE.get("linkedin", "linkedin.com/in/yourusername") if rp else "linkedin.com/in/yourusername"),
+        "github": (rp.PROFILE.get("github", "github.com/yourusername") if rp else "github.com/yourusername"),
         "how did you hear": "LinkedIn / Online Job Board",
         "pronoun": "He/Him",
     }
@@ -2321,6 +2345,21 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
             continue
 
         if category == "essay":
+            # Fixed 2026-09-12: real bug found from a live run — Raghav's own
+            # confirmed answers, saved to answer_bank.json (Layer 0 of
+            # qa_answers.get_answer()), were NEVER checked here. This branch
+            # went straight to Claude-drafting or stuck_questions.json every
+            # time, no matter what was already in the bank. That's why saving
+            # a real answer for "How many years..." and "What are the most
+            # impactful systems..." didn't help the very next run — it was
+            # sitting in the bank, unused. Bank/QA check now happens first.
+            saved = _qa.get_answer(lbl) if (_qa and lbl) else None
+            if saved is not None:
+                answers[lbl] = saved
+                print(f"             ✔ BANK    '{lbl}' → '{str(saved)[:60]}' "
+                      f"(your own saved answer, not auto-drafted)")
+                continue
+
             draft = None
             draft_kind = None
             try:
@@ -2713,6 +2752,182 @@ def _is_confirmed(page) -> bool:
         "your application has been submitted", "application was sent",
     ]) or any(s in url for s in ["confirmation", "thank-you", "thanks"])
 
+def _wait_for_manual_completion(page, max_wait_secs: int, poll_interval: int) -> bool:
+    """Added 2026-09-12, Raghav's explicit instruction: when this application
+    can't be completed automatically — a required field with no truthful
+    answer, or a submit click that didn't confirm — don't just skip it and
+    move to the next job. Pause on this exact page for up to `max_wait_secs`
+    so Raghav can switch to the open browser and finish/fix it himself.
+    Polls the same `_is_confirmed()` signal already trusted elsewhere (real
+    confirmation text/URL — never a guess) every `poll_interval` seconds,
+    and returns the moment it sees one, so a fast manual fix doesn't sit
+    waiting out the full window for no reason. Returns False, honestly, if
+    nothing confirmed by the deadline — the caller falls through to its
+    existing failure handling exactly as it did before this feature
+    existed; nothing about the honesty of that reporting changes, this only
+    adds a grace window before it kicks in."""
+    print(f"\n          ⏸  PAUSED for up to {max_wait_secs // 60}m {max_wait_secs % 60}s — "
+          f"this application needs your help. Switch to the open browser window now:")
+    print(f"             • Fill in/fix whatever the pipeline couldn't answer")
+    print(f"             • Click Submit yourself when ready")
+    print(f"             • No need to come back here — the pipeline will notice and "
+          f"move on to the next application automatically")
+    start = time.time()
+    last_print = 0.0
+    while time.time() - start < max_wait_secs:
+        if _is_confirmed(page):
+            print(f"          ✅ Submission detected — thanks! Moving to the next application.")
+            return True
+        elapsed = time.time() - start
+        if elapsed - last_print >= 30:
+            remaining = int(max_wait_secs - elapsed)
+            print(f"          ⏳ Still waiting... {remaining // 60}m {remaining % 60}s left "
+                  f"(submit whenever you're ready, or this moves on automatically)")
+            last_print = elapsed
+        time.sleep(poll_interval)
+    print(f"          ⏹  No submission detected within the wait window — moving on. If you "
+          f"submitted it manually just now, double-check data/receipts.json for this job — "
+          f"this attempt is still logged as unconfirmed either way.")
+    return False
+
+
+_TRANSIENT_FIELD_SIGNALS = (
+    "security code", "verification code", "one-time code", "one time code",
+    "otp", "confirmation code", "auth code", "access code",
+)
+
+
+def _looks_like_essay_label(lbl: str) -> bool:
+    """A label that reads like an open essay question, not a short-answer
+    field — used to require a real minimum length before trusting a
+    manually-typed value enough to save it for reuse."""
+    l = lbl.lower().strip()
+    return l.endswith("?") or len(l.split()) >= 6
+
+
+def _learn_manually_entered_answers(page, known_labels: set) -> int:
+    """Added 2026-09-12, Raghav's explicit instruction: "I want the system
+    to save all the answers so it would help for the next application."
+    Called right after a manual-completion pause. Re-reads every visible
+    text/textarea/select field's CURRENT value and label. Anything the
+    pipeline already had an answer for (`known_labels`, from
+    fill_result["answers"]) is skipped outright — this must never overwrite
+    an already-resolved answer with something read back off the page.
+    Anything NEW and non-empty (Raghav typed it in himself during the
+    pause) gets saved to answer_bank.py — the exact same exact-match,
+    human-confirmed store every other part of this pipeline already trusts
+    — tagged with its own source so it's always clear these came from a
+    live manual fill-in, not a reviewed written-in answer via
+    review_stuck_questions.py. Same EEO/consent exclusion every other
+    answer_bank writer respects (self-ID and consent/acknowledgement stay
+    per-form, never bulk-learned). Returns how many new answers were
+    learned."""
+    current = _safe_eval(page, r"""
+        () => {
+            function getLabel(el) {
+                if (el.id) {
+                    const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+                    if (lbl) return lbl.innerText.trim().split('\n')[0];
+                }
+                const anc = el.closest('label');
+                if (anc) return anc.innerText.trim().split('\n')[0];
+                return '';
+            }
+            const out = [];
+            document.querySelectorAll(
+                'input[type="text"], input[type="email"], input[type="tel"], '
+                + 'input[type="url"], input:not([type]), textarea, select'
+            ).forEach(el => {
+                if (!el.offsetParent) return;
+                const lbl = getLabel(el);
+                if (!lbl) return;
+                const val = (el.tagName === 'SELECT')
+                    ? (el.options[el.selectedIndex] ? el.options[el.selectedIndex].text : '')
+                    : el.value;
+                if (val && val.trim()) out.push({label: lbl, value: val.trim()});
+            });
+            return out;
+        }
+    """, []) or []
+
+    learned = 0
+    try:
+        import answer_bank as _ab
+    except Exception:
+        return 0
+    for item in current:
+        lbl = item.get("label", "")
+        val = item.get("value", "")
+        if not lbl or not val or lbl in known_labels:
+            continue
+        if _ab.is_eeo_or_consent(lbl):
+            continue
+        lbl_lower = lbl.lower()
+        # Fixed 2026-09-12: real run saved 'Security code' -> 'd' into the
+        # permanent bank — one-time codes are never reusable, never learn them.
+        if any(sig in lbl_lower for sig in _TRANSIENT_FIELD_SIGNALS):
+            continue
+        # Fixed 2026-09-12: real run also saved 'a idh' as the answer to an
+        # essay question ("What are the most impactful systems...") — a
+        # partial/garbage keystroke, not a real answer. Essay-style
+        # (long/question) labels need a real minimum length before they're
+        # trusted enough to reuse on future applications.
+        min_len = 20 if _looks_like_essay_label(lbl) else 2
+        if len(val) < min_len:
+            print(f"             ⚠️  SKIPPED learning '{lbl}' → '{val}' "
+                  f"(too short to trust — not saved)")
+            continue
+        try:
+            if _ab.save(lbl, val, source="user_manual_completion"):
+                learned += 1
+                print(f"             💾 LEARNED '{lbl}' → '{val[:60]}' (for next time)")
+        except Exception:
+            continue
+    if learned:
+        print(f"          💾 Saved {learned} new answer(s) from your manual completion — "
+              f"future applications will use these automatically.")
+    return learned
+
+
+def _attempt_manual_assist(page, dry_run: bool, fill_result: dict, record: dict, reason: str) -> tuple:
+    """Shared manual-assist step for apply_to_greenhouse_job()'s pre-submit
+    skip paths (country/location automation gaps, unresolved required
+    fields) — added 2026-09-12, Raghav's explicit instruction. In LIVE mode
+    only (dry-run must never pause waiting on a submit the honesty-gate
+    rules forbid it from ever making — see GREENHOUSE_AUTO_DRY_RUN's own
+    comment in config.py), gives Raghav a real window to finish this
+    application himself in the open browser before it's logged as skipped.
+    Returns an updated (ok, reason, record) tuple — if Raghav submits
+    during the window, this flips the outcome to a real success and learns
+    whatever he typed for next time; otherwise it returns the ORIGINAL
+    (False, reason, record) unchanged, so nothing about existing failure
+    reporting/skip-caching behavior changes when nobody's there to help."""
+    if dry_run:
+        return False, reason, record
+    wait_secs = getattr(cfg, "GREENHOUSE_MANUAL_ASSIST_WAIT_SECS", 180)
+    poll_secs = getattr(cfg, "GREENHOUSE_MANUAL_ASSIST_POLL_SECS", 5)
+    confirmed = _wait_for_manual_completion(page, wait_secs, poll_secs)
+    known_labels = set((fill_result or {}).get("answers", {}).keys())
+    _learn_manually_entered_answers(page, known_labels)
+    if confirmed:
+        record["submitted"] = True
+        record["success"] = True
+        record["manually_assisted"] = True
+        record["reason"] = "Manually completed and submitted by Raghav during the assist window"
+        # Clear the skip-cache flags this record may already have picked up
+        # from the caller's skip path above (skipped_incomplete=True,
+        # unresolved_reason_type set) — those were correct at the moment
+        # they were set, but a real submission just happened, so this job
+        # must NOT be skip-cached as if it had failed. Without this, a
+        # manually-completed application would still get silently skipped
+        # on every future run under the "already tried, known unresolvable"
+        # logic, which is exactly wrong once it's actually been submitted.
+        record["skipped_incomplete"] = False
+        record.pop("unresolved_reason_type", None)
+        return True, record["reason"], record
+    return False, reason, record
+
+
 def _page_signature(page) -> dict:
     """Snapshot used to detect real progress: current URL + whether the
     submit button/application form is still present on the page."""
@@ -3028,7 +3243,7 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
         # never be persisted to the skip-cache (see config.py's
         # GREENHOUSE_SKIP_RECHECK_DAYS comment for why).
         record["unresolved_reason_type"] = "country_automation_gap"
-        return False, reason, record
+        return _attempt_manual_assist(page, dry_run, fill_result, record, reason)
 
     if location_missing_required:
         reason = ("SKIPPED — Location (City) is required but the page would not accept "
@@ -3044,7 +3259,7 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
         # Same reasoning as country_automation_gap above — a transient UI gap,
         # not a structural missing-answer one, so never skip-cache this.
         record["unresolved_reason_type"] = "location_automation_gap"
-        return False, reason, record
+        return _attempt_manual_assist(page, dry_run, fill_result, record, reason)
 
     if fill_result["unresolved_required"]:
         reason = ("SKIPPED — required field(s) with no truthful answer available: "
@@ -3060,7 +3275,7 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
         # to skip-cache so a re-run doesn't redo all this work on the exact
         # same posting under the exact same pipeline logic.
         record["unresolved_reason_type"] = "no_truthful_answer"
-        return False, reason, record
+        return _attempt_manual_assist(page, dry_run, fill_result, record, reason)
 
     try:
         ok = submit_greenhouse_application(page, dry_run=dry_run, company=company)
@@ -3088,7 +3303,13 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
         record["reason"] = "Dry-Run" if dry_run else "confirmed after submit click"
         return True, record["reason"], record
     record["reason"] = "submit not confirmed (see failure screenshot)"
-    return False, record["reason"], record
+    # A submit click fired but didn't confirm — 3 automated retries already
+    # happened inside submit_greenhouse_application() itself. Rather than
+    # give up here, give Raghav the same manual-assist window as the
+    # pre-submit skip paths above: whatever's stuck (a missed click, a
+    # widget that silently rejected the value) is very likely something he
+    # can just click/fix directly in 10 seconds.
+    return _attempt_manual_assist(page, dry_run, fill_result, record, record["reason"])
 
 # ── Discovery: Greenhouse public Job Board API ─────────────────────────────────
 #
@@ -3100,6 +3321,64 @@ def apply_to_greenhouse_job(page, job: dict, resume_path: str, cover_letter_path
 # a GET request to an API meant to answer exactly this GET request.
 
 GREENHOUSE_API_BASE = "https://boards-api.greenhouse.io/v1/boards"
+
+# ── Expanded discovery — batch rotation over the full company list ─────────
+# Added 2026-09-12. See config.py's GREENHOUSE_USE_EXPANDED_DISCOVERY comment
+# for the full story: 8,317 real company slugs sourced from a community-
+# maintained aggregator, rotated through in fixed batches instead of queried
+# all at once (Greenhouse's API already showed real read-timeouts at just 23
+# companies in one run — 8,317 at once risks the same rate-limit/block that
+# ended this project's earlier Google-search discovery attempt).
+_JUNK_SLUG_RE = re.compile(r'^[0-9]{5,}$|^[a-f0-9]{16,}$')
+
+def _load_expanded_company_batch() -> list:
+    """Reads config.GREENHOUSE_EXPANDED_COMPANIES_FILE, drops obviously-dead
+    slugs (pure numeric IDs, long hex hashes — test/internal boards, not real
+    companies), and returns the next GREENHOUSE_EXPANDED_BATCH_SIZE-sized
+    slice, rotating forward each run via a small state file so repeated runs
+    cover new ground instead of re-hitting the same batch. Wraps back to the
+    start once the full list has been covered. Returns [] on any error
+    (missing file, bad JSON) rather than raising — expanded discovery is
+    additive, never something that should break a normal run."""
+    try:
+        with open(cfg.GREENHOUSE_EXPANDED_COMPANIES_FILE) as f:
+            all_companies = json.load(f)
+    except Exception as e:
+        print(f"  ⚠  Could not load expanded company list: {e}")
+        return []
+
+    all_companies = [c for c in all_companies if not _JUNK_SLUG_RE.match(c)]
+    if not all_companies:
+        return []
+
+    state_path = Path(cfg.GREENHOUSE_EXPANDED_STATE_FILE)
+    try:
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    except Exception:
+        state = {}
+    start = state.get("next_index", 0) % len(all_companies)
+
+    batch_size = min(getattr(cfg, "GREENHOUSE_EXPANDED_BATCH_SIZE", 150), len(all_companies))
+    end = start + batch_size
+    if end <= len(all_companies):
+        batch = all_companies[start:end]
+    else:
+        batch = all_companies[start:] + all_companies[:end - len(all_companies)]
+
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({
+            "next_index": end % len(all_companies),
+            "total_companies": len(all_companies),
+            "last_run": datetime.now().isoformat(),
+        }, indent=2))
+    except Exception as e:
+        print(f"  ⚠  Could not save expanded discovery rotation state: {e}")
+
+    print(f"  🌐 Expanded discovery: batch {start}-{start + len(batch)} of "
+          f"{len(all_companies)} known companies (full pass every "
+          f"~{-(-len(all_companies) // batch_size)} runs)")
+    return batch
 
 def _strip_html(raw_html: str) -> str:
     """Greenhouse's `content` field is the company's own HTML-formatted job
@@ -3677,6 +3956,12 @@ def main():
             time.sleep(cfg.APPLY_DELAY_SEC if hasattr(cfg, "APPLY_DELAY_SEC") else 2)
 
         companies = getattr(cfg, "GREENHOUSE_COMPANIES", [])
+        if getattr(cfg, "GREENHOUSE_USE_EXPANDED_DISCOVERY", False):
+            expanded_batch = _load_expanded_company_batch()
+            # curated list first (already known good), expanded batch after,
+            # de-duplicated so a company in both isn't queried twice
+            seen_companies = set(companies)
+            companies = companies + [c for c in expanded_batch if c not in seen_companies]
         print(f"\n  🔍 Pulling live jobs from Greenhouse's public Job Board API "
               f"for {len(companies)} compan{'y' if len(companies) == 1 else 'ies'}...")
         if not companies:

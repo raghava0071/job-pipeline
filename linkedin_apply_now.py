@@ -779,24 +779,28 @@ def fill_and_submit_form(page, resume_path, job_title="", company=""):
     skill_years_str = "\n".join(
         f"  {k}: {v} years" for k,v in rp.SKILL_YEARS.items()
     )
+    _edu_lines = "\n".join(
+        f"  {e.get('degree','Degree')} — {e.get('school','School')} ({e.get('graduated','')})"
+        for e in getattr(rp, "EDUCATION", [])
+    ) or "  Degree, Field — School (Grad Year)"
+    _eeo = getattr(rp, "EEO_ANSWERS", {})
     PROFILE_CONTEXT = f"""
-Candidate: Your Name
+Candidate: {p.get('name','Your Name')}
 Email: {p.get('email','your_email@gmail.com')}
-Phone: {p.get('phone','7038529618')}
-Location: City, ST ZIP
-LinkedIn: {p.get('linkedin_url','https://www.linkedin.com/in/yourusername')}
-GitHub: {p.get('github_url','https://github.com/yourusername')}
-Portfolio: {p.get('portfolio_url','https://www.linkedin.com/in/yourusername')}
+Phone: {p.get('phone','555-555-5555')}
+Location: {p.get('location','City, ST ZIP')}
+LinkedIn: {p.get('linkedin','linkedin.com/in/yourusername')}
+GitHub: {p.get('github','github.com/yourusername')}
+Portfolio: {p.get('linkedin','linkedin.com/in/yourusername')}
 
 Education:
-  Master of Science, Data Science & Analytics — Florida Atlantic University (May 2025), GPA 3.5
-  B.Tech, Computer Science & Engineering — JNTU (2022)
+{_edu_lines}
 
-Work Authorization: F-1 OPT/STEM OPT — legally authorized to work in USA, NO sponsorship needed
+Work Authorization: {p.get('work_auth','legally authorized to work in USA, NO sponsorship needed')}
 Total Professional Experience: 3+ years (including undergrad projects, internships, grad research)
 Expected Salary: {_pick_salary(jd_text if "jd_text" in dir() else "", job_title)} (plain number, no $ signs)
-Veteran: No | Disability: No | Gender: Male (prefer not to say) | Ethnicity: Asian (prefer not to say)
-Willing to relocate: Yes | Work mode: Remote / Hybrid / On-site
+Veteran: {_eeo.get('veteran','No')} | Disability: {_eeo.get('disability','No')} | Gender: {_eeo.get('gender','prefer not to say')} | Ethnicity: {_eeo.get('race','prefer not to say')}
+Willing to relocate: {'Yes' if p.get('relocate', True) else 'No'} | Work mode: Remote / Hybrid / On-site
 
 Experience by skill (be accurate — candidate used these since undergrad):
 {skill_years_str}
@@ -1360,7 +1364,7 @@ Rules:
 
             prompt = f"""You are reviewing a LinkedIn Easy Apply form before final submission.
 
-CANDIDATE: Your Name
+CANDIDATE: the applicant (see profile data already filled into the form)
 APPLYING FOR: {job_title} at {company}
 
 WHAT WAS FILLED DURING THE APPLICATION:

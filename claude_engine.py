@@ -508,7 +508,7 @@ def build_profile_summary(profile: dict) -> str:
     import raghav_profile as _rp   # SKILL_YEARS canonical source — see config.py's
                                     # SKILL_YEARS comment for why this isn't cfg.SKILL_YEARS
 
-    name   = profile.get("name", "Your Name")
+    name   = profile.get("name", "Candidate")
     skills = profile.get("skills", [])
     exp    = profile.get("experience", [])
     edu    = profile.get("education", [{}])
@@ -598,8 +598,10 @@ def vision_assist(screenshot_bytes: bytes, page_text: str,
     try:
         import raghav_profile as _rp_va
         _relocate_fact = "Yes" if _rp_va.PROFILE.get("relocate", False) else "No"
+        _name_fact = _rp_va.PROFILE.get("name", "Candidate")
     except Exception:
         _relocate_fact = "No"
+        _name_fact = "Candidate"
 
     try:
         img_b64 = base64.standard_b64encode(screenshot_bytes).decode("utf-8")
@@ -632,7 +634,7 @@ Rules:
 - If there are unfilled required fields → action = "fill_field", list each field with a value
 - If all fields look filled but no progress → action = "click_button", button = the correct button text
 - If the page looks like a confirmation/success → action = "skip" (already submitted)
-- For candidate Your Name: work auth = Yes, sponsorship = {_sponsor_fact}, salary = 85000, experience = {_years_fact} years, relocate = {_relocate_fact}
+- For candidate {_name_fact}: work auth = Yes, sponsorship = {_sponsor_fact}, salary = 85000, experience = {_years_fact} years, relocate = {_relocate_fact}
 - Use short direct values — no long sentences for field values"""
 
     try:

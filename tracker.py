@@ -329,7 +329,12 @@ def create_tracker(jobs_df: pd.DataFrame = None) -> str:
 
     ws2["A1"] = "APPLICATION DASHBOARD — Claude-Powered Pipeline"
     ws2["A1"].font      = Font(name="Calibri", bold=True, size=16, color=BLUE_HEADER)
-    ws2["A2"] = f"Your Name  |  Data Analyst · Engineer · Scientist  |  {today:%b %d, %Y}"
+    try:
+        import raghav_profile as _rp_tracker
+        _tracker_name = _rp_tracker.PROFILE.get("name", "Your Name")
+    except Exception:
+        _tracker_name = "Your Name"
+    ws2["A2"] = f"{_tracker_name}  |  Data Analyst · Engineer · Scientist  |  {today:%b %d, %Y}"
     ws2["A2"].font      = Font(name="Calibri", size=10, color="888888")
     ws2.row_dimensions[1].height = 28
 

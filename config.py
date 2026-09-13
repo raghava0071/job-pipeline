@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.14.25"
+PIPELINE_VERSION = "2.14.35"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -48,6 +48,18 @@ GREENHOUSE_ENABLED = True   # guest-apply only — see greenhouse_apply_now.py
 # Greenhouse submit live applications, that is STILL only ever
 # `--greenhouse-only --live`, run explicitly — this flag never enables that.
 GREENHOUSE_AUTO_DRY_RUN = True
+
+# Manual-assist pause window — added 2026-09-12, Raghav's explicit
+# instruction: when a live application can't be completed automatically
+# (a required field with no truthful answer, or a submit click that didn't
+# confirm), don't just skip it and move on — pause on that page for up to
+# this long so Raghav can jump into the open browser and finish/fix it
+# himself. The pipeline polls for a real submit confirmation during this
+# window and moves on the moment it sees one, so a quick manual fix never
+# sits waiting out the full window. Only --live runs pause like this —
+# dry-run never reaches Submit at all, so there's nothing to wait on.
+GREENHOUSE_MANUAL_ASSIST_WAIT_SECS = 180   # 3 minutes, per Raghav's request
+GREENHOUSE_MANUAL_ASSIST_POLL_SECS = 5     # how often to check for a submit
 
 # Indeed hand-off mode: Indeed's Cloudflare wall blocks any automated browser
 # (confirmed for weeks — real Chrome works, the pipeline's does not). When True,
@@ -997,7 +1009,49 @@ GREENHOUSE_COMPANIES = [
     "faire",            # wholesale marketplace
     "smartsheet",       # productivity SaaS
     "amplitude",        # product analytics platform
+
+    # Added 2026-09-12, per Raghav's explicit request for more volume after a
+    # run found 0 new qualifying jobs (every prior match already applied-to).
+    # First real run (run_20260912_200657) confirmed 6 of the original 14
+    # added here have dead board tokens (HTTP 404) — removed: notion, ramp,
+    # plaid, benchling, rippling, zapier. grammarly/klaviyo/amplitude timed
+    # out that same run (read timeout=15s) — kept, since a timeout isn't
+    # evidence of a bad slug, just a slow response; re-check if they keep
+    # timing out. The rest below returned real posting counts live.
+    "airtable",         # productivity/database SaaS — 16 postings confirmed live
+    "webflow",          # no-code/CMS SaaS — 25 postings confirmed live
+    "carta",            # equity management SaaS — 64 postings confirmed live
+    "grammarly",        # productivity/AI SaaS — timed out 2026-09-12, unconfirmed
+    "mixpanel",         # product analytics platform — 84 postings confirmed live
+    "lattice",          # HR SaaS — 8 postings confirmed live
+    "pinterest",        # social/content platform — 184 postings confirmed live
+    "twilio",           # communications infrastructure — 149 postings confirmed live
 ]
+
+# ── Expanded discovery — Raghav's explicit request 2026-09-12: "i dont want
+# to do only for selected companys... why cant we scratch job openly" ──────
+# Real answer researched that day: Greenhouse has no public cross-company
+# search API (only per-company board endpoints), and this pipeline already
+# tried open Google-search discovery once and got hard-blocked as bot traffic
+# (see ROADMAP.md, 2026-09-09) — replaced with the per-company list above for
+# that exact reason. The closest real alternative: a community-maintained,
+# MIT-licensed company list from github.com/Feashliaa/job-board-aggregator
+# (CC BY-NC 4.0 data — free for this personal, non-commercial use), pulled
+# directly from their repo and saved locally 2026-09-12. 8,317 unique real
+# Greenhouse company slugs — 400x the curated list above.
+#
+# Deliberately NOT queried all at once every run: Greenhouse's public API
+# already showed real read-timeouts at just 23 companies in one run
+# (run_20260912_201312) — hammering 8,317 in one shot risks the same kind of
+# rate-limit/block that ended Google-search discovery. Instead this rotates
+# through fixed-size batches across runs (state tracked in
+# GREENHOUSE_EXPANDED_STATE_FILE), so every run covers new ground without
+# spamming the API, and the whole list gets a full pass roughly every
+# (8317 / GREENHOUSE_EXPANDED_BATCH_SIZE) runs.
+GREENHOUSE_USE_EXPANDED_DISCOVERY = _env("GREENHOUSE_USE_EXPANDED_DISCOVERY", "false").lower() == "true"
+GREENHOUSE_EXPANDED_COMPANIES_FILE = str(BASE_DIR / "data" / "greenhouse_companies_full.json")
+GREENHOUSE_EXPANDED_STATE_FILE = str(BASE_DIR / "data" / "greenhouse_expanded_discovery_state.json")
+GREENHOUSE_EXPANDED_BATCH_SIZE = 150   # companies pulled from the full list per run
 
 # ── Greenhouse skip-cache re-check window ───────────────────────────────────
 # Added 2026-08-30. Root cause of "every run re-processes the same DoorDash

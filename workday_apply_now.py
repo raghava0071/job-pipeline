@@ -1100,21 +1100,25 @@ def handle_intervention(page, kind: str, company: str, job_title: str) -> bool:
         # Then try secure_store
         if not answer:
             answer = secure_store.get_security_answer(q_text)
-        # Fallback for common patterns
+        # Fallback for common patterns — these are only reached if a real
+        # answer isn't already set in secure_store (gitignored, encrypted)
+        # or qa_answers.py (gitignored). Generic placeholders here on
+        # purpose: real security-question answers must never be hardcoded
+        # in tracked source. Configure your own via secure_store instead.
         if not answer:
             q_l = q_text.lower()
             if "work email" in q_l or "email" in q_l:
                 answer = "your_candidate_email@gmail.com"
             elif "city" in q_l and "born" in q_l:
-                answer = "Hyderabad"
+                answer = "Your Birth City"
             elif "pet" in q_l:
-                answer = "Tommy"
+                answer = "Your Pet's Name"
             elif "school" in q_l:
-                answer = "St. Mary's"
+                answer = "Your School"
             elif "street" in q_l or "grew up" in q_l:
-                answer = "Military Trl"
+                answer = "Your Street"
             elif "mother" in q_l or "maiden" in q_l:
-                answer = "Karanam"
+                answer = "Maiden Name"
 
         if answer:
             print(f"          ✅ Answering security question: '{answer}'")
@@ -2076,31 +2080,40 @@ def step_contact_information(page):
     """)
     time.sleep(0.5)
 
-    # Name
-    _fill(page, WD["first_name"], "Raghavendra")
+    # Name — from raghav_profile.PROFILE (falls back to generic placeholders
+    # if PROFILE["name"] is missing/blank, never to a hardcoded real name).
+    from raghav_profile import PROFILE as _profile_name
+    _full_name = _profile_name.get("name", "Your Name").strip()
+    _first_name, _, _last_name = (_full_name.partition(" ") if " " in _full_name
+                                   else (_full_name, "", ""))
+    _fill(page, WD["first_name"], _first_name or "Your")
     time.sleep(0.2)
-    _fill(page, WD["last_name"], "Karanam")
+    _fill(page, WD["last_name"], _last_name or "Name")
     time.sleep(0.2)
 
     # Address — line 1 must be a street address (not city/state)
     _fill(page, WD["address_line1"], _cqa_contact.get("street_address", ""))
     time.sleep(0.2)
-    _fill(page, WD["city"], "City")
+    _fill(page, WD["city"], _cqa_contact.get("city", "City"))
     time.sleep(0.2)
 
     # State dropdown — try countryRegion first (most portals), fall back to
     # stateProvince, then a label-based lookup for portals whose automation-id
     # doesn't match either assumption (now that _select_dropdown's return
     # value actually reflects success instead of always being True).
-    state_filled = _select_dropdown(page, WD["state_btn"], "Florida")
+    # NOTE: add a "state_full" key (e.g. "Florida") to your own COMMON_QA in
+    # raghav_profile.py — Workday's state dropdown needs the full name, not
+    # the "FL"-style abbreviation already stored under "state".
+    _state_full = _cqa_contact.get("state_full", "California")
+    state_filled = _select_dropdown(page, WD["state_btn"], _state_full)
     if not state_filled:
-        state_filled = _select_dropdown(page, 'button[data-automation-id="addressSection_stateProvince"]', "Florida")
+        state_filled = _select_dropdown(page, 'button[data-automation-id="addressSection_stateProvince"]', _state_full)
     if not state_filled:
-        _select_dropdown_by_label(page, "State", "Florida")
+        _select_dropdown_by_label(page, "State", _state_full)
     time.sleep(0.3)
     time.sleep(0.3)
 
-    _fill(page, WD["postal_code"], "33484")
+    _fill(page, WD["postal_code"], _cqa_contact.get("zip", ""))
     time.sleep(0.2)
 
     # Phone
@@ -2188,7 +2201,8 @@ def step_self_identification(page):
 
     # Full name field
     if _exists(page, WD["full_name_input"], timeout=3000):
-        _fill(page, WD["full_name_input"], "Your Name")
+        import raghav_profile as _rp_selfid
+        _fill(page, WD["full_name_input"], _rp_selfid.PROFILE.get("name", "Your Name"))
         time.sleep(0.3)
 
     # Date — click today
@@ -2542,8 +2556,21 @@ def _smart_fill_questions(page, profile_text: str, job_title: str, company: str,
     try:
         import raghav_profile as _rp_wd
         _relocate_fact = "Yes" if _rp_wd.PROFILE.get("relocate", False) else "No"
+        _linkedin_fact = _rp_wd.PROFILE.get("linkedin", "linkedin.com/in/yourusername")
+        _github_fact   = _rp_wd.PROFILE.get("github", "github.com/yourusername")
+        _phone_fact    = _rp_wd.PROFILE.get("phone", "555-555-5555")
+        _city_fact     = _rp_wd.PROFILE.get("location", "City").split(",")[0].strip()
+        _cqa_wd        = getattr(_rp_wd, "COMMON_QA", {})
+        _state_fact    = _cqa_wd.get("state_full", _cqa_wd.get("state", "State"))
+        _zip_fact      = _cqa_wd.get("zip", "")
     except Exception:
         _relocate_fact = "Yes"
+        _linkedin_fact = "linkedin.com/in/yourusername"
+        _github_fact   = "github.com/yourusername"
+        _phone_fact    = "555-555-5555"
+        _city_fact     = "City"
+        _state_fact    = "State"
+        _zip_fact      = ""
     _sponsor_fact = "Yes" if getattr(cfg, "REQUIRES_SPONSORSHIP", False) else "No"
     _auth_fact    = "Yes" if getattr(cfg, "AUTHORIZED_TO_WORK_NOW", True) else "No"
 
@@ -2575,12 +2602,12 @@ def _smart_fill_questions(page, profile_text: str, job_title: str, company: str,
         "us citizen":               "No",
         "green card":               "No",
         "permanent resident":       "No",
-        "linkedin":                 "https://www.linkedin.com/in/yourusername",
-        "github":                   "https://github.com/raghava0071",
-        "phone":                    "(555) 555-5555",
-        "city":                     "City",
-        "state":                    "Florida",
-        "zip":                      "33484",
+        "linkedin":                 _linkedin_fact,
+        "github":                   _github_fact,
+        "phone":                    _phone_fact,
+        "city":                     _city_fact,
+        "state":                    _state_fact,
+        "zip":                      _zip_fact,
         "country":                  "United States of America",
     }
     for f in uncached:
@@ -3476,18 +3503,22 @@ def main():
     _run_log = RunLogger("workday")
 
     # Seed cache with Workday-specific field labels
+    _seed_full_name = full_profile.get("name", "Your Name").strip()
+    _seed_first, _, _seed_last = (_seed_full_name.partition(" ") if " " in _seed_full_name
+                                   else (_seed_full_name, "", ""))
+    _seed_cqa = getattr(rp, "COMMON_QA", {})
     SEED = {
-        "First Name":         "Raghavendra",
-        "Last Name":          "Karanam",
+        "First Name":         _seed_first or "Your",
+        "Last Name":          _seed_last or "Name",
         "Email Address":      cfg.CANDIDATE_EMAIL,
         "Phone Number":       cfg.CANDIDATE_PHONE,
         "Phone":              cfg.CANDIDATE_PHONE,
-        "City":               "City",
-        "State":              "Florida",
-        "Postal Code":        "33484",
-        "Zip Code":           "33484",
+        "City":               full_profile.get("location", "City").split(",")[0].strip(),
+        "State":              _seed_cqa.get("state_full", _seed_cqa.get("state", "State")),
+        "Postal Code":        _seed_cqa.get("zip", ""),
+        "Zip Code":           _seed_cqa.get("zip", ""),
         "Country":            "United States of America",
-        "LinkedIn URL":       "https://www.linkedin.com/in/yourusername",
+        "LinkedIn URL":       full_profile.get("linkedin", "linkedin.com/in/yourusername"),
         "Are you legally authorized to work in the United States?": "Yes",
         "Do you require sponsorship now or in the future?":         "No",
         "Will you now or in the future require sponsorship?":       "No",
