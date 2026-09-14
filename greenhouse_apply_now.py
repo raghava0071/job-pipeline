@@ -3794,6 +3794,23 @@ def main():
                 _run_log.job_skip(title, company, "blocked company", url=url)
                 skipped += 1; return
 
+            # ── Security clearance / citizenship-only check ─────────────────
+            # Added 2026-09-13 — real evidence: run_20260913_205443 applied to
+            # two Bti36021 postings ("Data Scientist - Polygraph Required",
+            # "NLP Engineer - Clearance Required") that scored well on fit but
+            # almost always require US citizenship, which an F-1 OPT/STEM-OPT
+            # candidate can't get. This check already existed in
+            # cfg.CLEARANCE_KEYWORDS and was already wired into
+            # linkedin_apply_now.py/indeed_apply_now.py — it was just never
+            # wired into greenhouse_apply_now.py, the one platform actually in
+            # use. Checks both title and description since "Clearance
+            # Required" showed up directly in the title on one of the two.
+            _clearance_text = f"{title} {jd}".lower()
+            if any(kw in _clearance_text for kw in getattr(cfg, "CLEARANCE_KEYWORDS", ())):
+                print(f"  🚫 Clearance/citizenship-only requirement — skipping: {title} @ {company}")
+                _run_log.job_skip(title, company, "clearance/citizenship required", url=url)
+                skipped += 1; return
+
             staffing, s_reason = is_staffing_or_consultancy(company, jd)
             if staffing:
                 print(f"  ⏭  SKIP staffing/consultancy ({s_reason}): {company}")
