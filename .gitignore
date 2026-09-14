@@ -38,6 +38,13 @@ claude_answers.py
 # maintaining a per-file list that a new log/cache file can silently slip past.
 data/*
 !data/.gitkeep
+# Exception, added 2026-09-13: this is a public, non-personal list of 8,317
+# real Greenhouse company slugs (from github.com/Feashliaa/job-board-aggregator,
+# MIT/CC BY-NC 4.0) that the expanded-discovery feature reads from. Without
+# this exception, anyone who clones the repo gets a working pipeline but the
+# expanded-discovery feature silently has nothing to read — shipping it is
+# what makes GREENHOUSE_USE_EXPANDED_DISCOVERY actually usable out of the box.
+!data/greenhouse_companies_full.json
 # (previously listed here individually — now covered by the blanket rule above,
 # kept as documentation of what's actually personal: apply_log.json,
 # indeed_applied_log.json, workday_applied_log.json, linkedin_applied_log.json,
