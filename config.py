@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.14.38"
+PIPELINE_VERSION = "2.14.39"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -1051,7 +1051,16 @@ GREENHOUSE_COMPANIES = [
 GREENHOUSE_USE_EXPANDED_DISCOVERY = _env("GREENHOUSE_USE_EXPANDED_DISCOVERY", "false").lower() == "true"
 GREENHOUSE_EXPANDED_COMPANIES_FILE = str(BASE_DIR / "data" / "greenhouse_companies_full.json")
 GREENHOUSE_EXPANDED_STATE_FILE = str(BASE_DIR / "data" / "greenhouse_expanded_discovery_state.json")
-GREENHOUSE_EXPANDED_BATCH_SIZE = 150   # companies pulled from the full list per run
+GREENHOUSE_EXPANDED_BATCH_SIZE = 500   # companies pulled from the full list per run
+# Raised 150 -> 500 on 2026-09-13 at Raghav's request (wants 30-50 real
+# applications per run "with no issues"). Real math from run_20260913_205443:
+# 3 applied out of 3,186 jobs scanned across 150 companies — roughly a
+# 1-in-1,000 job hit rate. Reaching 30-50 applications at that same rate
+# would actually need ~2,000+ companies in one run, not 500 — deliberately
+# NOT jumping straight there untested, since a run that size risks the same
+# kind of API timeout seen once before at just 23 companies, and a failure
+# mid-run would lose far more progress. 500 is a controlled ~3.3x step up —
+# confirm this runs clean before raising further toward the real target.
 
 # ── Greenhouse skip-cache re-check window ───────────────────────────────────
 # Added 2026-08-30. Root cause of "every run re-processes the same DoorDash
