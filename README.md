@@ -1,250 +1,88 @@
-# AI-Powered Job Application Pipeline
+# job-pipeline
 
-An end-to-end automated job application system that scrapes live job listings from **LinkedIn**, **Indeed**, and **Workday**, scores them with Claude AI, builds a tailored ATS-optimized resume per job, fills application forms intelligently, and submits — all fully automated on a daily schedule.
+An AI-powered job application pipeline: it discovers real job postings, scores each one against your profile with Claude, builds a tailored ATS-optimized resume per job, fills out the application form intelligently, and submits — with a human-in-the-loop safety net for anything it shouldn't guess at on its own.
 
-> Built in Python · Powered by Claude AI (Anthropic) · Playwright browser automation · Runs 3× daily via macOS launchd
+> Python · [Anthropic Claude](https://www.anthropic.com) · [Playwright](https://playwright.dev) browser automation · MIT licensed
 
 ---
 
 ## Table of Contents
 
-- [Architecture Overview](#architecture-overview)
-- [Pipeline Components](#pipeline-components)
-- [LinkedIn Fake Job Detection — 6-Layer System](#linkedin-fake-job-detection--6-layer-system)
-- [Resume Engine](#resume-engine)
-- [AI Form Filling](#ai-form-filling)
-- [Scheduling](#scheduling)
+- [What actually works today](#what-actually-works-today)
+- [Known limitations](#known-limitations)
+- [Architecture overview](#architecture-overview)
 - [Setup](#setup)
+- [Running it](#running-it)
 - [Configuration](#configuration)
-- [File Structure](#file-structure)
-- [Security & Privacy](#security--privacy)
+- [File structure](#file-structure)
+- [Security & privacy](#security--privacy)
+- [Change management & safety net](#change-management--safety-net)
+- [Roadmap](#roadmap)
 
 ---
 
-## Architecture Overview
+## What actually works today
+
+This project targets four ATS (applicant tracking system) platforms. They are **not** all in the same state, and this README says so plainly rather than pretending otherwise:
+
+| Platform | Status | Notes |
+|---|---|---|
+| **Greenhouse** | ✅ Active, hardened | The real, working core of this project. Guest-apply flow (no account creation needed on most postings), live-tested, submits for real when you pass `--live`. |
+| **Workday** | 🚧 Built, not yet reliable | Full step-walk automation exists (account creation, security questions, multi-step forms) but has never completed a successful live application end-to-end — account creation / email verification is the current blocker. Treat as experimental. |
+| **LinkedIn** | ⏸ Built, disabled by design | Full Easy Apply automation with a 6-layer fake-job filter exists and worked previously. Deliberately turned off (`LINKEDIN_ENABLED = False` in `config.py`) — not worth the ongoing arms race against LinkedIn's bot detection. Code stays in the repo, unmaintained for now. |
+| **Indeed** | ⏸ Built, disabled by design | Same situation as LinkedIn — Cloudflare's anti-bot measures made this not worth maintaining. `INDEED_ENABLED = False`. |
+
+**If you clone this repo, you're really getting a Greenhouse automation tool** that happens to also contain three other platform integrations in various states of completeness. See [ROADMAP.md](ROADMAP.md) for the full, dated history of why each decision was made.
+
+Greenhouse discovery works two ways, and you can use either or both:
+- A curated list of ~30 companies known to post real openings (`GREENHOUSE_COMPANIES` in `config.py`)
+- An optional expanded pool of **8,300+ real Greenhouse company slugs** (`data/greenhouse_companies_full.json`, sourced from the open-source [job-board-aggregator](https://github.com/Feashliaa/job-board-aggregator) project), rotated through in batches so you're not hammering Greenhouse's API with thousands of requests every run. Opt in with `GREENHOUSE_USE_EXPANDED_DISCOVERY=true` in `.env`.
+
+## Known limitations
+
+Two things this pipeline deliberately does **not** try to fully automate:
+
+1. **Email verification codes (OTP).** Some Greenhouse postings send a one-time code to your email mid-application. There's a Gmail-polling mechanism for this (`mail_reader.py`), but it has not been reliably confirmed to catch every real-world case — the exact timing and wording of these prompts varies by company, and it's genuinely hard to guarantee blind. When it fails, the pipeline doesn't fail silently or guess — it falls through to the manual-assist pause below.
+
+2. **Sensitive or judgment-call questions.** Anything the pipeline can't answer truthfully from your own saved data (accommodation requests, unusual legal questions, anything with no safe default) is never auto-filled with a guess. Instead, the browser pauses for **3 minutes** with the form left open, so you can fill in just that field yourself before it continues. This is an intentional design choice, not a bug — the alternative (inventing an answer) is worse.
+
+## Architecture overview
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        DAILY SCHEDULE (launchd)                      │
-│              Morning 9am · Afternoon 2pm · Evening 6pm               │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │
-                    run_all.py  (orchestrator)
-                    /          |           \
-                  /            |             \
-    linkedin_apply_now.py  indeed_apply_now.py  workday_apply_now.py
-           │                    │                      │
-           ▼                    ▼                      ▼
-    ┌─────────────────────────────────────────────────────────┐
-    │                  FAKE JOB FILTER (6 layers)              │
-    │          Zero API cost — runs before any Claude call     │
-    └─────────────────────────────────────────────────────────┘
-           │
-           ▼  (only real jobs reach here)
-    ┌─────────────────────────────────────────────────────────┐
-    │              claude_engine.py  (AI scoring)              │
-    │    score_fit() — LinkedIn ≥80%  |  Indeed/WD ≥62%       │
-    └─────────────────────────────────────────────────────────┘
-           │
-           ▼  (only high-fit jobs reach here)
-    ┌─────────────────────────────────────────────────────────┐
-    │            resume_builder.py  (ATS resume)               │
-    │    jd_parser.py → keyword extraction → DOCX generation  │
-    │    Verified ≥98% ATS keyword coverage per job            │
-    └─────────────────────────────────────────────────────────┘
-           │
-           ▼
-    ┌─────────────────────────────────────────────────────────┐
-    │         Playwright browser automation (form fill)        │
-    │    qa_answers → claude_answers → SQLite cache → Claude   │
-    │    79% cache hit rate · 3x fewer API calls               │
-    └─────────────────────────────────────────────────────────┘
-           │
-           ▼
-    ┌─────────────────────────────────────────────────────────┐
-    │              notifier.py  (Gmail alerts)                 │
-    │    Per-apply email + daily session summary               │
-    └─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                    Company discovery                             │
+│   Curated list (config.py) + optional expanded 8,300-company     │
+│   rotation, both hitting Greenhouse's own public per-company      │
+│   boards-api.greenhouse.io/v1/boards/<company>/jobs endpoint      │
+└───────────────────────────┬────────────────────────────────────────┘
+                            ▼
+┌──────────────────────────────────────────────────────────────────┐
+│         Title / domain relevance filter + fit scoring            │
+│   is_target_role_title() cuts obvious mismatches for free,       │
+│   then claude_engine.score_fit() (Claude Haiku) scores the rest  │
+└───────────────────────────┬────────────────────────────────────────┘
+                            ▼  (only jobs above ATS_FIT_THRESHOLD reach here)
+┌──────────────────────────────────────────────────────────────────┐
+│              resume_builder.py + cover_letter.py                 │
+│   jd_parser.py extracts keywords → tailored .docx per job        │
+└───────────────────────────┬────────────────────────────────────────┘
+                            ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                  3-tier form-fill answer system                  │
+│   1. qa_answers.py / answer_bank.py — your own saved answers     │
+│   2. claude_answers.py — Claude's past answers, human-reviewable │
+│   3. Claude API (Haiku) — only for genuinely new fields          │
+└───────────────────────────┬────────────────────────────────────────┘
+                            ▼
+┌──────────────────────────────────────────────────────────────────┐
+│     Completeness gate → Submit (--live only) or manual-assist    │
+│   A required field with no truthful answer never gets a guess — │
+│   it triggers the 3-minute manual-assist pause instead.          │
+└───────────────────────────┬────────────────────────────────────────┘
+                            ▼
+              pipeline_logger.py (structured run log)
+                     + send_summary.command (email)
 ```
-
----
-
-## Pipeline Components
-
-### `run_all.py` — Orchestrator
-Runs all three platform scrapers in sequence. Handles per-platform daily limits, logging, and session summary notifications. Called by launchd 3× daily.
-
-### `linkedin_apply_now.py` — LinkedIn Engine
-Scrapes LinkedIn job search results using Playwright, applies the 6-layer fake-job filter, scores with Claude, builds a custom resume, and submits via Easy Apply — all in a single browser session without navigating away from the search page.
-
-- Daily limit: 50 applications
-- Fit threshold: 80% (stricter than other platforms — quality over quantity)
-- Easy Apply only — external Workday links are queued for the Workday engine
-
-### `indeed_apply_now.py` — Indeed Engine
-Searches Indeed across 40+ query terms, applies Cloudflare-aware delays, scores jobs, and submits via Indeed's Smart Apply flow.
-
-- Daily limit: 150 applications
-- Fit threshold: 62%
-- Handles multi-step forms with resume upload and Claude form fill per job
-
-### `workday_apply_now.py` — Workday Engine
-Applies to enterprise Workday ATS portals (Capital One, Booz Allen, Deloitte, etc.) via Google search. Creates and reuses Workday accounts per company, handles security question flows.
-
-- Per-company account management with encrypted credentials
-- Handles 30-step forms with full Claude AI form completion
-
-### `claude_engine.py` — AI Intelligence Layer
-- `score_fit()` — scores candidate vs job match (Haiku model, cached by JD hash)
-- `local_prefilter()` — zero-cost keyword pre-check before any API call
-- `build_profile_summary()` — builds structured candidate context for scoring
-- `tailor_bullets()` — rewrites resume bullets to match JD language
-
-### `resume_builder.py` — ATS Resume Engine
-Generates a Word (.docx) resume per job with:
-- Keyword extraction from JD via `jd_parser.py`
-- Synonym-aware matching (PySpark ↔ Apache Spark, ETL ↔ data pipelines, etc.)
-- Verified ≥98% ATS keyword coverage (gap-fill section auto-added if needed)
-- BEFORE → AFTER ATS score printed per run
-
-### `jd_parser.py` — Job Description Parser
-Extracts required skills, injectable keywords, and ATS coverage score from raw JD text. Feeds into the resume builder.
-
-### `answer_cache.py` — Answer Cache (3-Tier)
-Lookup order per form field:
-1. `qa_answers.py` — manually curated master Q&A (highest priority)
-2. `claude_answers.py` — Claude's past answers (auto-saved, human-reviewable)
-3. SQLite cache — key-value fallback
-
-79% cache hit rate → 3× fewer Claude API calls per run.
-
-### `notifier.py` — Gmail Notification System
-Sends per-application email (company, title, fit score, resume attached) and a daily session summary with applied/skipped/failed counts.
-
-### `pipeline_logger.py` — Structured Run Logging
-Per-run structured log with job-level detail: applied, skipped (with reason), failed, scores. Used for daily summary reports.
-
-### `salary_helper.py` — Salary Intelligence
-Parses posted salary ranges from JD text and picks the optimal answer within the candidate's acceptable range.
-
-### `tracker.py` — Application Tracker
-Maintains an Excel spreadsheet of all applications with status, company, title, fit score, resume used, and platform.
-
----
-
-## LinkedIn Fake Job Detection — 6-Layer System
-
-Every LinkedIn job passes through 6 layers **before any Claude API call is made** (zero token cost). A job is submitted only if it clears every layer.
-
-```
-Job Card Loaded
-      │
-      ├── Senior/Lead Filter ──────── "senior", "lead", "principal" in title → SKIP
-      ├── Role Relevance Filter ───── no data/tech keyword in title → SKIP
-      │
-      ├── LAYER 0: LinkedIn Native Signals
-      │     ├── Safety warning banner on job → SKIP (LinkedIn's own fraud flag)
-      │     ├── Company followers < 50 → SKIP
-      │     └── Company employees < 5 → SKIP
-      │
-      ├── LAYER 1: Title Signals
-      │     ├── Off-target roles ("data entry", "scheduler", "HR coordinator") → SKIP
-      │     └── Bot-generated typos ("databrick ", "data analys ", "data enginer") → SKIP
-      │
-      ├── LAYER 2: Company Name Signals
-      │     ├── 70+ known bad actors (blocklist) → SKIP
-      │     ├── Commonwealth/African suffixes (Limited, Ltd, Pvt Ltd, SME Ltd) → SKIP
-      │     ├── Job-aggregator company names ("Jobs in United States...") → SKIP
-      │     └── Non-ASCII company name → SKIP
-      │
-      ├── LAYER 3: Description Signals
-      │     ├── Fraud red flags (WhatsApp, Telegram, wire transfer, SSN required) → SKIP
-      │     ├── Body-shop/offshore language (C2C, bench candidates, current CTC) → SKIP
-      │     └── Non-US location in location field → SKIP
-      │
-      ├── LAYER 4: Quality Heuristics
-      │     ├── Description < 200 chars → SKIP
-      │     ├── Fewer than 2 tech tool names in description → SKIP
-      │     └── Applicant count ≥ 400 (stale bait posting) → SKIP
-      │
-      ├── Description Fingerprint Check
-      │     └── Same description from 2+ different companies → SKIP (scam template)
-      │
-      ├── Company Trust Score (0–100)
-      │     ├── Whitelisted known company → score 100, skip remaining checks
-      │     ├── Score < 40 → SKIP (low-trust company)
-      │     └── Score 30–70 (grey zone) → Claude Legitimacy Check
-      │               ├── Claude says FAKE → SKIP
-      │               └── Claude says REAL → proceed to fit scoring
-      │
-      └── Claude Fit Scoring (threshold: 80%)
-            ├── Score < 80% → SKIP
-            └── Score ≥ 80% → BUILD RESUME → APPLY ✅
-```
-
-### Company Trust Score Breakdown
-
-| Signal | Points |
-|--------|--------|
-| Whitelisted known company | +100 (instant pass) |
-| LinkedIn verified badge | +35 |
-| 500+ followers | +20 |
-| 100–500 followers | +10 |
-| 50–100 followers | +5 |
-| < 50 followers | −40 |
-| 200+ employees | +20 |
-| 50–200 employees | +10 |
-| 5–50 employees | +5 |
-| < 5 employees | −40 |
-| LinkedIn safety warning | −100 (instant 0) |
-| Base score | 50 |
-
----
-
-## Resume Engine
-
-Every application gets its own custom resume. The build process:
-
-1. Parse the JD for required keywords (`jd_parser.py`)
-2. Map synonyms — e.g. PySpark = Apache Spark, ETL = data pipelines, ADF = Azure Data Factory
-3. Score current resume keyword coverage against JD requirements
-4. Rewrite experience bullets to naturally mirror JD language
-5. Auto-add a gap-fill "Technical Proficiencies" section for missing keywords
-6. Verify final ATS score ≥ 98% before saving the file
-
-Output: `CandidateName_CompanyName_JobTitle.docx` saved to `output/resumes/`
-
----
-
-## AI Form Filling
-
-For each form step, the pipeline uses a 3-tier answer system:
-
-1. **Check `qa_answers.py`** — manually curated answers (salary, work auth, address, visa status). Highest priority, always correct.
-2. **Check `claude_answers.py`** — Claude's past answers saved from prior runs. Human-reviewable and editable.
-3. **Check SQLite cache** — key-value fallback from older runs.
-4. **Call Claude (Haiku)** — only for fields not found in any cache. Returns a JSON map of all uncached fields in a single API call (no per-field round trips).
-5. **Save new answers** — Claude's answers are saved back to `claude_answers.py` so future runs use cache instead.
-6. **Pre-submit Claude review** — before clicking Submit, Claude reads the full review page and checks for blank required fields or obviously wrong answers.
-
----
-
-## Scheduling
-
-Three daily runs via macOS `launchd`:
-
-| Run | Time | Platform Focus |
-|-----|------|---------------|
-| Morning | 9:00 AM | LinkedIn + Indeed |
-| Afternoon | 2:00 PM | Indeed + Workday |
-| Evening | 6:00 PM | All platforms |
-
-Install the schedule:
-```bash
-bash setup_scheduler.sh
-```
-
----
 
 ## Setup
 
@@ -257,224 +95,162 @@ brew install python@3.11
 # Install dependencies
 pip install -r requirements.txt
 
-# Install Playwright browser
+# Install Playwright's browser
 playwright install chromium
 ```
 
 ### First-time configuration
 
 ```bash
-# 1. Copy and fill in your candidate profile
+# 1. Copy and fill in your own candidate profile
 cp raghav_profile.example.py raghav_profile.py
-# Edit raghav_profile.py — add your name, education, experience, skills
+# Edit raghav_profile.py — this file is gitignored, your real info never leaves your machine
 
-# 2. Copy and fill in environment variables
+# 2. Copy and fill in your environment variables
 cp .env.example .env
-# Edit .env — add your Anthropic API key, Gmail credentials
+# Edit .env — Anthropic API key, Gmail app password, home address, etc.
 
-# 3. Validate setup
+# 3. Validate the setup before running anything
 python preflight_check.py
 ```
 
-### Running the pipeline
+Both `raghav_profile.py` and `.env` are already listed in `.gitignore` — nothing you put in them will ever be committed.
+
+## Running it
+
+Greenhouse is the primary, supported entry point:
 
 ```bash
-# Dry run — scores + builds resumes, no actual submission
-python linkedin_apply_now.py --dry-run --limit 5
+# Dry run (default, even without the flag) — scores jobs, builds resumes,
+# fills forms, stops right before the Submit click. No application is ever sent.
+python3 greenhouse_apply_now.py --limit 5
 
-# Live run with application limit
-python linkedin_apply_now.py --limit 10
+# Live run — actually submits. Test small first.
+python3 greenhouse_apply_now.py --live --limit 3
 
-# Full pipeline (all platforms)
-python run_all.py
+# Test one specific job posting directly, skipping discovery entirely
+python3 greenhouse_apply_now.py --url "https://job-boards.greenhouse.io/company/jobs/12345" --live
 ```
 
----
+`--limit` caps how many applications get **submitted** in that run — it has nothing to do with how many jobs get scanned or scored; the pipeline typically screens hundreds of postings per run and only a small fraction clear the fit-score bar.
+
+Workday, LinkedIn, and Indeed each have their own `_apply_now.py` entry point with the same `--dry-run`/`--live`/`--limit` pattern, but per the table above, only Workday is worth experimenting with right now, and even that isn't reliable yet.
 
 ## Configuration
 
-All tunable settings are in `config.py` — no code changes needed for common adjustments.
-
-### Key settings
+All tunables live in `config.py` — no code changes needed for common adjustments.
 
 ```python
-# Fit score thresholds
-FIT_THRESHOLD          = 62   # Indeed/Workday minimum (%)
-LINKEDIN_FIT_THRESHOLD = 80   # LinkedIn minimum (%) — stricter, 50 apps/day
+# Version — printed in every run's log, bumped with every meaningful change
+PIPELINE_VERSION = "2.14.37"
 
-# Daily apply limits
-LINKEDIN_DAILY_LIMIT   = 50
-MAX_APPLIES_PER_RUN    = 150
+# Platform toggles
+GREENHOUSE_ENABLED = True
+WORKDAY_ENABLED    = False
+LINKEDIN_ENABLED   = False
+INDEED_ENABLED     = False
 
-# Fake job detection thresholds (all tunable here)
-LINKEDIN_MIN_COMPANY_FOLLOWERS  = 50    # fewer → skip
-LINKEDIN_MIN_COMPANY_EMPLOYEES  = 5     # fewer → skip
-LINKEDIN_MIN_TRUST_SCORE        = 40    # below → skip
-LINKEDIN_LEGITIMACY_CHECK       = True  # Claude legitimacy check for grey zone
-LINKEDIN_MAX_APPLICANTS         = 400   # stale posting threshold
+# Fit-score gate — a job must score at or above this to get a resume built
+ATS_FIT_THRESHOLD = 60
 
-# ATS resume target
-ATS_TARGET_SCORE = 98   # minimum keyword coverage % before resume is saved
+# Expanded Greenhouse company discovery (opt-in via .env)
+GREENHOUSE_USE_EXPANDED_DISCOVERY = False   # set true in .env to enable
+GREENHOUSE_EXPANDED_BATCH_SIZE    = 150     # companies checked per run when enabled
 ```
 
-### Adding a fake company to the blocklist
-
-In `config.py`, add to `FAKE_JOB_COMPANY_WORDS`:
+### Adding a company to the curated list
 
 ```python
-FAKE_JOB_COMPANY_WORDS = {
+GREENHOUSE_COMPANIES = [
     ...
-    "new scam company name",  # lowercase, partial match
-}
+    "company-greenhouse-slug",   # the token in job-boards.greenhouse.io/<slug>
+]
 ```
 
-### Adding a trusted company to the whitelist
-
-In `config.py`, add to `COMPANY_WHITELIST`:
-
-```python
-COMPANY_WHITELIST = {
-    ...
-    "company name",  # lowercase — skips all fake-job checks for this company
-}
-```
-
----
-
-## File Structure
+## File structure
 
 ```
 job_pipeline/
 │
-├── run_all.py                    # Main orchestrator
+├── greenhouse_apply_now.py       # Primary, active entry point
+├── workday_apply_now.py          # Built, not yet reliable — see Known Limitations
+├── linkedin_apply_now.py         # Built, disabled by design
+├── indeed_apply_now.py           # Built, disabled by design
+├── run_all.py                    # Legacy LinkedIn+Indeed orchestrator — not the main path anymore
 │
-├── linkedin_apply_now.py         # LinkedIn scraper + Easy Apply bot
-├── indeed_apply_now.py           # Indeed scraper + Smart Apply bot
-├── workday_apply_now.py          # Workday ATS bot
-│
-├── claude_engine.py              # AI scoring, pre-filter, bullet tailoring
+├── claude_engine.py              # AI scoring, profile summary, cover-letter drafting
 ├── resume_builder.py             # ATS-optimized Word resume generator
-├── jd_parser.py                  # JD keyword extractor
+├── jd_parser.py                  # Job description keyword extractor
 ├── cover_letter.py               # Cover letter generator
 │
-├── answer_cache.py               # SQLite answer cache (3-tier lookup)
-├── salary_helper.py              # Salary range parser + answer picker
-├── secure_store.py               # Encrypted credential storage
-├── pipeline_logger.py            # Structured per-run logging
-├── notifier.py                   # Gmail notification system
+├── qa_answers.py                 # Your manually curated Q&A (gitignored)
+├── answer_bank.py                # Human-confirmed exact-match answers (gitignored data)
+├── claude_answers.py             # Claude's auto-saved past answers (gitignored)
+├── answer_cache.py               # SQLite fallback cache
+├── mail_reader.py                # Gmail IMAP polling for OTP/verify-link emails
+├── secure_store.py                # Encrypted credential storage (Workday accounts, etc.)
+├── pipeline_logger.py            # Structured per-run JSON logging
+├── salary_helper.py               # Salary range parsing + answer selection
 ├── tracker.py                    # Excel application tracker
-├── preflight_check.py            # Environment + credential validator
+├── preflight_check.py            # Pre-run environment/import validator
 │
-├── config.py                     # All tunable settings (single source of truth)
+├── config.py                     # All tunable settings — single source of truth
 ├── raghav_profile.example.py     # Candidate profile template → copy to raghav_profile.py
 ├── .env.example                  # Environment variable template → copy to .env
 │
-├── requirements.txt              # Python dependencies
-├── setup_scheduler.sh            # Install macOS launchd schedule
+├── requirements.txt
+├── safe_update.sh / snapshot.sh  # Local-first safety workflow (see below)
 │
-├── data/                         # Runtime data — gitignored
-│   ├── apply_log.json            # Full application history
-│   ├── desc_fingerprints.json    # Scam template fingerprint store
-│   └── *.log                     # Run logs
-│
-└── output/                       # Generated files — gitignored
-    ├── resumes/                  # Per-job tailored resumes (.docx)
-    └── cover_letters/            # Per-job cover letters (.docx)
+└── data/                         # Runtime data — gitignored except .gitkeep and
+                                   # greenhouse_companies_full.json (public company list)
 ```
 
----
+## Security & privacy
 
-## Security & Privacy
+**Never committed to this repo** (all gitignored):
 
-**What is never committed to this repo:**
-
-| File | Reason |
-|------|--------|
+| File / pattern | Reason |
+|---|---|
 | `raghav_profile.py` | Real name, email, phone, address, work history |
-| `.env` | API keys, Gmail password, Workday password, encryption key |
-| `qa_answers.py` | Personal form answers (salary, address, visa status) |
-| `claude_answers.py` | Auto-saved Claude answers — may contain personal data |
-| `data/apply_log.json` | Full application history |
-| `data/*.xlsx` | Application tracker with personal job search data |
-| `.indeed_session/` | Browser cookies with active login sessions |
-| `.linkedin_session/` | Same |
-| `output/resumes/` | Personal resume documents |
-| `*.docx`, `*.pdf` | Personal documents |
+| `.env` | API keys, Gmail app password, Workday password |
+| `qa_answers.py`, `claude_answers.py`, `answer_bank.py` | Personal form answers |
+| `data/*` (except `.gitkeep` and the public company list) | Application logs, run history, crash logs — anything runtime-generated |
+| `.*_session/` and any Chrome-profile-shaped directory | Browser cookies, login tokens, saved passwords |
+| `*.docx`, `*.pdf` | Generated resumes/cover letters and any personal documents |
 
-All personal data stays local. The repo contains only pipeline logic. To use this for yourself, copy `raghav_profile.example.py` → `raghav_profile.py` and fill in your own information.
+To use this for yourself: copy `raghav_profile.example.py` → `raghav_profile.py` and `.env.example` → `.env`, then fill in your own information. Nothing you enter in either file ever gets pushed anywhere.
 
----
+If you're auditing this repo: as of `v2.14.36`, both the current tree and the full git history have been scrubbed of the original author's personal data — see the `[2.14.35]`/`[2.14.36]` entries in `CHANGELOG.md` for exactly what was found and fixed.
 
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Browser automation | Playwright (Chromium) |
-| AI scoring & form fill | Anthropic Claude (Haiku + Sonnet) |
-| Resume generation | python-docx |
-| Answer caching | SQLite + in-memory dict |
-| Scheduling | macOS launchd |
-| Notifications | Gmail SMTP |
-| Data storage | JSON + Excel (openpyxl) |
-| Language | Python 3.11+ |
-
----
-
-## Change Management & Safety Net
-
-The pipeline uses a local-first safety workflow — no internet required for day-to-day protection. GitHub is a secondary backup used when explicitly triggered.
-
-### Before making any change
+## Try it right now — 3 commands
 
 ```bash
-bash safe_update.sh start "describe what you're trying"
-# Creates an experiment branch — main stays untouched
+git clone git@github.com:raghava0071/job-pipeline.git && cd job-pipeline
+pip install -r requirements.txt && playwright install chromium
+cp raghav_profile.example.py raghav_profile.py && cp .env.example .env
 ```
+Fill in the two files above with your own info, then run `python preflight_check.py` followed by `python3 greenhouse_apply_now.py --limit 3` (dry-run by default — nothing gets submitted until you add `--live`).
 
-### After the change works
+## Change management & safety net
 
-```bash
-# 1. Bump PIPELINE_VERSION in config.py  (e.g. 1.0.0 → 1.0.1)
-# 2. Log it in CHANGELOG.md
-# 3. Merge back to main:
-bash safe_update.sh keep
-```
-
-### If the change breaks something
+Local-first — no internet required for day-to-day protection.
 
 ```bash
-bash safe_update.sh discard
-# Back to last working state instantly — no data lost
-```
+# Before making any change
+bash safe_update.sh start "describe what you're trying"   # creates an experiment branch
 
-### Save to GitHub (second line of defense)
+# After the change works
+#  1. Bump PIPELINE_VERSION in config.py
+#  2. Log it in CHANGELOG.md
+bash safe_update.sh keep                                   # merges back to main, local only
 
-```bash
+# If the change breaks something
+bash safe_update.sh discard                                 # back to last working state, instantly
+
+# Push to GitHub (secondary backup)
 bash snapshot.sh --push
 ```
 
-### Quick reference
+## Roadmap
 
-| Command | What it does |
-|---|---|
-| `bash safe_update.sh start "desc"` | Create experiment branch, protect main |
-| `bash safe_update.sh keep` | Merge experiment → main (local only) |
-| `bash safe_update.sh discard` | Throw away experiment, back to main |
-| `bash safe_update.sh status` | See current branch + last commit |
-| `bash snapshot.sh` | Save locally (no internet needed) |
-| `bash snapshot.sh --push` | Save locally + push to GitHub |
-| `python preflight_check.py` | Health check before any run |
-| `python run_all.py --dry-run` | Test run — no actual submissions |
-
-`PIPELINE_VERSION` in `config.py` is printed in every log so you always know which version ran. Bump it with every meaningful change and record it in `CHANGELOG.md`.
-
----
-
-## Stats
-
-- **Platforms:** LinkedIn · Indeed · Workday
-- **Daily capacity:** ~200+ applications across all platforms
-- **Fake job block rate:** ~95%+ caught before any API call
-- **ATS coverage:** ≥98% verified per resume
-- **Cache hit rate:** ~79% (3× fewer Claude API calls)
-- **Form fill:** Pre-submit Claude review on every application with novel questions
+See [ROADMAP.md](ROADMAP.md) for the full, dated priority order and the real history behind each platform's status above — including exactly what's blocking Workday, why LinkedIn/Indeed were paused, and what's planned next (Lever, Ashby).
