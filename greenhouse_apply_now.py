@@ -4024,17 +4024,44 @@ def main():
         if not companies:
             print("  ⚠  config.GREENHOUSE_COMPANIES is empty — nothing to check. "
                   "Add company board tokens (the slug in their Greenhouse URL).")
-        for company_token in companies:
+        # ── Real timing instrumentation ───────────────────────────────────────
+        # Added 2026-09-15 after a 9-hour run's slow spots turned out to be
+        # unreconstructable after the fact — the debug log had zero
+        # timestamps, so three different attempts to infer where the time
+        # went (a logged field, list order, run-log timestamps) each gave a
+        # different, contradictory answer. Rather than guess again, this
+        # prints the REAL wall-clock cost of the two things that could
+        # plausibly hang: a single company's API fetch, and a single job's
+        # full processing (scoring/resume/form-fill/manual-assist). Cheap to
+        # keep on always — a handful of extra print() calls per company is
+        # nothing next to the actual API/browser work already happening.
+        _run_started_wall = time.time()
+        for _co_idx, company_token in enumerate(companies):
             if applied >= args.limit:
                 break
+            _co_t0 = time.time()
             jobs = _fetch_greenhouse_jobs_for_company(company_token)
+            _co_fetch_s = time.time() - _co_t0
+            if _co_fetch_s > 5:
+                print(f"  ⏱  SLOW FETCH — {company_token}: {_co_fetch_s:.1f}s "
+                      f"(company {_co_idx+1}/{len(companies)}, "
+                      f"{(time.time()-_run_started_wall)/60:.1f} min into run)")
             for job in jobs:
                 if applied >= args.limit:
                     break
+                _job_t0 = time.time()
                 try:
                     _process_job(job)
                 except Exception as e:
                     print(f"  ⚠  Job error (continuing): {e}")
+                _job_s = time.time() - _job_t0
+                if _job_s > 30:
+                    print(f"  ⏱  SLOW JOB — {job.get('company','?')} | {job.get('title','?')[:50]}: "
+                          f"{_job_s:.1f}s ({_job_s/60:.1f} min), "
+                          f"{(time.time()-_run_started_wall)/60:.1f} min into run)")
+            if _co_idx and _co_idx % 25 == 0:
+                print(f"  ⏱  Progress: {_co_idx+1}/{len(companies)} companies checked, "
+                      f"{(time.time()-_run_started_wall)/60:.1f} min elapsed")
 
         browser.close()
 
