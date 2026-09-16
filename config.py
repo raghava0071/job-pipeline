@@ -9,7 +9,7 @@
 #   MAJOR — big structural change (new platform, new flow)
 #   MINOR — new feature or filter added
 #   PATCH — small fix or tuning
-PIPELINE_VERSION = "2.14.40"
+PIPELINE_VERSION = "2.14.41"
 
 # Minimum seconds after a CAPTCHA is first detected before a "solved"
 # declaration is trusted, regardless of which signal claims it — added
@@ -256,6 +256,23 @@ CLEARANCE_KEYWORDS = {
     "no opt", "no cpt", "no visa", "no sponsorship", "itar",
     "us person", "us persons only",
 }
+
+# ── PhD-track title signal ────────────────────────────────────────────────────
+# Added 2026-09-15 — real evidence: Figma's "Data Scientist, Core Data - PhD
+# (2026)" scored 81% fit and got a full resume built + 14 fields filled
+# (893s) before being correctly stopped by the required PhD-enrollment
+# questions — a real education-requirement mismatch (Raghav has a Master's,
+# not a PhD) that the fit-scoring doesn't hard-penalize the way it does
+# clearance/citizenship. Checked every PhD-required posting seen in 2 days of
+# real logs (Figma, Docugami "Data Science PhD Intern", Didi "Motion Planning
+# Engineer (PhD, Intern)", Chicago Trading Campus "Systematic Quantitative
+# Researcher - PhD", Charles River Associates "(2027 PhD/ABD graduates)...")
+# — every single one had "PhD" literally in the job TITLE, never only buried
+# in the description. Deliberately title-only, not description-based: a JD
+# that merely mentions "PhD preferred" or "PhD a plus" as a bonus (not the
+# title itself) should NOT be excluded, since that's a real, gradeable case
+# where Raghav could still be competitive.
+PHD_TITLE_SIGNALS = {"phd", "ph.d"}
 
 # ── Title typo signals — spam postings routinely misspell role names ──────────
 # These exact substrings in the job title (lowercased) mark it as bot-generated.

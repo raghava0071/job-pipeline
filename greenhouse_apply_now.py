@@ -3805,6 +3805,19 @@ def main():
             if sk in seen:
                 return
             seen.add(sk)
+
+            # ── PhD-track title check ────────────────────────────────────────
+            # Added 2026-09-15 — see cfg.PHD_TITLE_SIGNALS for the real
+            # evidence (Figma, Docugami, Didi, Chicago Trading Campus, Charles
+            # River Associates — every PhD-required posting in 2 days of real
+            # logs had "PhD" literally in the title). Checked BEFORE the
+            # senior/domain check below since it's the same cheap, instant,
+            # title-only cost — no resume gets built for a role Raghav is
+            # structurally ineligible for (Master's, not PhD).
+            if title and any(kw in title.lower() for kw in getattr(cfg, "PHD_TITLE_SIGNALS", ())):
+                _run_log.job_skip(title, company, "PhD-track role (no PhD)", url=url)
+                skipped += 1; return
+
             if title and (not is_good_level(title, jd) or not is_relevant_domain(title)):
                 _run_log.job_skip(title, company, "senior/lead or off-domain title", url=url)
                 skipped += 1; return
