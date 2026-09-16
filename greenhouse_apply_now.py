@@ -1734,6 +1734,24 @@ def _known_factual_yes_no(label: str, company: str) -> str | None:
     if "applied" in l and any(p in l for p in ("before", "previously", "prior", "months", "past")):
         return "Yes" if _previously_applied_to_company(company) else "No"
 
+    # "Are you related to / do you know anyone at [Company]?" style questions —
+    # added 2026-09-15 at Raghav's explicit instruction: "for this question
+    # can answer 'no' Are you related to/do you know anyone at [Company]?".
+    # Real evidence this was needed: this exact question class showed up
+    # worded differently at Edmentum/Apex Learning, Cargomatic, Gleanwork
+    # (x2), and CCAH's "current or former employee of any of the following
+    # state agencies" variant — all currently true "No" answers (he has no
+    # relatives or acquaintances at any of these, and no history working for
+    # any state agency, per raghav_profile.py's real EMPLOYERS_WORKED_AT
+    # list) but with no home to resolve from, so they blocked otherwise-good
+    # applications (fit scores 70-99%) as "no truthful answer available".
+    # Deliberately a company-agnostic rule (not one hardcoded entry per
+    # company) so it covers the whole question class going forward.
+    if (("related to" in l or "relative of" in l) and ("employee" in l or "employed" in l)) \
+       or ("know anyone" in l and ("current" in l or "employ" in l or "work" in l)) \
+       or ("current or former employee" in l):
+        return "No"
+
     # "Do you have N+ years of <skill> experience?" — answered HONESTLY
     # against the real years-of-experience figures, never a blind "Yes".
     # FIXED 2026-08-26 — two real overclaiming risks found while diagnosing
@@ -2328,14 +2346,23 @@ def _smart_fill_greenhouse_fields(page, job_title: str, company: str, jd_text: s
         # fabricated skills/experience claim would be.
         if category == "source_question":
             real_options = f.get("options", [])
+            # "referral" deliberately EXCLUDED from both the preference list
+            # and the blind fallback below — added 2026-09-15 at Raghav's
+            # explicit instruction ("can pick any of the options over there
+            # expect referal"). Answering "Referral" would imply a specific
+            # person referred him, which isn't true and invites a natural
+            # follow-up ("who?") this pipeline has no truthful answer for —
+            # unlike LinkedIn/Indeed/Glassdoor/etc., which assert nothing
+            # that could be false.
             chosen = None
             for pref in ("linkedin", "indeed", "glassdoor", "job board", "google",
-                          "job posting", "referral", "event", "conference", "news"):
-                chosen = next((o for o in real_options if pref in str(o).lower()), None)
+                          "job posting", "event", "conference", "news"):
+                chosen = next((o for o in real_options
+                               if pref in str(o).lower() and "referral" not in str(o).lower()), None)
                 if chosen:
                     break
             if not chosen and real_options:
-                chosen = real_options[0]
+                chosen = next((o for o in real_options if "referral" not in str(o).lower()), None)
             if chosen:
                 answers[lbl] = chosen
                 print(f"             ✔ SOURCE  '{lbl}' → '{chosen}' (low-stakes, any real "
